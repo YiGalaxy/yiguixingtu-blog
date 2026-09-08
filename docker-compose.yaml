@@ -1,0 +1,21 @@
+services:
+  mysql:
+    image: mysql:8
+    container_name: yiguixingtu-mysql
+    environment:
+      MYSQL_DATABASE: yiguixingtu
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+  redis:
+    image: redis:7
+    container_name: yiguixingtu-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+volumes:
+  mysql_data:
+  redis_data:

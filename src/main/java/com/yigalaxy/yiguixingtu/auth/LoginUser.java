@@ -51,23 +51,6 @@ public class LoginUser implements UserDetails {
         return user.getUsername();
     }
 
-    // 下面几个"账号状态"判断，先都返回 true；真正用到的是 isEnabled（账号是否启用）
-
-    @Override
-    public boolean isAccountNonExpired() {
-        return true;
-    }
-
-    @Override
-    public boolean isAccountNonLocked() {
-        return true;
-    }
-
-    @Override
-    public boolean isCredentialsNonExpired() {
-        return true;
-    }
-
     /**
      * 账号是否启用：对应我们 user 表的 status 字段（1=启用, 0=禁用）
      */

@@ -30,45 +30,76 @@
         <java.version>17</java.version>
     </properties>
     <dependencies>
-        <!-- Spring Boot Web依赖 -->
+        <!-- ==================== Web 相关 ==================== -->
+        <!-- Spring Boot Web 依赖 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>
 
-        <!-- Spring Boot 测试依赖 -->
+        <!-- ==================== 测试相关 ==================== -->
+        <!-- Spring Boot Web 测试依赖 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
             <scope>test</scope>
         </dependency>
 
-        <!-- MyBatis-Plus依赖 -->
+        <!-- ==================== ORM 框架（MyBatis-Plus） ==================== -->
+        <!-- MyBatis-Plus Spring Boot 4 启动器 -->
         <dependency>
             <groupId>com.baomidou</groupId>
             <artifactId>mybatis-plus-spring-boot4-starter</artifactId>
             <version>3.5.17</version>
         </dependency>
-
+        <!-- MyBatis-Plus SQL 解析器（分页/多租户支持） -->
         <dependency>
             <groupId>com.baomidou</groupId>
             <artifactId>mybatis-plus-jsqlparser</artifactId>
             <version>3.5.17</version>
         </dependency>
 
-        <!-- MySQL依赖 -->
+        <!-- ==================== 数据库驱动（MySQL） ==================== -->
+        <!-- MySQL 驱动 -->
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Redis依赖 -->
+        <!-- ==================== 缓存（Redis） ==================== -->
+        <!-- Spring Boot Redis 依赖 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- ==================== 认证安全（Spring Security + JWT） ==================== -->
+        <!-- 完整 Spring Security（含 BCrypt、过滤器链、认证管理器） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <!-- JWT API（编译期依赖） -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>0.12.6</version>
+        </dependency>
+        <!-- JWT 实现（运行时依赖） -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>0.12.6</version>
+            <scope>runtime</scope>
+        </dependency>
+        <!-- JWT JSON 序列化（运行时依赖） -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>0.12.6</version>
+            <scope>runtime</scope>
+        </dependency>
 
 
     </dependencies>

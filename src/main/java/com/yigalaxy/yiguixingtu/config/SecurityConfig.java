@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -15,6 +16,11 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import java.util.List;
 
 /**
  * =====================================================================
@@ -52,7 +58,7 @@ public class SecurityConfig {
                 // CSRF 是防跨站请求伪造的，但它是基于 session/cookie 的；
                 // 我们用的是 JWT（放请求头），所以用不到，关掉。
                 .csrf(AbstractHttpConfigurer::disable)
-
+                .cors(Customizer.withDefaults())
                 // 2. 设置会话为"无状态"（STATELESS）-------------------------
                 // 意思是：不用 session 记录登录态，全部靠 token。
                 // 这是 JWT 的典型做法。
@@ -125,5 +131,29 @@ public class SecurityConfig {
     @Bean
     public AuthenticationManager authenticationManager(AuthenticationConfiguration configuration) throws Exception {
         return configuration.getAuthenticationManager();
+    }
+
+    /**
+     * 跨域配置：允许前端(localhost:3000)调用后端接口。
+     * 浏览器同源策略：端口不同算跨域，不配置会被拦截。
+     */
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration config = new CorsConfiguration();
+        // 允许哪些来源(前端地址)访问 —— 你前端跑在3000
+        config.setAllowedOriginPatterns(List.of("http://localhost:3000"));
+        // 允许哪些 HTTP 方法
+        config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
+        // 允许请求带哪些头（我们要带 Authorization token，所以放行所有）
+        config.setAllowedHeaders(List.of("*"));
+        // 允许携带凭证（这里用 token，其实可关；先开着省心）
+        config.setAllowCredentials(true);
+        // 缓存预检结果 1 小时，减少 OPTIONS 预检请求
+        config.setMaxAge(3600L);
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        // 对后端所有接口(/**)都应用这个跨域规则
+        source.registerCorsConfiguration("/**", config);
+        return source;
     }
 }

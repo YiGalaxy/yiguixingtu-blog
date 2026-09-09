@@ -3,10 +3,12 @@ package com.yigalaxy.yiguixingtu.auth.controller;
 import com.yigalaxy.yiguixingtu.auth.LoginUser;
 import com.yigalaxy.yiguixingtu.auth.dto.LoginRequest;
 import com.yigalaxy.yiguixingtu.auth.dto.LoginVO;
+import com.yigalaxy.yiguixingtu.auth.dto.RegisterRequest;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.common.Result;
 import com.yigalaxy.yiguixingtu.user.entity.User;
 import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
+import com.yigalaxy.yiguixingtu.user.service.UserService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -30,11 +32,13 @@ public class AuthController {
     private final AuthenticationManager authenticationManager;
     private final JwtUtil jwtUtil;
     private final UserMapper userMapper;
+    private final UserService userService;
 
-    public AuthController(AuthenticationManager authenticationManager, JwtUtil jwtUtil, UserMapper userMapper) {
+    public AuthController(AuthenticationManager authenticationManager, JwtUtil jwtUtil, UserMapper userMapper, UserService userService) {
         this.authenticationManager = authenticationManager;
         this.jwtUtil = jwtUtil;
         this.userMapper = userMapper;
+        this.userService = userService;
     }
 
     /**
@@ -62,6 +66,14 @@ public class AuthController {
 
         log.info("登录成功: {}", request.getUsername());
         return Result.success(vo);
+    }
+
+    @Operation(summary = "用户注册")
+    @PostMapping("/register")
+    public Result<?> register(@Valid @RequestBody RegisterRequest request) {
+        userService.register(request.getUsername(), request.getPassword(), request.getNickname());
+        log.info("注册成功：: {}", request.getUsername());
+        return Result.success();
     }
 
     /**

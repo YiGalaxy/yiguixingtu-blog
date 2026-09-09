@@ -63,7 +63,13 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         // permitAll = 允许所有人访问，不需要登录
                         // 放行：登录接口 + 接口文档（swagger）
-                        .requestMatchers("/auth/login", "/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
+                        .requestMatchers(
+                                "/auth/login",
+                                "/auth/register",
+                                "/v3/api-docs/**",
+                                "/swagger-ui/**",
+                                "/swagger-ui.html"
+                        ).permitAll()
 
                         // authenticated = 必须登录（带了合法 token）才能访问
                         // 其余所有请求都要登录

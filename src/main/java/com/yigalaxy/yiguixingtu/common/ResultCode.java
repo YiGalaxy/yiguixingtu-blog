@@ -17,7 +17,11 @@ public enum ResultCode {
 
     ACCOUNT_DISABLED(403, "账号已被禁用"),
 
-    ERROR(500, "服务器内部错误");
+    ERROR(500, "服务器内部错误"),
+
+    USERNAME_EXISTS(400,"账号已存在");
+
+
 
     /**
      * 状态码

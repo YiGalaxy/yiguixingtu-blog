@@ -26,6 +26,7 @@
 
 ### ✅ 已实现
 
+- 用户注册（BCrypt 密码加密）
 - 用户登录（签发 JWT）
 - 退出登录
 - 获取当前登录用户
@@ -38,7 +39,6 @@
 
 ### 🚧 规划中
 
-- 用户注册
 - 文章发布 / 管理 / 编辑 / 删除
 - 分类、标签
 - 评论、留言
@@ -179,7 +179,7 @@ mvn spring-boot:run
 | POST | `/auth/login` | 登录（返回 token） | 否 |
 | POST | `/auth/logout` | 退出登录 | 是 |
 | GET  | `/auth/me` | 获取当前用户 | 是 |
-| POST | `/auth/register` | 用户注册（规划中） | 否 |
+| POST | `/auth/register` | 用户注册 | 否 |
 
 ## 测试
 

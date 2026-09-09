@@ -101,6 +101,22 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- ==================== 接口文档（OpenAPI/Swagger） ==================== -->
+        <!-- springdoc 自动生成 OpenAPI 规范，供 Apifox 同步 -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>3.0.0</version>
+        </dependency>
+
+        <!-- ==================== Lombok（编译期生成getter/setter等） ==================== -->
+        <!-- Lombok：用注解自动生成 getter/setter/toString 等，减少样板代码 -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+
 
     </dependencies>
 

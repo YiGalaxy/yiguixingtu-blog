@@ -1,33 +1,35 @@
-HELP.md
+### Maven ###
 target/
 .mvn/wrapper/maven-wrapper.jar
-!**/src/main/**/target/
-!**/src/test/**/target/
-
-### STS ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-.sts4-cache
 
 ### IntelliJ IDEA ###
-.idea
+.idea/
 *.iws
 *.iml
 *.ipr
 
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
-build/
-!**/src/main/**/build/
-!**/src/test/**/build/
-
 ### VS Code ###
 .vscode/
+
+### Eclipse / STS ###
+.classpath
+.project
+.settings
+.factorypath
+.apt_generated
+.springBeans
+.sts4-cache
+
+### OS ###
+.DS_Store
+Thumbs.db
+
+### Logs ###
+logs/
+*.log
+
+### 本地配置 / 密钥文件（不进仓库） ###
+.env
+*.local.properties
+application-local.yml
+application-secret.properties

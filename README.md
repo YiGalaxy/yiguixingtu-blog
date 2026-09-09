@@ -112,14 +112,37 @@ CREATE TABLE IF NOT EXISTS `user` (
 
 ### 3. 配置
 
-项目通过**环境变量**注入敏感配置（未设置时用默认值兜底）：
+#### 基础配置
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `JWT_SECRET` | （见 application.properties） | JWT 签名密钥（≥32 字节，生产环境务必替换） |
-| `JWT_EXPIRE_TIME` | `86400000` | token 过期时间（毫秒），默认 1 天 |
+| 项 | 值 |
+|----|-----|
+| 服务端口 | `8081` |
+| MySQL | `localhost:3307`，库 `yiguixingtu` |
+| Redis | `localhost:6380` |
 
-> ⚠️ **生产环境必须替换默认 `JWT_SECRET`**，建议通过环境变量注入，不要在仓库里硬编码真实密钥。
+#### 🔑 JWT 密钥配置（重要）
+
+JWT 相关配置位于 `src/main/resources/application.properties`：
+
+```properties
+jwt.secret=${JWT_SECRET:开发用默认密钥}
+jwt.expire-time=${JWT_EXPIRE_TIME:86400000}
+```
+
+**密钥注意事项（务必阅读）：**
+
+1. **`jwt.secret` 是 JWT 签名密钥，必须保密。** 任何人拿到它都能伪造出合法的 token。
+2. **默认值仅供本地开发。** 仓库里默认值即使公开也无碍，但**真实/生产密钥不要写死在仓库里**。
+3. **生产环境如何覆盖密钥？** 两种方式：
+   - **方式一（环境变量）**：
+     ```bash
+     export JWT_SECRET=你的真实密钥
+     ```
+   - **方式二（本地不提交的配置文件）**：创建 `application-secret.properties`（已加入 `.gitignore` 不会提交），内容填 `JWT_SECRET=你的真实密钥`，Spring 会自动读取。
+4. **密钥长度 ≥ 32 字节（256 位）**，否则 HS256 签名会在启动时报错。
+5. **`JWT_EXPIRE_TIME`**：token 过期时间，单位**毫秒**，默认 `86400000`（1 天），生产环境可适当调短。
+
+> ⚠️ **生产环境务必替换默认 `JWT_SECRET`。** 用环境变量或本地配置文件注入真实密钥，切勿在仓库里硬编码真实密钥。
 
 ### 4. 运行
 

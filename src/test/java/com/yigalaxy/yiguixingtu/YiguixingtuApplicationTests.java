@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.password.PasswordEncoder;
 
 @Slf4j
 @SpringBootTest
@@ -50,6 +51,15 @@ class YiguixingtuApplicationTests {
         UserDetails ud = userDetailsService.loadUserByUsername("yigalaxy");
         log.info("加载到的用户: username={}, authorities={}, enabled={}",
                 ud.getUsername(), ud.getAuthorities(), ud.isEnabled());
+    }
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
+    @Test
+    void testPrintBcryptHash() {
+        String hash = passwordEncoder.encode("123456");
+        log.info("密码 123456 的BCrypt哈希: {}", hash);
     }
 
 }

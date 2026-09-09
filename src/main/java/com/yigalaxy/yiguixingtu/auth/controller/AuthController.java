@@ -45,36 +45,25 @@ public class AuthController {
     @Operation(summary = "用户登录")
     @PostMapping("/login")
     public Result<LoginVO> login(@Valid @RequestBody LoginRequest request) {
+        // 认证（失败会自动抛异常，由全局异常处理器统一转成 Result）
+        Authentication authentication = authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(request.getUsername(), request.getPassword())
+        );
 
-        try {
-            // 1. 认证：Spring Security 会自动调 UserDetailsService 查用户 + BCrypt 比对密码
-            Authentication authentication = authenticationManager.authenticate(
-                    new UsernamePasswordAuthenticationToken(request.getUsername(), request.getPassword())
-            );
+        LoginUser loginUser = (LoginUser) authentication.getPrincipal();
+        User user = loginUser.getUser();
 
-            // 2. 认证成功，取当前登录用户
-            LoginUser loginUser = (LoginUser) authentication.getPrincipal();
-            User user = loginUser.getUser();
+        String token = jwtUtil.generateToken(user.getId(), user.getUsername(), user.getRole());
 
-            // 3. 用登录信息签发 token
-            String token = jwtUtil.generateToken(user.getId(), user.getUsername(), user.getRole());
+        LoginVO vo = new LoginVO();
+        vo.setToken(token);
+        vo.setId(user.getId());
+        vo.setUsername(user.getUsername());
+        vo.setNickname(user.getNickname());
+        vo.setRole(user.getRole());
 
-            // 4. 组装返回
-            LoginVO vo = new LoginVO();
-            vo.setToken(token);
-            vo.setId(user.getId());
-            vo.setUsername(user.getUsername());
-            vo.setNickname(user.getNickname());
-            vo.setRole(user.getRole());
-
-            log.info("登录成功: {}", request.getUsername());
-            return Result.success(vo);
-
-        } catch (AuthenticationException e) {
-            // 用户名/密码错误、账号被禁用 等都会走到这里
-            log.warn("登录失败: {} 原因: {}", request.getUsername(), e.getMessage());
-            return Result.error(ResultCode.BAD_CREDENTIALS);
-        }
+        log.info("登录成功: {}", request.getUsername());
+        return Result.success(vo);
     }
 
     /**

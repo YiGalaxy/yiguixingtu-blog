@@ -9,6 +9,8 @@ public enum ResultCode {
 
     BAD_CREDENTIALS(400, "用户名或密码错误"),
 
+    PARAM_ERROR(400, "参数校验失败"),
+
     UNAUTHORIZED(401, "未登录或登录已过期"),
 
     FORBIDDEN(403, "无权限访问"),

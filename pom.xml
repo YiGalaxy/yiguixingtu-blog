@@ -45,6 +45,32 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- ==================== 容器化集成测试（Testcontainers） ==================== -->
+        <!--
+          【用途】测试启动时自己拉起 MySQL / Redis 容器，用完销毁。
+          这样 "clone 下来就能跑测试"、"CI 上也能跑"，不再依赖本机先
+          docker compose up -d —— 见 AbstractIntegrationTest 的类注释。
+
+          【⚠️ 两个容易踩的坑，都记在这里】
+          ① Testcontainers 2.x 把模块名统一加了 testcontainers- 前缀。
+             旧写法 org.testcontainers:mysql 在 2.x 里【不存在】，
+             而且报出来的错是 "version is missing"（看着像版本没管好，
+             实际是坐标写错了）—— 正确坐标是 org.testcontainers:testcontainers-mysql。
+             版本由 Spring Boot 的 BOM 管（testcontainers-bom 2.0.5），不用手写。
+          ② 类所在的包也换了：MySQLContainer 从 org.testcontainers.containers
+             挪到了 org.testcontainers.mysql。
+
+          【为什么不加 testcontainers-junit-jupiter】容器用的是 singleton
+          container pattern（static 代码块启动），不依赖 @Testcontainers 扩展。
+          【为什么 Redis 不用专门的模块】官方 BOM 里没有 redis 模块，
+          Redis 只要暴露一个端口，GenericContainer 完全够用。
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-mysql</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!-- ==================== ORM 框架（MyBatis-Plus） ==================== -->
         <!-- MyBatis-Plus Spring Boot 4 启动器 -->
         <dependency>

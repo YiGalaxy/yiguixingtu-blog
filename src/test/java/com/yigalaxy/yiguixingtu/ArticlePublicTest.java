@@ -13,11 +13,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.transaction.annotation.Transactional;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -46,10 +43,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   如果哪天有人不小心把它删了，本类的①②③会立刻变红 —— 这就是回归测试的价值。
  * =====================================================================
  */
-@SpringBootTest
-@AutoConfigureMockMvc
-@Transactional
-class ArticlePublicTest {
+class ArticlePublicTest extends AbstractIntegrationTest {
 
     @Autowired
     private MockMvc mockMvc;

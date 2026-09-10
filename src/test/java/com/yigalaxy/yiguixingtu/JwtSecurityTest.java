@@ -7,13 +7,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -30,14 +27,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *     哪天这个用户被删了 / 被禁用了，测试会莫名其妙失败，而且很难查原因；
  *   · 自己插一个用户、拿它【真实的 id】签发 token -> 测试自给自足、
  *     可以在任何数据库环境下重复运行。
+ *   ★ 这一点在本类改成容器化之后更加重要：Testcontainers 起的库里
+ *     本来就只有 Flyway 建的空表，任何"依赖库里已有数据"的写法都会立刻暴露。
  *
  * @Transactional 让插入的测试用户在每个用例结束后自动回滚，不污染数据库。
  */
 @Slf4j
-@SpringBootTest
-@AutoConfigureMockMvc
-@Transactional
-class JwtSecurityTest {
+class JwtSecurityTest extends AbstractIntegrationTest {
 
     @Autowired
     private MockMvc mockMvc;          // 模拟发送HTTP请求

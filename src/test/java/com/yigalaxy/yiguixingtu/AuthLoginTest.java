@@ -6,13 +6,10 @@ import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
-import org.springframework.transaction.annotation.Transactional;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -22,10 +19,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * 登录功能集成测试：真正走 登录->拿token->带token访问/auth/me 完整链路
  */
-@SpringBootTest
-@AutoConfigureMockMvc
-@Transactional   // 每个测试跑完自动回滚，测试用户不会残留在数据库
-class AuthLoginTest {
+class AuthLoginTest extends AbstractIntegrationTest {
 
     @Autowired
     private MockMvc mockMvc;

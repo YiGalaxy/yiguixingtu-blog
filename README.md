@@ -30,7 +30,7 @@
 | 接口文档 | springdoc-openapi 3.0.0（OpenAPI / Swagger UI） |
 | 运维监控 | Spring Boot Actuator |
 | 工具库 | Lombok |
-| 测试 | JUnit 5 + MockMvc（`spring-boot-starter-webmvc-test`） |
+| 测试 | JUnit 5 + MockMvc（`spring-boot-starter-webmvc-test`）+ **Testcontainers 2.0.5** |
 
 ## 功能特性
 
@@ -60,6 +60,7 @@
 - 分页与排序参数安全处理（见「接口安全约定」）
 - 自动生成 OpenAPI 接口文档
 - **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
+- **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
 - 集成测试 8 个类 **76 个用例**
 
 ### 🚧 规划中
@@ -124,6 +125,17 @@ src/main/resources
 └── db/migration
     └── V1__init.sql                # Flyway 迁移脚本：user / category / article 建表
 
+src/test/java/com/yigalaxy/yiguixingtu
+├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
+├── AuthLoginTest                   # 登录链路
+├── UserRegisterTest                # 注册
+├── JwtSecurityTest                 # JWT 与 Security 过滤链
+├── GlobalExceptionHandlerTest      # 全局异常处理
+├── UserAdminTest                   # 用户管理（含 token 即时失效）
+├── ArticleAdminTest                # 后台文章管理
+├── ArticlePublicTest               # 前台公开接口（草稿隔离）
+└── YiguixingtuApplicationTests     # 冒烟
+
 docs/demo-data
 └── demo_users.sql                  # 本地演示数据（100 个用户），切勿在生产执行
 ```
@@ -134,9 +146,12 @@ docs/demo-data
 
 - JDK 17+
 - Maven 3.6+（也可直接用仓库自带的 `mvnw.cmd` / `mvnw`，无需本地装 Maven）
-- Docker（用于启动 MySQL / Redis）
+- **Docker**：两种用途 ——
+  - **跑测试**：Testcontainers 会自己拉起 MySQL 与 Redis 容器，跑完自动销毁。
+    **只要能起容器就行，不需要事先启动任何服务。**
+  - **本地调试**：起一套常驻的 MySQL / Redis（见下一步）
 
-### 2. 启动依赖（MySQL + Redis）
+### 2. 启动本地依赖（仅本地调试需要，跑测试不需要）
 
 ```bash
 docker compose up -d
@@ -146,6 +161,10 @@ docker compose up -d
 
 - MySQL：`localhost:3310`（库 `yiguixingtu`，用户 `root/root`）
 - Redis：`localhost:6380`
+
+> 💡 **这一步和测试无关。** `mvn test` 用的是 Testcontainers 临时拉起的容器，
+> 就算这一步没执行、甚至把 `docker compose down` 掉，测试照样能跑。
+> 这里起来的两套服务只是给「本地起后端 + 前端联调」用的。
 
 ### 3. 初始化表结构（Flyway 自动完成）
 
@@ -322,6 +341,9 @@ jwt.expire-time=${JWT_EXPIRE_TIME:86400000}
 
 ### 5. 运行
 
+> 先确认第 2 步的本地 MySQL / Redis 已经起来 —— **这一步和跑测试不同**，
+> 应用是连本地库的（`localhost:3310`），MySQL 没起会在启动时报连不上。
+
 ```bash
 # 方式一：Maven
 mvn spring-boot:run
@@ -330,7 +352,9 @@ mvn spring-boot:run
 ./mvnw spring-boot:run
 ```
 
-应用默认监听 `http://localhost:8082`。
+应用默认监听 `http://localhost:8082`。启动日志里会看到 Flyway 的执行结果：
+空库会打印 `Successfully applied 1 migration`，已建过表的库会打印
+`Schema ... is up to date. No migration necessary.`
 
 ### 6. 接口文档
 
@@ -491,9 +515,12 @@ mvn test
 ./mvnw.cmd -B test
 ```
 
-> ⚠️ **当前测试需要本地依赖先起来**：测试通过 `@SpringBootTest` 直连本机的
-> MySQL `localhost:3310` 与 Redis `localhost:6380`，所以跑测试前必须先执行 `docker compose up -d`。
-> 容器化测试环境（Testcontainers）在计划中，做完之后测试将不再依赖本地依赖。
+> ✅ **测试不需要事先启动任何服务。** 测试启动时由 **Testcontainers**
+> 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
+> **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
+>
+> 这意味着：任何人 clone 下来就能验证这 76 个用例，CI 上也能跑
+> （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
 **8 个测试类，76 个用例，全部通过：**
 
@@ -506,16 +533,30 @@ mvn test
 | `UserAdminTest` | 18 | 用户管理全部接口 + 自我保护 + 分页夹取 + **禁用/删除/降级后的 token 即时失效** |
 | `ArticleAdminTest` | 26 | 后台文章增删改查、草稿隔离、状态流转、权限、逻辑删除（用 `JdbcTemplate` 直查物理行） |
 | `ArticlePublicTest` | 14 | 前台列表与详情、只返回已发布、浏览量、分页边界 |
-| `YiguixingtuApplicationTests` | 4 | 上下文加载与基础链路 |
+| `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
 
-**写测试的三条约定（不是随便定的）：**
+所有测试类都继承 `AbstractIntegrationTest`，它负责：
+启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。
+
+> 📌 **容器为什么用 static 代码块启动，而不是 `@Testcontainers` + `@Container`？**
+> `@Testcontainers` 扩展管理的是"每个测试类"的生命周期：每个类都重新 start/stop 一次容器。
+> 而 Spring 的 ApplicationContext 是**跨测试类复用**的，数据源在第一个类时就绑到了
+> 第一个容器的端口上——第二个类起来的是新容器（新端口），复用的却是老 context，
+> 结果就是连一个已经被 stop 掉的容器。
+> 用 static 代码块（singleton container pattern）只拉一次、全程共用，容器的回收交给
+> Testcontainers 的 Ryuk（JVM 退出时自动清理），不需要手写 `@AfterAll`。
+
+**写测试的四条约定（不是随便定的）：**
 
 1. **断言要落到数据库**。用 `JdbcTemplate` 直查原生 SQL 验证，而不是只断言 HTTP 状态码。
    比如验证"删除文章是逻辑删除"，必须确认**物理行还在且 `deleted = 1`**——
    因为 `@TableLogic` 会自动过滤，用 Mapper 是查不出来的。
 2. **分页/总数类断言必须先用唯一标记圈定范围**（现有用 `ZZT + 纳秒时间戳`）。
    否则库里已有的真实数据会让 `total` 断言飘忽不定，**这种测试比没有还糟**。
-3. **`@Transactional` 让每个用例跑完自动回滚**，不污染数据库。
+3. **测试数据自己造，不依赖库里预先有什么数据**。
+   以前有测试写着"前提：user 表里有 username='yigalaxy'"，换成容器里的空库后这种写法必然失败。
+   正确的做法是在 `@BeforeEach` 里插一个自己的用户，用它的**真实 id** 签发 token。
+4. **`@Transactional` 让每个用例跑完自动回滚**，不污染数据库。
    注意它**回滚不了 Redis**，所以涉及缓存的用例要在 `@AfterEach` 里手动清 key。
 
 ## 许可证

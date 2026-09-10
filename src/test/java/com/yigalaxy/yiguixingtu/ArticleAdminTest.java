@@ -13,13 +13,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.transaction.annotation.Transactional;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -34,9 +31,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 文章管理接口测试（AdminArticleController）
  *
  * 【前置条件】
- *   1. MySQL(3310) / Redis(6380) 已启动
- *   2. article / category 两张表已建好
- *   3. ArticleController（前台）也已经建好 —— 部分用例要交叉验证前后台
+ *   只需本机有 Docker。MySQL 与 Redis 由 Testcontainers 自动拉起，
+ *   建表由 Flyway 在启动时完成（见 AbstractIntegrationTest），
+ *   所以不需要先在本地起容器、也不需要手工建表。
  *
  * 【为什么要用 mark 这个唯一标记？】
  *   你库里已经有手工造的真实文章了。如果断言写死 total == 2，
@@ -49,10 +46,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   造的测试文章、改的状态都不会留在库里。
  * =====================================================================
  */
-@SpringBootTest
-@AutoConfigureMockMvc
-@Transactional
-class ArticleAdminTest {
+class ArticleAdminTest extends AbstractIntegrationTest {
 
     @Autowired
     private MockMvc mockMvc;

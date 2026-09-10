@@ -10,12 +10,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.transaction.annotation.Transactional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -27,24 +24,20 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 用户管理接口测试（UserController）
  *
  * 【最关键的一点：@Transactional 让测试自动回滚】
- *   类上加 @Transactional 后，Spring 会把整个测试方法包在一个事务里，
- *   测试跑完（不管成功还是失败）自动 ROLLBACK。
+ *   基类 AbstractIntegrationTest 上加了 @Transactional，Spring 会把整个
+ *   测试方法包在一个事务里，测试跑完（不管成功还是失败）自动 ROLLBACK。
  *   所以 @BeforeEach 里插入的测试用户、测试过程中改的状态/角色，
  *   【都不会真正留在数据库里】—— 这正是你要的"用完就删"。
  *
  * 【前置条件】
- *   1. MySQL(3307) 和 Redis(6380) 已启动
- *   2. UserController / UserVO / UserQuery 已按上一轮代码写好
- *   3. ResultCode 里已有 USER_NOT_FOUND
+ *   只需本机有 Docker。MySQL 与 Redis 由 Testcontainers 在测试启动时
+ *   自动拉起（见 AbstractIntegrationTest），不再需要先 docker compose up -d。
  *
  * 【注意】不要在类或方法上加 @Commit、@Rollback(false)，
  *        那会真的写进数据库，破坏"自动清理"。
  * =====================================================================
  */
-@SpringBootTest
-@AutoConfigureMockMvc
-@Transactional   // ★ 自动回滚，保证库里不留痕
-class UserAdminTest {
+class UserAdminTest extends AbstractIntegrationTest {
 
     @Autowired
     private MockMvc mockMvc;

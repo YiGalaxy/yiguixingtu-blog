@@ -8,14 +8,11 @@ import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -35,10 +32,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *
  * @Transactional 保证插入的测试用户测试完自动回滚，不污染数据库。
  */
-@SpringBootTest
-@AutoConfigureMockMvc
-@Transactional
-class GlobalExceptionHandlerTest {
+class GlobalExceptionHandlerTest extends AbstractIntegrationTest {
 
     @Autowired
     private MockMvc mockMvc;

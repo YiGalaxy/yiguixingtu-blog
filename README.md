@@ -2320,6 +2320,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |
 | `SecurityHeadersTest` | 7 | 四个安全响应头，含 401 与上传响应两条易漏路径 |
 | `MetricsEndpointTest` | 8 | 指标端点：Prometheus 格式与内容、未开放的端点确实不可达、登录/登出/浏览量落库指标真的会涨 |
+| `RateLimitTest` | 5 | 接口限流（Resilience4j 注解式）：配额用完返回 **HTTP 429 + code 429**、**限流不改变正常路径**（配额内的请求仍是正常业务响应）、文章列表同样受保护、**重置配额后就恢复**（说明是"窗口内计数"而不是永久封禁）、**两个限流实例真的被注册**（防注解名字写错导致限流静默失效 —— 那是最难发现的一种失败） |
 | `TracingTest` | 5 | 链路追踪：Tracer 可用、日志 traceId 与响应头 `X-Trace-Id` 一致、两次请求不重复、响应头存在 |
 | `PaginationLimitTest` | 2 | 分页全局上限（从 Mapper 层验证插件兜底，接口层测不到） |
 | `ProfileDevConfigTest` | 6 | dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单 |

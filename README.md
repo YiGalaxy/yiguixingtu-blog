@@ -1775,6 +1775,13 @@ CORS_ALLOWED_ORIGINS=https://你的域名
 # 如果 Nginx 把后端反代在 /api/ 下，这里就填 https://你的域名/api
 PUBLIC_API_BASE=https://你的域名/api
 
+# ---- 站点自己的对外域名（前端页面地址，不是接口地址） ----
+# canonical、sitemap.xml、robots.txt 里的地址都用它拼。
+# ⚠️ 换域名部署时忘了改这一项，页面照常能打开，但搜索引擎看到的
+#    canonical 与 sitemap 会指向另一个域名 —— 属于"不报错但 SEO 全废"的一类问题，
+#    所以这里也用了 ${VAR:?} 的写法（没配就直接起不来）。
+PUBLIC_SITE_URL=https://你的域名
+
 # ---- 第一个管理员（库里没有管理员时自动创建，详见上文） ----
 BOOTSTRAP_ADMIN_USERNAME=你的管理员账号
 BOOTSTRAP_ADMIN_PASSWORD=一个强密码
@@ -1838,6 +1845,14 @@ server {
     server_name 你的域名;
 
     # 前端（Nuxt 容器）
+    #
+    # 【⚠️ /sitemap.xml 与 /robots.txt 必须走这里，不能配成静态文件】
+    #   它们现在是前端的【运行时路由】（由 Node 按后端数据现算 sitemap），
+    #   不是 public/ 下的静态文件。所以不能让 Nginx 用 try_files 直接返回磁盘文件 ——
+    #   那样子目录里没有这个文件，用户拿到的就是 404，而页面一切正常，
+    #   只有搜索引擎那边悄悄收录失败。
+    #   同理：前端仓库里已经【删掉了】public/robots.txt（留着会变成两个来源，
+    #   改了运行时路由却"没生效"，最难查）。
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
@@ -1976,6 +1991,9 @@ scp yiguixingtu-web/static-media/* root@服务器IP:/var/www/media/
 | 11 | 图片地址是外网可访问的 | 右键封面图「复制图片地址」，在无痕窗口打开应当能看到图（守 `UPLOAD_BASE_URL` 填的是浏览器能访问到的地址） |
 | 12 | **背景视频/音乐能播** | `curl -I https://你的域名/media/bg-music.mp3` 应当返回 **200**（守"前端仓库 `static-media/` 里的文件真的传到了 `/var/www/media/`"——它们不在构建产物里，忘了传就只有 404） |
 | 13 | **审计表真的在记** | 后台改一下某篇文章 → `docker exec yiguixingtu-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" yiguixingtu -e "SELECT * FROM operation_log ORDER BY id DESC LIMIT 3"` 应当能看到那条记录，且 `ip` 是真实访问者地址（不是 `127.0.0.1`） |
+| 14 | **SEO 三件套都对** | `curl -s https://你的域名/ \| grep canonical` 应当是**你的真实域名**；`curl -I https://你的域名/sitemap.xml` 返回 200 且 `Content-Type` 是 XML；`curl -s https://你的域名/robots.txt` 里的 `Sitemap:` 也是你的域名（守 `PUBLIC_SITE_URL` 有没有填对 —— 填错不会报错，只会让搜索引擎把权重算到别的域名上） |
+| 15 | **首页 HTML 里有文章** | `curl -s https://你的域名/ \| grep -o '<h3[^>]*>[^<]*'` 应当能看到文章标题 —— 首页是 SSR 的，源码里就该有内容；如果只有 `<div id="__nuxt"></div>`，说明 SSR 没生效（那是纯客户端渲染的表现） |
+| 16 | **评论链路是通的** | 打开一篇文章发一条评论 → 前端提示"等待审核"、前台列表里**看不到** → 后台点通过 → 前台刷新能看到（守"待审核状态写死在前台查询里"这条规则真的生效） |
 
 #### 这份清单在本机演练过一遍（不是纸面清单）
 

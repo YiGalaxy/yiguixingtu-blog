@@ -261,6 +261,16 @@ services:
       # 这正是当初把 apiBase 拆成"服务端 / 浏览器"两份的用处 ——
       # SSR 少绕一圈 DNS + Nginx，也避免了"域名还没配好时 SSR 直接失败"。
       NUXT_API_BASE_SERVER: http://backend:8082
+      # 【站点自己的对外域名】canonical、sitemap.xml、robots.txt 里的地址都用它拼。
+      #   ⚠️ 为什么必须由这里注入、不能靠前端代码里的默认值：
+      #     前端代码里写的默认值是 https://www.yigalaxy.xin（本地开发时够用），
+      #     但一旦换域名部署、而这里又没传，产出的 canonical 和 sitemap 会
+      #     **安静地指向另一个域名** —— 页面照常能打开，搜索引擎却把权重算到别人家
+      #     （或者干脆忽略这份 sitemap）。这属于"不报错但 SEO 全废"的一类问题，
+      #     所以刻意用 ${VAR:?} 的写法：没配就直接起不来。
+      #   与 PUBLIC_API_BASE 的区别：那个是"后端接口的地址（可能带 /api 前缀）"，
+      #   这个是"站点自己（前端页面）的地址"，两者不要混用。
+      NUXT_PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:?必须在 .env 里设置 PUBLIC_SITE_URL（站点对外域名，例如 https://www.example.com）}
     ports:
       # 前端同样只绑回环：对外只应该有 Nginx 的 443，不该有 3000。
       # 理由和上面后端那段一样，这里不重复。

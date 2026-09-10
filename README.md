@@ -904,11 +904,18 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 三种访问身份：**游客**（不带 token）、**普通用户**（GUEST + 合法 token）、**管理员**（ADMIN + 合法 token）。
 
+> **这张表应当覆盖上面全部 36 个接口**，账是这么对的：**12 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
+> `GET /article/page` `stats` `archive` `rss` `{id}`、`GET /category/list` `tag/list` `comment/list`、`POST /comment`）
+> **+ 1 个只需登录**（`GET /auth/me`）**+ 23 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
+> `/admin/tag/**` 4 + `/admin/comment/**` 3 + `/admin/category/**` 4 + `POST /upload` 1）= 36。
+> 以后加接口时这两处要一起改 —— 少一行不会有任何报错，只会让人在这张表里找不到那个接口的权限。
+
 | 接口 | 游客 | GUEST | ADMIN |
 |------|:---:|:---:|:---:|
 | `POST /auth/register` | ✅ | ✅ | ✅ |
 | `POST /auth/login` | ✅ | ✅ | ✅ |
 | `GET /article/page` | ✅ | ✅ | ✅ |
+| `GET /article/stats` | ✅ | ✅ | ✅ |
 | `GET /article/{id}`（已发布） | ✅ | ✅ | ✅ |
 | `GET /article/{id}`（草稿） | ❌ 404 | ❌ 404 | ❌ 404（走后台接口） |
 | `GET /category/list` | ✅ | ✅ | ✅ |

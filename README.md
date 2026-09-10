@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-174%20passing-success)
+![Tests](https://img.shields.io/badge/tests-182%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **174 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **182 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -79,7 +79,7 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
-- 集成测试 21 个类 **174 个用例**，行覆盖率 **86%**
+- 集成测试 22 个类 **182 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
 
@@ -171,6 +171,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── ArticleAdminTest                # 后台文章管理
 ├── ArticlePublicTest               # 前台公开接口（草稿隔离）
 ├── ArticleCacheTest                # 列表缓存：命中/失效/TTL/防穿透
+├── ArticleStatsTest                # 站点统计接口（只算已发布）
 ├── ArticleViewCountTest            # 浏览量：Redis 计数 + 定时批量落库
 ├── ArticleIdempotencyTest          # 接口幂等（Idempotency-Key）
 ├── ArticleIndexTest                # 索引契约：迁移已执行 + 列顺序 + 对真实查询可用（含分页 COUNT 的覆盖索引）
@@ -677,23 +678,24 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 2 | POST | `/auth/login` | 登录（返回 token） | 否 |
 | 3 | POST | `/auth/logout` | 退出登录（把当前 token 拉黑，幂等） | 否 |
 | 4 | GET | `/auth/me` | 获取当前登录用户 | 是 |
-| 5 | GET | `/article/page` | 前台文章分页列表（仅已发布） | 否 |
+| 5 | GET | `/article/page` | 前台文章分页列表（仅已发布，**走 Redis 缓存**） | 否 |
 | 6 | GET | `/article/{id}` | 前台文章详情（仅已发布） | 否 |
-| 7 | GET | `/category/list` | 分类列表 | 否 |
-| 8 | GET | `/user/page` | 用户分页查询 | 是（ADMIN） |
-| 9 | PUT | `/user/{id}/status` | 启用 / 禁用用户 | 是（ADMIN） |
-| 10 | PUT | `/user/{id}/role` | 修改用户角色 | 是（ADMIN） |
-| 11 | PUT | `/user/{id}/password` | 重置用户密码 | 是（ADMIN） |
-| 12 | DELETE | `/user/{id}` | 删除用户（逻辑删除） | 是（ADMIN） |
-| 13 | GET | `/admin/article/page` | 后台文章分页（含草稿，多条件筛选） | 是（ADMIN） |
-| 14 | GET | `/admin/article/{id}` | 后台文章详情（含正文） | 是（ADMIN） |
-| 15 | POST | `/admin/article` | 新增文章（**可选 `Idempotency-Key` 请求头防重复提交**，见下） | 是（ADMIN） |
-| 16 | PUT | `/admin/article/{id}` | 编辑文章 | 是（ADMIN） |
-| 17 | PUT | `/admin/article/{id}/status` | 发布 / 下架文章 | 是（ADMIN） |
-| 18 | DELETE | `/admin/article/{id}` | 删除文章（逻辑删除） | 是（ADMIN） |
-| 19 | POST | `/upload` | 上传图片（封面图），返回可访问 URL | 是（ADMIN） |
+| 7 | GET | `/article/stats` | 站点统计：文章数 / 总浏览量 / 分类数（首页那三个数字，**只算已发布**） | 否 |
+| 8 | GET | `/category/list` | 分类列表 | 否 |
+| 9 | GET | `/user/page` | 用户分页查询 | 是（ADMIN） |
+| 10 | PUT | `/user/{id}/status` | 启用 / 禁用用户 | 是（ADMIN） |
+| 11 | PUT | `/user/{id}/role` | 修改用户角色 | 是（ADMIN） |
+| 12 | PUT | `/user/{id}/password` | 重置用户密码 | 是（ADMIN） |
+| 13 | DELETE | `/user/{id}` | 删除用户（逻辑删除） | 是（ADMIN） |
+| 14 | GET | `/admin/article/page` | 后台文章分页（含草稿，多条件筛选） | 是（ADMIN） |
+| 15 | GET | `/admin/article/{id}` | 后台文章详情（含正文） | 是（ADMIN） |
+| 16 | POST | `/admin/article` | 新增文章（**可选 `Idempotency-Key` 请求头防重复提交**，见下） | 是（ADMIN） |
+| 17 | PUT | `/admin/article/{id}` | 编辑文章 | 是（ADMIN） |
+| 18 | PUT | `/admin/article/{id}/status` | 发布 / 下架文章 | 是（ADMIN） |
+| 19 | DELETE | `/admin/article/{id}` | 删除文章（逻辑删除） | 是（ADMIN） |
+| 20 | POST | `/upload` | 上传图片（封面图），返回可访问 URL | 是（ADMIN） |
 
-接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
+**共 20 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
 用本地磁盘存储时，上传的图片通过 `GET /uploads/**` 公开读取（无需登录）。
 
 ## 接口 × 角色权限矩阵
@@ -1580,7 +1582,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 174 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 182 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1592,10 +1594,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 174 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 182 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**21 个测试类，174 个用例，全部通过：**
+**22 个测试类，182 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -1607,6 +1609,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleAdminTest` | 26 | 后台文章增删改查、草稿隔离、状态流转、权限、逻辑删除（用 `JdbcTemplate` 直查物理行） |
 | `ArticlePublicTest` | 15 | 前台列表与详情、只返回已发布、分页边界、排序白名单 |
 | `ArticleCacheTest` | 13 | 列表缓存：第二次走缓存、四个写操作都让缓存失效、TTL 区间、空结果也缓存（防穿透）、key 归一化 |
+| `ArticleStatsTest` | 8 | 站点统计：只算已发布、逻辑删除不计入、空库不报错、走缓存、写操作让缓存失效 |
 | `ArticleViewCountTest` | 10 | 浏览量：Redis 计数、累加不丢、定时批量落库、落库后增量清零 |
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
@@ -1620,7 +1623,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ProfileProdConfigTest` | 3 | prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量 |
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **174** | |
+| **合计** | **182** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

@@ -200,6 +200,7 @@ public class SecurityConfig {
                     // 这几条必须写在 anyRequest() 前面，否则永远轮不到它们。
                     auth.requestMatchers(HttpMethod.GET,
                             "/article/page",     // 首页信息流
+                            "/article/stats",    // 首页那三个统计数字（文章数 / 浏览量 / 分类数）
                             "/article/*",        // 文章详情 /article/123
                             "/category/list"     // 分类列表
                     ).permitAll();

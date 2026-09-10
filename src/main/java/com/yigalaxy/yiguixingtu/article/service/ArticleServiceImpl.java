@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.yigalaxy.yiguixingtu.article.cache.ArticleCacheVersion;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
 import com.yigalaxy.yiguixingtu.article.cache.ArticleViewCounter;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
@@ -216,6 +217,46 @@ public class ArticleServiceImpl implements ArticleService {
             throw new BusinessException(ResultCode.ARTICLE_NOT_FOUND);
         }
         return toVO(article, getCategoryName(article.getCategoryId()));
+    }
+
+    /**
+     * 站点统计（首页那三个数字）。
+     *
+     * 【为什么这个接口必须缓存】
+     *   其中"总浏览量"是 SUM(view_count)，没有索引能走，得把全部已发布行扫一遍。
+     *   首页又是访问量最大的页面 —— 不缓存的话，等于每次有人打开首页就扫一次全表。
+     *   这是典型的"计算便宜但基数大"的聚合，正是适合缓存的形状。
+     *
+     * 【key 为什么只用版本号，不带别的条件】
+     *   这个结果没有查询条件 —— 不管谁来问，答案都是全站那一份。
+     *   所以 key 只需要区分"数据版本"：版本号一变，结果就作废。
+     *   复用文章列表那套版本号（ArticleCacheVersion）而不是新造一个，
+     *   是因为两者的失效时机完全一致（都是文章被写），
+     *   共用之后"写文章"只需要 INCR 一次，两个缓存一起失效。
+     *
+     * 【TTL 为什么只有 60 秒，而列表缓存是 5 分钟】
+     *   浏览量是【异步落库】的（见 ViewCountSyncTask，每 5 分钟批量写回库）。
+     *   落库这件事不会推进缓存版本号（它不是"文章被写"），
+     *   所以这个数字天然会有一段时间的滞后。
+     *   把 TTL 定成 60 秒，等于"最多滞后一分钟"，用户几乎察觉不到；
+     *   而列表缓存的内容（标题、摘要）只有作者发文时才会变，给 5 分钟完全够。
+     *   两类数据的"变化频率"不同，所以 TTL 也不同 —— 这不是随手填的数字。
+     */
+    @Override
+    @Cacheable(cacheNames = RedisConfig.CACHE_ARTICLE_STATS,
+            key = "@articleCacheVersion.current()")
+    public ArticleStatsVO stats() {
+        // 一条 SQL 同时拿到"文章数"和"总浏览量"（两个聚合扫的是同一批行，不该分两次查）
+        ArticleStatsVO aggregate = articleMapper.selectPublishedAggregate();
+
+        // 分类表很小（本项目是个位数），单独 count 一次即可。
+        // 传 null 表示不加额外条件，@TableLogic 会自动补上 deleted = 0。
+        Long categoryCount = categoryMapper.selectCount(null);
+
+        return new ArticleStatsVO(
+                aggregate == null ? 0L : aggregate.getArticleCount(),
+                aggregate == null ? 0L : aggregate.getViewCount(),
+                categoryCount == null ? 0L : categoryCount);
     }
 
     // =================================================================

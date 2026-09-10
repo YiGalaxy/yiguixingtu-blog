@@ -67,6 +67,16 @@ public class RedisConfig {
     /** 文章前台已发布列表的缓存名 */
     public static final String CACHE_ARTICLE_PAGE = "article:page";
 
+    /** 站点统计的缓存名（首页那三个数字） */
+    public static final String CACHE_ARTICLE_STATS = "article:stats";
+
+    /**
+     * 统计结果的缓存时长：60 秒。
+     * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
+     * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
+     */
+    private static final Duration TTL_STATS = Duration.ofSeconds(60);
+
     /**
      * 正常内容的缓存时长：5 分钟。
      * 选这个值是在"缓存命中率"和"内容新鲜度"之间取平衡：
@@ -182,13 +192,38 @@ public class RedisConfig {
         //   所以这里改回默认的写入器：没有 clear 调用，批量策略就用不上了。
         RedisCacheWriter cacheWriter = RedisCacheWriter.nonLockingRedisCacheWriter(connectionFactory);
 
+        // ---------------- 统计缓存的规则（只是 TTL 不同） ----------------
+        // 列表缓存和统计缓存的序列化、前缀规则完全一样，只有过期时间不同，
+        // 所以这里从 baseConfig 派生一份、只覆盖 TTL ——
+        // 而不是把上面那一大段序列化配置再抄一遍。
+        RedisCacheConfiguration statsConfig = baseConfig
+                .entryTtl(this::resolveStatsTtl);
+
         return RedisCacheManager.builder(cacheWriter)
                 .cacheDefaults(baseConfig)
-                // 针对具体缓存名做覆盖。目前 article:page 用的就是公共规则，
-                // 之所以显式列出来，是为了以后它需要单独的 TTL 或前缀时，
-                // 改动点就在这一行，不用去猜它到底走的哪套配置。
+                // 针对具体缓存名做覆盖。两个都显式列出来，
+                // 是为了让"哪个缓存走哪套 TTL"在这几行里一眼可见，
+                // 不用去猜它到底命中了哪个默认值。
                 .withCacheConfiguration(CACHE_ARTICLE_PAGE, baseConfig)
+                .withCacheConfiguration(CACHE_ARTICLE_STATS, statsConfig)
                 .build();
+    }
+
+    /**
+     * 统计缓存的 TTL：60 秒 + 0~10 秒抖动。
+     *
+     * 【为什么比列表缓存短得多（5 分钟 vs 1 分钟）】
+     *   两个缓存的数据"变化频率"根本不同：
+     *     · 列表缓存存的是标题、摘要 —— 只有作者发文/改文时才会变，
+     *       而那件事会推进版本号、缓存立刻失效。TTL 只是最后的保险，给长一点没关系。
+     *     · 统计里有个"总浏览量"，它是【异步落库】的（ViewCountSyncTask 每 5 分钟一批）。
+     *       落库不会推进缓存版本号（它不是"文章被写"），所以这个数字天生会滞后。
+     *       TTL 定成 60 秒 = 最多滞后一分钟，用户基本察觉不到。
+     *   抖动范围也刻意用 10 秒而不是 60 秒：TTL 本身才 60 秒，
+     *   再来 60 秒抖动会让"1 分钟"这个承诺变得很虚。
+     */
+    private Duration resolveStatsTtl(Object key, Object value) {
+        return TTL_STATS.plusSeconds(ThreadLocalRandom.current().nextInt(10));
     }
 
     /**

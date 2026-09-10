@@ -2,6 +2,7 @@ package com.yigalaxy.yiguixingtu.article;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
 import com.yigalaxy.yiguixingtu.article.service.ArticleService;
 import com.yigalaxy.yiguixingtu.common.Result;
@@ -38,6 +39,12 @@ public class ArticleController {
     @GetMapping("/page")
     public Result<IPage<ArticleVO>> page(ArticleQuery query) {
         return Result.success(articleService.pagePublished(query));
+    }
+
+    @Operation(summary = "站点统计（文章数 / 总浏览量 / 分类数）")
+    @GetMapping("/stats")
+    public Result<ArticleStatsVO> stats() {
+        return Result.success(articleService.stats());
     }
 
     @Operation(summary = "文章详情")

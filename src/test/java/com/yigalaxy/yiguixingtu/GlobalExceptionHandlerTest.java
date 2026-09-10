@@ -129,6 +129,64 @@ class GlobalExceptionHandlerTest extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.code").value(ResultCode.METHOD_NOT_ALLOWED.getCode()));
     }
 
+    /**
+     * ⑥ 请求体不是合法 JSON → 400（而不是 500）
+     *
+     * 【这条用例是怎么来的】给新接口做真实环境验证时，我用 curl 手拼了一个 JSON body
+     * （引号写错了），后端回的是 500「服务器内部错误」。顺手把另外两种"客户端写错"
+     * 的情形也试了一遍，同样都是 500 —— 于是有了这三条用例。
+     *
+     * 【为什么必须区分】500 的语义是"服务器自己坏了"：监控告警会把它当成真故障，
+     * 真正的服务器故障反而被这种噪音淹掉；而这三种错误都是调用方把请求写错了，
+     * 重试多少次都不会好。而且排查方向会被带偏：前端看到 500 会来问后端"是不是挂了"。
+     *
+     * 【为什么 HTTP 仍然 200，只给 body.code = 400】这三类都会被前端自己触发
+     * （表单/请求拼错了），属于"业务错误"这一区；改 HTTP 状态码要前后端一起回归，
+     * 那是 5.6 那个破坏性改动该做的事 —— 不夹在这里顺手改。
+     */
+    @Test
+    void malformedJsonBody_shouldReturnParamError() throws Exception {
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{username:oops}"))   // 键没有引号 → 不是合法 JSON
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(ResultCode.PARAM_ERROR.getCode()))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.containsString("请求体格式不正确")));
+    }
+
+    /**
+     * ⑦ 少传必填的请求参数 → 400（而不是 500）
+     *
+     * 测试控制器上的 /test/need-param 声明了 @RequestParam("name")，这里故意不传。
+     * 真实场景：前端漏传了某个查询参数，或者把参数名拼错了。
+     */
+    @Test
+    void missingRequiredParam_shouldReturnParamError() throws Exception {
+        mockMvc.perform(get("/test/need-param")
+                        .header("Authorization", "Bearer " + validToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(ResultCode.PARAM_ERROR.getCode()))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.containsString("name")));
+    }
+
+    /**
+     * ⑧ 参数类型不对（Long 类型的路径变量传了 "abc"）→ 400（而不是 500）
+     *
+     * 真实场景：前端把 id 拼成了字符串/undefined，比如 DELETE /admin/tag/undefined。
+     * 提示里带参数名（"参数 id 格式不正确"）才能让人一眼定位。
+     */
+    @Test
+    void wrongParamType_shouldReturnParamError() throws Exception {
+        mockMvc.perform(get("/test/need-long/{id}", "abc")
+                        .header("Authorization", "Bearer " + validToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(ResultCode.PARAM_ERROR.getCode()))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.containsString("id")));
+    }
+
     /** 注册测试控制器：/test/biz 抛业务异常，/test/boom 抛未知异常 */
     @TestConfiguration
     static class TestConfig {
@@ -148,6 +206,18 @@ class GlobalExceptionHandlerTest extends AbstractIntegrationTest {
         @GetMapping("/test/boom")
         public String boom() {
             throw new RuntimeException("故意抛出的未知异常");
+        }
+
+        /** 故意声明一个必填的查询参数：用来验证"少传参数"被翻译成 400 */
+        @GetMapping("/test/need-param")
+        public String needParam(@org.springframework.web.bind.annotation.RequestParam("name") String name) {
+            return name;
+        }
+
+        /** 故意声明一个 Long 路径变量：用来验证"类型不对"被翻译成 400 */
+        @GetMapping("/test/need-long/{id}")
+        public String needLong(@org.springframework.web.bind.annotation.PathVariable("id") Long id) {
+            return String.valueOf(id);
         }
     }
 }

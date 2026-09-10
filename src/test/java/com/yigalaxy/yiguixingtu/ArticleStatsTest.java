@@ -113,10 +113,17 @@ class ArticleStatsTest extends AbstractIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.articleCount").exists());
 
-        // 反过来对照一下：真的传一个非数字 id，应当是参数类型不匹配而不是统计数据
+        // 反过来对照一下：真的传一个非数字 id，应当是"参数格式不对"。
+        // 【这条断言原来写的是 500】—— 那时类型转换失败会落到兜底的
+        // @ExceptionHandler(Exception.class)，报成"服务器内部错误"。
+        // 现在 GlobalExceptionHandler 专门接了 MethodArgumentTypeMismatchException，
+        // 返回 400「参数 id 格式不正确」。这个改动是给新接口做真实环境验证时顺手发现的
+        // （用 curl 拼坏了 JSON，看到 500，于是把"客户端写错"这一类都试了一遍）。
+        // 语义上 400 才对：这是调用方把请求写错了，重试一万次也不会好，
+        // 而 500 会让监控把它当成服务器故障。
         mockMvc.perform(get("/article/not-a-number"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.code").value(500));
+                .andExpect(jsonPath("$.code").value(400));
     }
 
     // ================================================================

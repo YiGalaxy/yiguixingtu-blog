@@ -5,6 +5,7 @@ import com.yigalaxy.yiguixingtu.common.ResultCode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.DisabledException;
 import org.springframework.security.core.AuthenticationException;
@@ -12,12 +13,30 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import io.github.resilience4j.ratelimiter.RequestNotPermitted;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * 全局异常处理器：把各种异常统一转成规范的 Result 返回
+ *
+ * 【这个类存在的意义】
+ *   没有它的话，每个 Controller 都要自己 try/catch，而且很容易漏；
+ *   更糟的是漏掉的那种会直接抛到 Tomcat，返回一个格式完全不同的错误页
+ *   （HTML 或者默认的 JSON），前端拿到之后"统一返回"的约定就断了。
+ *   这里集中接住所有异常，保证**任何情况下响应体都是 {code, message, data}**。
+ *
+ * 【哪些错误返回真实 HTTP 状态码，哪些仍然 200 + body.code】
+ *   判断标准只有一条：**这个错误是谁的问题**。
+ *     · 请求本身有问题（地址不存在 404 / 方法用错 405 / 被限流 429）→ 真状态码。
+ *       它们的受众不只是前端，还有 Nginx、监控、调用方的重试策略，
+ *       这些基础设施只看状态码。
+ *     · 业务语义与参数错误（密码错、参数不合法、请求体格式不对）→ 200 + body.code。
+ *       前端本来就要针对每种 code 分支处理，改状态码会牵动所有接口的错误分支。
+ *   这条分界线是量过"收益 vs 破坏面"之后划的，不是漏改，详见 README
+ *   「统一返回与错误处理」。
  */
 @Slf4j
 @RestControllerAdvice
@@ -63,7 +82,7 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * 【新增】权限不足：@PreAuthorize 拦截（如游客调用管理员接口）
+     * 权限不足：@PreAuthorize 拦截（如游客调用管理员接口）
      *
      * 【为什么必须单独处理？】
      * 方法级权限校验抛出的 AccessDeniedException 发生在 Controller 方法内部，
@@ -87,7 +106,7 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * 【新增】请求的地址不存在（写错接口路径、或者接口已经下线）
+     * 请求的地址不存在（写错接口路径、或者接口已经下线）
      *
      * 【为什么必须单独接住 —— 这是被一次真实的困惑逼出来的】
      *   这个项目所有异常都走「统一返回」：HTTP 200 + body 里的 code。
@@ -109,7 +128,7 @@ public class GlobalExceptionHandler {
      *   因为前端【永远不会主动去请求一个不存在的地址】——
      *   正常流程里根本走不到这两个 handler，所以改它们对前端零影响。
      *   业务错误（密码错、参数错）继续用 200 + code，
-     *   免得把前端 19 个接口的错误分支全部重新回归一遍。
+     *   免得把前端所有接口的错误分支全部重新回归一遍。
      *   —— 这是"改动收益"和"破坏面"之间量过之后的取舍，不是漏改了。
      *
      * 【匿名用户请求不存在的地址仍然是 401，这是有意的】
@@ -127,7 +146,7 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * 【新增】HTTP 方法用错了（不是 GET/POST 的问题，是"这个地址不接受这个方法"）
+     * HTTP 方法用错了（不是 GET/POST 的问题，是"这个地址不接受这个方法"）
      *
      * 比如用 POST 去打一个只声明了 @GetMapping 的接口。
      * 不接住的话会落到兜底的 Exception 分支，报成 500「服务器内部错误」——
@@ -142,7 +161,7 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * 【新增】被应用层限流拦下（Resilience4j 的 @RateLimiter 拒绝了这次请求）
+     * 被应用层限流拦下（Resilience4j 的 @RateLimiter 拒绝了这次请求）
      *
      * 【这个异常是谁抛的】
      *   不是我们抛的，是 Resilience4j 自带的切面抛的：
@@ -167,5 +186,73 @@ public class GlobalExceptionHandler {
         return ResponseEntity
                 .status(HttpStatus.TOO_MANY_REQUESTS)                  // HTTP 429
                 .body(Result.error(ResultCode.TOO_MANY_REQUESTS));     // {"code":429,...}
+    }
+
+    // =================================================================
+    //  下面三个 handler 解决的是同一类问题：**请求本身写错了，却报成 500**
+    //
+    //  【它们是怎么被发现的】
+    //    给新接口做真实环境验证时，我用 curl 手拼了一个 JSON body（引号写错了），
+    //    后端回的是 {"code":500,"message":"服务器内部错误"}。
+    //    顺手试了另外两种"客户端写错"的情形，也都报 500：
+    //      · body 不是合法 JSON
+    //      · 少传了必填的请求参数（@RequestParam 没给）
+    //      · 路径/查询参数类型不对（id 传了 "abc"，而它是 Long）
+    //
+    //  【为什么必须区分，而不是"反正前端会提示失败"】
+    //    ① 500 的语义是"服务器自己坏了" —— 监控告警会把它当成真故障，
+    //       真正的服务器故障反而被这类噪音淹掉；而这三类错误都是
+    //       调用方把请求写错了，重试一万次也不会好。
+    //    ② 排查方向会被带偏：前端同学看到 500 会来问后端"是不是挂了"，
+    //       后端翻日志才发现是参数问题 —— 一来一回就是半小时。
+    //    ③ 与 404 / 405 / 429 保持同一套判断标准：**看这个错误是谁的问题**。
+    //
+    //  【为什么 HTTP 仍然返回 200，只给 body.code = 400】
+    //    这三类都会被【前端自己】触发（表单或请求拼错了），属于"业务错误"这一区；
+    //    改 HTTP 状态码要前后端一起回归 —— 那是 5.6 那个破坏性改动该做的事。
+    // =================================================================
+
+    /**
+     * 请求体不是合法 JSON（或结构与目标对象对不上）。
+     *
+     * 【为什么日志里只留第一行】异常的 message 可能很长（包含解析位置与请求体片段），
+     * 而我们要的只是"哪里坏了"这一句；完整堆栈在这个 handler 里没有排查价值。
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public Result<?> handleNotReadable(HttpMessageNotReadableException e) {
+        log.warn("请求体无法解析: {}", firstLine(e.getMessage()));
+        return Result.error(ResultCode.PARAM_ERROR, "请求体格式不正确，请检查 JSON 是否合法");
+    }
+
+    /**
+     * 少传了必填的请求参数。
+     * 例如 PUT /admin/comment/{id}/status 没带 ?status=1。
+     */
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public Result<?> handleMissingParam(MissingServletRequestParameterException e) {
+        log.warn("缺少必填请求参数: {}", e.getParameterName());
+        return Result.error(ResultCode.PARAM_ERROR, "缺少必填参数：" + e.getParameterName());
+    }
+
+    /**
+     * 参数类型不对（路径变量或查询参数转不成目标类型）。
+     * 例如 DELETE /admin/tag/abc —— id 声明的是 Long，"abc" 转不过去。
+     *
+     * 【为什么把参数名放进提示里】调用方看到"参数 id 格式不正确"能立刻定位；
+     * 只说"参数校验失败"等于没说。
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public Result<?> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
+        log.warn("参数类型不正确: name={}, value={}", e.getName(), e.getValue());
+        return Result.error(ResultCode.PARAM_ERROR, "参数 " + e.getName() + " 格式不正确");
+    }
+
+    /** 取异常信息的第一行（多行式的 message 只留开头那句） */
+    private String firstLine(String message) {
+        if (message == null) {
+            return null;
+        }
+        int idx = message.indexOf('\n');
+        return idx < 0 ? message : message.substring(0, idx);
     }
 }

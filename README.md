@@ -1768,6 +1768,23 @@ server {
         access_log off;
     }
 
+    # ---- 前端的背景视频 / 音乐：不进构建产物，由 Nginx 直接发文件 ----
+    # 这两个文件（bg-star.mp4 / bg-music.mp3，合计约 12.4MB）如果留在前端仓库的
+    # public/ 目录里，就会被打进前端构建产物，而且每次请求都要穿过 Nuxt 进程。
+    # 它们是"不会变的大文件"—— 交给 Nginx 直接返回，最省事也最快
+    # （比起绕一圈对象存储/CDN，单台 ECS 上少一次外网往返）。
+    # 部署时把前端仓库 static-media/ 里的文件传到 /var/www/media/ 即可。
+    location /media/ {
+        alias /var/www/media/;
+        access_log off;
+        # 文件名固定、内容不变，可以放心长期缓存；将来换素材就换个文件名
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800";
+        # ⚠️ 这里刻意【不加】limit_req：<video>/<audio> 是按 Range 分段拉取的
+        #    （一次播放可能发几十个请求），套上限流会让播放中途卡住，
+        #    而表现看起来像"网络不好"，极难排查
+    }
+
     # 登录接口：更严的桶（防暴力破解）
     location = /api/auth/login {
         proxy_pass http://127.0.0.1:8082/auth/login;
@@ -1781,6 +1798,20 @@ server {
     }
 }
 ```
+
+**这两个背景文件（`bg-star.mp4` / `bg-music.mp3`）怎么部署**：
+
+```bash
+# 在服务器上：建目录 + 从本地把前端仓库里的媒体文件传上去
+sudo mkdir -p /var/www/media
+scp yiguixingtu-web/static-media/* root@服务器IP:/var/www/media/
+```
+
+⚠️ 它们**不进前端构建产物**（这正是把它们从 `public/` 挪出来的目的：前端
+`.output/public` 从约 17.2MB 降到约 3.5MB，少掉的 13.7MB 就是这两个文件），
+所以 `docker compose up -d --build` **不会**带上它们 ——
+必须单独传一次。忘了传的症状是"页面能开，背景黑屏、音乐点了没反应"，
+而浏览器控制台只会报一个 `404 /media/bg-star.mp4`。
 
 > **为什么限流要做两层（Nginx + 应用层）**
 >
@@ -1817,6 +1848,29 @@ server {
 | 9 | `/actuator/prometheus` 没有被公网看到 | 访问 `https://你的域名/api/actuator/prometheus` 应当拿不到指标（Nginx 只反代 `/api/`，正常情况打不到） |
 | 10 | **上传的图片在容器重建后还在** | 后台上传一张封面 → `docker compose -f docker-compose.prod.yaml up -d --force-recreate backend` → 再打开那篇文章，图片应当还能显示（守"上传目录有没有真的挂到卷上"） |
 | 11 | 图片地址是外网可访问的 | 右键封面图「复制图片地址」，在无痕窗口打开应当能看到图（守 `UPLOAD_BASE_URL` 填的是浏览器能访问到的地址） |
+| 12 | **背景视频/音乐能播** | `curl -I https://你的域名/media/bg-music.mp3` 应当返回 **200**（守"前端仓库 `static-media/` 里的文件真的传到了 `/var/www/media/`"——它们不在构建产物里，忘了传就只有 404） |
+| 13 | **审计表真的在记** | 后台改一下某篇文章 → `docker exec yiguixingtu-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" yiguixingtu -e "SELECT * FROM operation_log ORDER BY id DESC LIMIT 3"` 应当能看到那条记录，且 `ip` 是真实访问者地址（不是 `127.0.0.1`） |
+
+#### 这份清单在本机演练过一遍（不是纸面清单）
+
+上线这条路最容易出问题的恰好是"**空库第一次启动**"——它只在服务器上执行一次，
+而且正是最不该出错、又最没机会练的那一次。所以部署前在本机用
+`docker-compose.prod.yaml` **原封不动地演练了一遍生产形态**（只改了两个宿主机端口，
+用 `BACKEND_PORT=8092` / `FRONTEND_PORT=3010` 避开正在跑的开发环境；
+compose 里的独立项目名 `yiguixingtu-prod` 保证了它和本地开发容器互不干扰）：
+
+| 演练项 | 实测结果 |
+|--------|---------|
+| 空库启动 → Flyway | `Successfully applied 4 migrations`（V1 init → V2 排序索引 → V3 覆盖索引 → V4 审计表），表 `user / category / article / operation_log` 全部建好 |
+| 管理员引导 | 用 `.env` 里的引导账号能直接登录（`role=ADMIN`） |
+| 健康检查 | `backend` 等 mysql/redis `healthy` 才启动，随后自身也变 `healthy`（`depends_on: service_healthy` 真的生效） |
+| 端口暴露面 | `docker compose ps` 只有 `127.0.0.1:8092->8082`；**mysql 与 redis 一个端口都没映射** |
+| 操作审计（M4.2） | 建文章 + 发布后 `operation_log` 出现两条记录，`action` / `target_id` / `trace_id` 齐全 |
+| 应用层限流 | 连续 6 次登录 → `200,200,200,200,429,429`（配额 5 次/分钟，返回**真 HTTP 429**） |
+| 上传落卷 | 上传的封面写进 `/app/uploads/cover/2026/09/…png`，`GET` 返回 200；**`--force-recreate` 重建容器后文件还在、还能访问**（守"具名卷有没有真的挂上"） |
+
+> 演练完 `docker compose down -v` 把演练用的容器与卷全部删掉，
+> 开发环境（8082 / 3310 / 6380）不受任何影响。
 
 ### 5. 备份与恢复
 

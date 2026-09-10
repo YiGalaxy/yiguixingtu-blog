@@ -76,8 +76,19 @@ WORKDIR /app
 # （不写死版本号，pom 里改了版本这里也不用跟着改）
 COPY --from=builder /build/target/*.jar app.jar
 
-# 把文件属主改成 app，否则 jar 还是 root 所有
-RUN chown -R app:app /app
+# 【上传目录：必须在这里先建出来，而且属主必须是 app】
+#   封面图存在服务器磁盘上（app.upload.storage=local），目录由
+#   app.upload.local-dir 指定，compose 里挂的是 /app/uploads。
+#
+#   ⚠️ 为什么非要在镜像里 mkdir 一次（明明代码里 Files.createDirectories 会自己建）
+#     因为 compose 挂的是【具名卷】：卷第一次被使用时，Docker 会把镜像里
+#     那个挂载点上【已有的内容连同属主/权限】一起复制进新卷。
+#     如果镜像里没有这个目录，新卷会被建成 root:root ——
+#     而我们的进程是以非 root 的 app 用户跑的，第一次上传就会
+#     "Permission denied"，而且是在用户点了上传之后才报错。
+#     先 mkdir 再 chown，新卷一出生就是 app 能写的。
+#   （chown 顺手把整个 /app 一起改了，jar 的属主也一起修正）
+RUN mkdir -p /app/uploads && chown -R app:app /app
 
 # 切换到非 root 用户 —— 这行之后的所有指令都以 app 身份执行
 USER app

@@ -172,6 +172,37 @@ services:
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
       BOOTSTRAP_ADMIN_NICKNAME: ${BOOTSTRAP_ADMIN_NICKNAME:-站长}
+      # ---- 封面上传：存在【这台服务器】的磁盘上，不用对象存储 ----
+      # 为什么不用 OSS：单台 ECS + 个人博客的量级，本地磁盘完全够用，
+      # 少一个外部依赖就少一处会失败的地方（网络、密钥、配额、计费）。
+      # 什么时候该换：图片多到磁盘吃紧、或者将来要上多台机器做负载均衡
+      # （多实例时本地磁盘就不共享了，那时必须换成对象存储或共享盘）。
+      UPLOAD_STORAGE: local
+      # 【为什么目录必须写成 /app/uploads】
+      #   它是下面 volumes 里挂载点的路径。写错的话文件会落到容器自己的
+      #   可写层里 —— 容器一重建（docker compose up -d --build 就会重建）
+      #   用户上传的所有封面图【全部消失】，而且不会有任何报错。
+      UPLOAD_LOCAL_DIR: /app/uploads
+      # 【图片的对外地址前缀，必须和浏览器看到的地址一致】
+      #   本地存储返回的 URL 形如 {base-url}/uploads/xxx.jpg，
+      #   所以这里要填"浏览器能访问到后端 /uploads/** 的那个前缀"。
+      #   直接复用 PUBLIC_API_BASE（Nginx 把 /api/ 反代到后端根路径），
+      #   这样两者天然一致 —— 分开填两个变量最容易出现"有一个忘了改"。
+      UPLOAD_BASE_URL: ${PUBLIC_API_BASE:?必须在 .env 里设置 PUBLIC_API_BASE（浏览器访问后端的地址）}
+    volumes:
+      # 【上传的图片必须放在卷里，这是本文件里最容易被忽略的一处】
+      #   不挂卷的话，图片写进容器的可写层：容器一重建就全没了
+      #   （镜像重构建、改配置、升级版本都会重建容器）。
+      #   具名卷独立于容器存在，"docker compose down"不会删它，
+      #   只有加 -v 才会删 —— 这一点在 README 的备份章节也强调了。
+      #
+      # 【为什么不用"绑定挂载到宿主机目录"】
+      #   绑定挂载（./uploads:/app/uploads）也能持久化，而且备份起来更直观；
+      #   但它在 Windows/Docker Desktop 上有权限与性能的坑，而具名卷
+      #   两个平台行为一致。想直接看到文件的话，用
+      #   `docker run --rm -v yiguixingtu-prod_uploads_data:/data -v $PWD:/out alpine cp -r /data /out`
+      #   就能把文件拷出来（README 备份章节有这条）。
+      - uploads_data:/app/uploads
     ports:
       # 应用端口要给 Nginx 反代，所以这一行必须映射 —— 但【只绑到 127.0.0.1】。
       #
@@ -247,3 +278,5 @@ volumes:
   # 具名卷：容器删了数据还在（docker compose down 不会删卷，加 -v 才会）
   mysql_data:
   redis_data:
+  # 用户上传的封面图（app.upload.storage=local 时写到这里，见 backend 服务里的说明）
+  uploads_data:

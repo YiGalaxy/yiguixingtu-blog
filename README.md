@@ -39,7 +39,7 @@
 | 运维监控 | Spring Boot Actuator + Micrometer（Prometheus registry），见「可观测」 |
 | 限流 | Resilience4j 2.4.0（`resilience4j-spring-boot4`）—— 注解式限流，**不写自研切面**；与 Nginx `limit_req` 组成两层，见「部署」章节 |
 | 链路追踪 | Micrometer Tracing + Brave（traceId 进日志 + 响应头 `X-Trace-Id`），见「可观测」 |
-| 对象存储 | 阿里云 OSS SDK 3.18.1（生产用；本地默认存磁盘） |
+| 图片存储 | 本地磁盘（默认，本项目即用此方案）；阿里云 OSS SDK 3.18.1 作为可切换的备选，见「配置」章节 |
 | 工具库 | Lombok |
 | 测试 | JUnit 5 + MockMvc（`spring-boot-starter-webmvc-test`）+ **Testcontainers 2.0.5** |
 | 代码覆盖率 | JaCoCo 0.8.13 |
@@ -82,7 +82,7 @@
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
-  存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
+  图片存服务器本地磁盘（可按配置切到阿里云 OSS，见「配置」章节）
 - 集成测试 24 个类 **198 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
@@ -150,7 +150,7 @@ com.yigalaxy.yiguixingtu
 │   ├── service/UploadService       # 类型白名单 + UUID 重命名 + 按日期分目录
 │   ├── storage/FileStorage         # 接口
 │   ├── storage/LocalFileStorage    # 本地磁盘（默认）
-│   ├── storage/OssFileStorage      # 阿里云 OSS（生产）
+│   ├── storage/OssFileStorage      # 阿里云 OSS（备选，本项目未启用）
 │   └── UploadProperties            # 上传配置绑定
 └── category
     ├── controller/CategoryController      # 分类列表（公开）
@@ -450,10 +450,10 @@ mybatis-plus.configuration.log-impl=org.apache.ibatis.logging.nologging.NoLoggin
 | `REDIS_PORT` | ⬜ | 默认 `6379` |
 | `CORS_ALLOWED_ORIGINS` | ✅ | **前端域名**，例如 `https://你的域名`；多个用英文逗号分隔 |
 | `SERVER_PORT` | ⬜ | 默认 `8082` |
-| `UPLOAD_STORAGE` | ⬜ | `local`（默认）/ `oss`。**上线建议设成 `oss`** |
-| `OSS_ENDPOINT` / `OSS_BUCKET` | 用 OSS 时必填 | 例如 `https://oss-cn-hangzhou.aliyuncs.com` / `你的-bucket` |
-| `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | 用 OSS 时必填 | ⚠️ RAM 子账号的密钥，只授权该 Bucket 读写 |
-| `OSS_SIGNED_URL` | ⬜ | 默认 `false`（公有读）；Bucket 私有读时设 `true` |
+| `UPLOAD_STORAGE` | ⬜ | `local`（默认）/ `oss`。**本项目用 local**（存在服务器磁盘上） |
+| `UPLOAD_LOCAL_DIR` | ⬜ | 上传目录，compose 里已设成 `/app/uploads`（必须是挂载点路径） |
+| `UPLOAD_BASE_URL` | ⬜ | 图片地址前缀，compose 里复用 `PUBLIC_API_BASE`，保证与浏览器看到的地址一致 |
+| `OSS_*` | ⬜ | 只有把 `UPLOAD_STORAGE` 切成 `oss` 时才需要，见「配置」章节 |
 | `UPLOAD_BASE_URL` | ⬜ | 仅 `local` 时用：图片对外的地址前缀，例如 `https://你的域名` |
 
 #### 跨域白名单（**上线必改这一项**）
@@ -527,26 +527,52 @@ spring.datasource.hikari.max-lifetime=1800000
 | `connection-timeout` | 3000 ms | Hikari 默认 30 秒 —— 数据库出问题时请求要挂 30 秒才报错（用户早关页面了），这期间还一直占着 Tomcat 工作线程。实测 P99 才 135ms，3 秒足够覆盖正常排队，超过就是不正常，应当立刻失败 |
 | `max-lifetime` | 1800000 ms（30 分钟） | MySQL 的 `wait_timeout` 默认 8 小时，超时会被服务端单方面关连接。池里的连接若活得比它久，就会拿到一条"其实已经死了"的连接，报出 `Communications link failure` 这种与真实原因无关的错。30 分钟 ≪ 8 小时；**将来调小 MySQL 的 `wait_timeout`，这个值必须跟着调小** |
 
-#### 文件上传与对象存储
+#### 文件上传（封面图存在服务器磁盘上）
 
 ```properties
-# local（本地磁盘，默认）/ oss（阿里云 OSS）
+# local（本地磁盘，默认，本项目就用这个）/ oss（阿里云 OSS，备选）
 app.upload.storage=${UPLOAD_STORAGE:local}
+app.upload.local-dir=${UPLOAD_LOCAL_DIR:./uploads}
+app.upload.base-url=${UPLOAD_BASE_URL:http://localhost:8082}
 app.upload.allowed-extensions=jpg,jpeg,png,gif,webp
 app.upload.max-size=5MB
 ```
 
-**为什么存储做成可切换的**：本地开发和测试不应该依赖真实 OSS 凭据与外网
-（否则 clone 下来的人根本没法验证上传功能，CI 也跑不了）；
-上线初期也可以先用本地存储把站点跑起来，等 OSS 配好改一个配置切过去，
-不用改代码、不用重新构建。
+**本项目用本地磁盘存封面图，不用对象存储。** 理由很简单：单台 ECS +
+个人博客的图片量级，本地磁盘完全够用，**少一个外部依赖就少一处会失败的地方**
+（网络抖动、密钥过期、配额限制、还要多付一份钱）。
 
-| 存储 | 图片地址 | 适用 |
-|---|---|---|
-| `local` | `{base-url}/uploads/cover/2026/09/{uuid}.png`，由后端提供 | 本地开发、测试、还没配 OSS 时 |
-| `oss` | `https://{bucket}.{endpoint}/{key}` | 生产环境（推荐） |
+图片的完整地址形如：
 
-切到 OSS 需要这些配置（生产环境请用**环境变量**注入）：
+```
+{UPLOAD_BASE_URL}/uploads/cover/2026/09/{uuid}.png
+                      └─ 按年月分目录 ─┘  └ UUID 重命名 ┘
+```
+
+- **按年月分目录**：单目录里堆几万个文件，`ls`/备份/排查都会变得很难受
+- **UUID 重命名**：用原名会撞名、还会把用户的文件名暴露在 URL 里
+
+> ⚠️ **部署时最容易踩的一个坑：上传目录必须挂到卷上**
+>
+> 容器里的文件系统是**临时的**：容器一重建（改配置、升级版本、
+> `docker compose up -d --build` 都会重建），写在容器里的图片**全部消失**，
+> 而且不会有任何报错 —— 用户第二天来看，所有封面图都变成了裂图。
+>
+> 所以 `docker-compose.prod.yaml` 里给后端挂了具名卷：
+> `uploads_data:/app/uploads`。具名卷独立于容器存在，
+> `docker compose down` 也不会删它（**只有加 `-v` 才会删**，
+> 所以清理环境时千万别顺手加 `-v`）。
+>
+> 另外 Dockerfile 里专门 `mkdir -p /app/uploads && chown app:app` ——
+> 因为卷第一次被使用时，Docker 会把镜像里该挂载点的**属主**一起复制进新卷；
+> 镜像里没这个目录的话，新卷会建成 `root:root`，
+> 而非 root 运行的进程第一次上传就会 `Permission denied`。
+
+**OSS 是保留但未启用的备选方案**
+
+代码里仍然保留了一个 `OssFileStorage`（实现同一个 `FileStorage` 接口），
+把 `app.upload.storage` 改成 `oss` 并配好下面几项就能切过去，
+不用改一行代码、也不用重新构建：
 
 ```properties
 app.upload.storage=oss
@@ -554,11 +580,14 @@ app.upload.oss-endpoint=${OSS_ENDPOINT}          # https://oss-cn-hangzhou.aliyu
 app.upload.oss-bucket=${OSS_BUCKET}
 app.upload.oss-access-key-id=${OSS_ACCESS_KEY_ID}
 app.upload.oss-access-key-secret=${OSS_ACCESS_KEY_SECRET}
-app.upload.oss-key-prefix=${OSS_KEY_PREFIX:cover}
-app.upload.oss-signed-url=${OSS_SIGNED_URL:false}  # Bucket 私有读时设为 true
 ```
 
-> ⚠️ **必须用 RAM 子账号的 AccessKey，不要用主账号密钥。**
+**什么时候真的需要切到 OSS**：
+① 图片多到 ECS 磁盘吃紧；② 将来上多台机器做负载均衡 ——
+那时本地磁盘在每台机器上是各自独立的，用户上传的图在另一台上就看不到，
+必须换成对象存储（或共享盘）。
+
+> ⚠️ 要用 OSS 的话，**必须用 RAM 子账号的 AccessKey，不要用主账号密钥。**
 > 主账号密钥等于整个账号的权限（能改账单、能删所有资源），一旦泄漏后果不可控；
 > RAM 子账号可以只授权这一个 Bucket 的读写，就算泄漏，损失也被限制在一个桶里。
 > 这是最小权限原则最典型的一个应用场景。
@@ -1434,7 +1463,7 @@ curl -s http://127.0.0.1:8082/actuator/prometheus | head -20
 | 数据库账号 | compose 里单独建 `yiguixingtu` 业务账号，**不让应用用 root**（最小权限） |
 | Redis | 设 `requirepass`，**内网也设** —— 默认无密码时，只要容器网络可达就等于公开 |
 | JWT 密钥 | 必须用环境变量覆盖，且 prod 配置里**不给默认值**（忘配就启动失败） |
-| OSS 密钥 | 用 **RAM 子账号**并只授权单个 Bucket，不用主账号 AccessKey |
+| 图片存储 | 存在服务器磁盘上（具名卷 uploads_data），不用对象存储；/uploads/** 只放行 GET |
 | 依赖漏洞 | `.github/dependabot.yml` 每周检查 maven 与 github-actions 依赖，自动开 PR |
 | 接口文档 | prod 下 Swagger 真的关掉（不只设开关，还从放行名单里移除，见「配置」章节） |
 
@@ -1453,7 +1482,7 @@ curl -s http://127.0.0.1:8082/actuator/prometheus | head -20
                       │                 backend ──▶ mysql:3306                   │
                       │                         └──▶ redis:6379                  │
                       └──────────────────────────────────────────────────────────┘
-                                    封面图 ──▶ 阿里云 OSS（不走 ECS 磁盘）
+                                    封面图 ──▶ 服务器磁盘（具名卷 uploads_data，随容器重建不丢）
 ```
 
 **四个容器都由 `docker-compose.prod.yaml` 管理**，和本地开发的 `docker-compose.yaml`
@@ -1583,6 +1612,34 @@ server {
         limit_req_status 429;
     }
 
+    # ---- 上传的封面图：单独一段，两个"必须" ----
+    # 这个 location 比 /api/ 更具体，Nginx 会优先匹配它（前缀匹配取最长）。
+    location /api/uploads/ {
+        proxy_pass http://127.0.0.1:8082/uploads/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 【必须一：图片不能走上面那个限流】
+        #   一篇带 10 张图的文章，打开一次就是 10 个请求 ——
+        #   套上 20r/s 的桶之后，一个正常用户翻两页就会把自己限成 429，
+        #   表现是"图片刷不出来"，而真正的原因是被限流了。
+        #   这里刻意【不写 limit_req】。
+
+        # 【必须二：把后端的 no-store 头摘掉，换成长期缓存】
+        #   后端是 Spring Security 保护的，它默认给所有响应加
+        #   Cache-Control: no-cache, no-store, max-age=0, must-revalidate ——
+        #   那是给"接口响应"用的（接口数据确实不该被缓存），
+        #   但对图片是灾难：浏览器每次都要重新下整张图。
+        #   proxy_hide_header 把上游那个头藏掉，再用 add_header 换成长期缓存。
+        #   敢给 30 天是因为图片文件名是 UUID：内容永不改变，
+        #   换了图就是换了 URL，不存在"缓存了旧图"的问题。
+        proxy_hide_header Cache-Control;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000, immutable";
+        access_log off;
+    }
+
     # 登录接口：更严的桶（防暴力破解）
     location = /api/auth/login {
         proxy_pass http://127.0.0.1:8082/auth/login;
@@ -1630,11 +1687,13 @@ server {
 | 7 | 数据库每天自动备份 | 见下面「备份与恢复」 |
 | 8 | 后端/前端端口只绑回环，没有对公网开放 | 在服务器外 `telnet 服务器IP 8082` 与 `telnet 服务器IP 3000` 都应当连不上（`docker-compose.prod.yaml` 里已写成 `127.0.0.1:` 前缀） |
 | 9 | `/actuator/prometheus` 没有被公网看到 | 访问 `https://你的域名/api/actuator/prometheus` 应当拿不到指标（Nginx 只反代 `/api/`，正常情况打不到） |
+| 10 | **上传的图片在容器重建后还在** | 后台上传一张封面 → `docker compose -f docker-compose.prod.yaml up -d --force-recreate backend` → 再打开那篇文章，图片应当还能显示（守"上传目录有没有真的挂到卷上"） |
+| 11 | 图片地址是外网可访问的 | 右键封面图「复制图片地址」，在无痕窗口打开应当能看到图（守 `UPLOAD_BASE_URL` 填的是浏览器能访问到的地址） |
 
 ### 5. 备份与恢复
 
 ```bash
-# —— 备份（建议加进 crontab 每天跑一次）——
+# —— 备份 MySQL（建议加进 crontab 每天跑一次）——
 docker exec yiguixingtu-mysql sh -c \
   'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --databases yiguixingtu' \
   > backup_$(date +%F).sql
@@ -1649,8 +1708,29 @@ docker exec -i yiguixingtu-mysql sh -c \
 - 恢复前**先停掉后端**，避免写入和恢复互相打架：
   `docker compose -f docker-compose.prod.yaml stop backend`
 
+#### ⚠️ 别忘了备份上传的图片
+
+封面图存在服务器的**具名卷** `yiguixingtu-prod_uploads_data` 里，
+它和数据库是两回事 —— **只备份 MySQL 的话，数据库恢复出来了、图片却是空的**，
+文章里全是裂图。
+
+```bash
+# —— 备份图片（把卷里的文件拷到当前目录的 uploads_backup/）——
+docker run --rm \
+  -v yiguixingtu-prod_uploads_data:/data:ro \
+  -v "$PWD":/out \
+  alpine sh -c 'mkdir -p /out/uploads_backup && cp -r /data/. /out/uploads_backup/'
+
+# —— 恢复图片（把备份拷回卷里）——
+docker run --rm \
+  -v yiguixingtu-prod_uploads_data:/data \
+  -v "$PWD":/out \
+  alpine sh -c 'cp -r /out/uploads_backup/. /data/'
+```
+
 > **备份要验证过才算备份**。建议演练一次：拷一份库出来、导进一个新库、
-> 启动应用确认文章都在。没验证过的备份，真出事时大概率用不了。
+> 启动应用确认文章都在；图片也一样 —— 把备份拷进一个空卷，确认还能显示。
+> 没验证过的备份，真出事时大概率用不了。
 
 ### 6. 升级流程
 

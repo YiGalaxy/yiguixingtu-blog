@@ -122,13 +122,22 @@ class CommentTest extends AbstractIntegrationTest {
         Long articleId = insertArticle("评论目标", 1);
 
         // 不带任何 token：评论本来就该允许游客
-        mockMvc.perform(post("/comment")
+        String body = mockMvc.perform(post("/comment")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(commentJson(articleId, "路过的读者", "写得很清楚，收藏了！")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(200))
                 // 返回值里带上 status，前端据此提示"评论已提交，等待审核"
-                .andExpect(jsonPath("$.data.status").value(0));
+                .andExpect(jsonPath("$.data.status").value(0))
+                .andReturn().getResponse().getContentAsString();
+
+        // 【createTime 必须有值】它曾经是 null：库那列有 DEFAULT CURRENT_TIMESTAMP，
+        // 但 MyBatis-Plus 插入后不会把库生成的值回填到对象上，
+        // 于是返回给前端的是一条"没有时间的评论"（前端只好显示成"刚刚"）。
+        // 这是联调时被前端发现的，修法是 Service 里显式给时间。
+        assertNotNull(new com.fasterxml.jackson.databind.ObjectMapper()
+                        .readTree(body).get("data").get("createTime").asText(),
+                "发表评论的响应里必须有 createTime");
 
         Comment saved = findComment(articleId, "路过的读者");
         assertNotNull(saved, "评论应当已经落库");
@@ -137,6 +146,60 @@ class CommentTest extends AbstractIntegrationTest {
         // 前台列表：查不到（这是"审核"这件事真正的意义）
         assertEquals(0, publishedComments(articleId).size(),
                 "待审核的评论不该出现在前台列表里");
+    }
+
+    @Test
+    @DisplayName("⑯ 常见符号不该被转义：中文标点、箭头、破折号、省略号都原样保留")
+    void commonSymbols_shouldNotBeEscaped() throws Exception {
+        Long articleId = insertArticle("符号转义范围", 1);
+        String content = "中文原样保留：箭头 → 破折号 — 省略号 … 版权 ©";
+
+        postComment(articleId, "符号测试", content);
+
+        Comment saved = commentMapper.selectOne(new LambdaQueryWrapper<Comment>()
+                .eq(Comment::getArticleId, articleId)
+                .last("LIMIT 1"));
+
+        // 【这条用例守的是一个被联调抓出来的真 bug】第一版用的是 Spring 的
+        // HtmlUtils.htmlEscape，它会把所有"有 HTML 具名实体的字符"都转掉：
+        //   → 变 &rarr;、— 变 &mdash;、… 变 &hellip;
+        // 而前端渲染评论时用的是 Vue 插值（会再转义一次），
+        // 所以用户在页面上看到的就是字面的 "&rarr;" —— 对中文博客来说
+        // "——" 和 "……" 都是极常见的输入，这个 bug 一眼就能看到。
+        // 现在改成只转义 & < > " ' 这 5 个真正危险的字符。
+        assertEquals(content, saved.getContent(),
+                "常见符号（含中文标点）必须原样保留，实际=" + saved.getContent());
+    }
+
+    @Test
+    @DisplayName("⑰ 极端输入：1000 个尖括号不会把列撑爆（先转义再截断，不报 500）")
+    void pathologicalInput_shouldBeTruncatedInsteadOfFailing() throws Exception {
+        Long articleId = insertArticle("极端输入", 1);
+        // 每个 < 转义后是 4 个字符（&lt;），1000 个就是 4000 字符 ——
+        // 而 content 列只有 varchar(1000)。
+        // 【为什么当初会出问题】第一版是"先按字符数截断到 1000、再转义"，
+        // 于是转义后的 4000 字符直接超过列长度，MySQL 报 Data too long，
+        // 用户收到一个 500 —— 而原因只是一条"符号特别多"的评论。
+        // 现在的顺序是"先转义、再按列长度截断"，并且截断时不切断实体。
+        String pathological = "<".repeat(1000);
+
+        mockMvc.perform(post("/comment")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(commentJson(articleId, "符号刷子", pathological)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        Comment saved = commentMapper.selectOne(new LambdaQueryWrapper<Comment>()
+                .eq(Comment::getArticleId, articleId)
+                .last("LIMIT 1"));
+        assertNotNull(saved, "这条评论应当被正常存下来（而不是报 500）");
+        assertTrue(saved.getContent().length() <= 1000,
+                "存下来的长度不能超过列长度，实际=" + saved.getContent().length());
+        // 截断不能把实体切成两半（"&am" 在页面上就是字面乱码）
+        String stored = saved.getContent();
+        int lastAmp = stored.lastIndexOf('&');
+        assertTrue(lastAmp < 0 || stored.indexOf(';', lastAmp) >= 0,
+                "截断后不该留下半截实体，尾部=" + stored.substring(Math.max(0, stored.length() - 10)));
     }
 
     @Test

@@ -21,7 +21,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
-import org.springframework.web.util.HtmlUtils;
+
+import java.time.LocalDateTime;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,14 +41,20 @@ import java.util.stream.Collectors;
  *    和文章前台查询同样的道理：**安全规则不能是"默认值"**，
  *    默认值是可以被传参覆盖的，而"未审核的评论永远不对外可见"必须是绝对的。
  *
- * ② 入库前做 HTML 转义（HtmlUtils.htmlEscape）
+ * ② 入库前做 HTML 转义（只转义 &amp; &lt; &gt; " ' 这 5 个危险字符）
  *    评论是【用户输入】，而且是唯一一个任何人都能往库里写内容的入口。
  *    本项目的前端用 Vue 渲染（默认转义），所以"存原文 + 前端转义"其实也安全；
  *    但把转义做在入库这一层，等于给所有未来的渲染方（RSS、小程序、导出脚本）
  *    都上了保险 —— 谁忘了转义都不会出 XSS。
- *    代价写清楚：内容里原本的 < > & 会被存成实体（&lt; 等），
+ *    代价写清楚：内容里原本的 &lt; &gt; &amp; 会被存成实体（&amp;lt; 等），
  *    所以【评论不支持 HTML/Markdown】—— 这对纯文本评论是合理的取舍；
  *    哪天要支持富文本，这一层必须重新设计（改白名单过滤，而不是简单转义）。
+ *
+ *    ⚠️ 这里【不用】Spring 的 HtmlUtils.htmlEscape —— 它在联调时被前端发现
+ *    会把"有 HTML 具名实体的字符"也一起转掉（→ 变 &amp;rarr;、— 变 &amp;mdash;、
+ *    … 变 &amp;hellip;），而前端渲染时会再转义一次，用户在页面上看到的就是
+ *    字面的 "&amp;rarr;"。中文破折号"——"和省略号"……"都中招，属于一眼可见的 bug。
+ *    详见 escapeAndFit 的注释。
  *
  * ③ 后台列表用"两次查询"代替 JOIN
  *    评论列表要显示文章标题，直觉是 JOIN article。这里没有这么做：
@@ -66,6 +73,9 @@ public class CommentServiceImpl implements CommentService {
 
     /** 内容上限，与 DTO 校验、数据库列长度保持一致 */
     private static final int CONTENT_MAX_LENGTH = 1000;
+
+    /** 邮箱上限，与 DTO 校验、数据库列长度保持一致 */
+    private static final int EMAIL_MAX_LENGTH = 100;
 
     /** IP 列的长度上限（varchar(64)），超长的头要截断，不能让它把写入搞失败 */
     private static final int IP_MAX_LENGTH = 64;
@@ -137,13 +147,20 @@ public class CommentServiceImpl implements CommentService {
 
         Comment comment = new Comment();
         comment.setArticleId(form.getArticleId());
-        comment.setNickname(escape(trimToLength(form.getNickname(), NICKNAME_MAX_LENGTH)));
-        comment.setEmail(escape(StringUtils.hasText(form.getEmail()) ? form.getEmail().trim() : null));
-        comment.setContent(escape(trimToLength(form.getContent(), CONTENT_MAX_LENGTH)));
+        comment.setNickname(escapeAndFit(form.getNickname(), NICKNAME_MAX_LENGTH));
+        comment.setEmail(escapeAndFit(StringUtils.hasText(form.getEmail()) ? form.getEmail().trim() : null,
+                EMAIL_MAX_LENGTH));
+        comment.setContent(escapeAndFit(form.getContent(), CONTENT_MAX_LENGTH));
         // 【默认待审核】这是防垃圾评论的第一道也是最主要的一道闸：
         // 提交成功不等于"别人能看见"，必须等管理员点通过。
         comment.setStatus(Comment.STATUS_PENDING);
         comment.setIp(currentIp(request));
+        // 【为什么要显式赋值，而不是靠列上的 DEFAULT CURRENT_TIMESTAMP】
+        //   默认值确实会写进数据库，但 MyBatis-Plus 插入之后【不会把库生成的值回填到对象】——
+        //   于是 createTime 在实体里还是 null，下面 toVO 返回给前端的就是
+        //   "一条没有时间的评论"。联调时被前端发现（它只好显示成"刚刚"），
+        //   这里改成由应用显式给时间，和 OperationLogListener 里的做法一致。
+        comment.setCreateTime(LocalDateTime.now());
 
         commentMapper.insert(comment);
 
@@ -293,22 +310,69 @@ public class CommentServiceImpl implements CommentService {
         return ip.length() > IP_MAX_LENGTH ? ip.substring(0, IP_MAX_LENGTH) : ip;
     }
 
-    /** 去掉首尾空格并卡长度（超长直接截断，而不是报错 —— 用户看到的应当是"发出去了"） */
-    private String trimToLength(String value, int maxLength) {
+    /**
+     * 归一化一个用户输入字段：去首尾空格 → HTML 转义 → 卡到列长度以内。
+     *
+     * 【⚠️ 这里为什么不用 Spring 的 HtmlUtils.htmlEscape（踩过一次，改成自己写）】
+     *   第一版用的就是 {@code HtmlUtils.htmlEscape(value)}，看着很"标准"，但它在联调时
+     *   被前端发现了一个很直观的问题：**它会把所有"有 HTML 4.0 具名实体"的字符都转成实体**，
+     *   不只是危险字符。实测：
+     *       中文 → 箭头      入库变成   中文 &rarr; 箭头
+     *       —   → &mdash;      …  → &hellip;      © → &copy;      ® → &reg;
+     *   而前端渲染评论时用的是 Vue 的插值（`{{ }}`，会再转义一次），
+     *   所以用户在页面上看到的就是字面的 "&rarr;"、"&mdash;" ——
+     *   对中文博客来说这是很常见的输入（中文破折号"——"、省略号"……"都中招）。
+     *
+     *   它另一个更隐蔽的坑是：默认按 ISO-8859-1 判断"能不能表示"，
+     *   理论上会把非拉丁字符转成数字实体（本项目实测中文没被转，但这是"碰巧没中"，
+     *   而不是有保证的）。
+     *
+     * 【所以改成只转义真正危险的 5 个 ASCII 字符】
+     *   {@code & < > " '} 就是 OWASP 建议的 HTML 文本/属性上下文转义集合，
+     *   既够用（这 5 个是唯一能改变 HTML 结构的字符），又不动任何别的字符。
+     *   这不是"自研轮子"：转义表只有 5 行，而现成的库在这里做多了、且做多了的部分有害。
+     *
+     * 【& 必须第一个替换】否则会把后面替换出来的实体（&amp;lt;）再转一次，变成 &amp;amp;lt;
+     *
+     * 【为什么要"先转义再截断"】转义会让字符串变长（& 从 1 个字符变成 5 个）。
+     *   先按字符数截断、再转义的话，极端输入（比如 1000 个 &）转义后能到 5000 字符，
+     *   直接超过列长度报错 —— 用户看到的是 500，而原因只是一条"符号特别多"的评论。
+     *   所以这里反过来：先转义，再把结果截到列长度以内。
+     *   ⚠️ 截断要避免把实体切成两半（"&am"），否则页面上会多出一串乱码；
+     *      下面 truncateAtEntityBoundary 专门处理这件事。
+     */
+    private String escapeAndFit(String value, int maxLength) {
         if (value == null) {
             return null;
         }
         String trimmed = value.trim();
-        return trimmed.length() > maxLength ? trimmed.substring(0, maxLength) : trimmed;
+        String escaped = trimmed
+                .replace("&", "&amp;")     // 必须第一个（见上面的说明）
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;");
+        return truncateAtEntityBoundary(escaped, maxLength);
     }
 
     /**
-     * HTML 转义（理由见类注释 ②）。
-     * 【为什么 null 要原样返回】HtmlUtils.htmlEscape(null) 返回 null，
-     * 但显式写出来更清楚：可选字段（邮箱）本来就可能为 null。
+     * 按长度截断，但不在实体的中间下刀。
+     *
+     * 【为什么需要这个】截断可能正好落在 "&amp;" 中间，于是存下来的片段是 "&am" ——
+     * 它在页面上就是字面的 "&am"，看着像乱码。这里往回找最后一个完整的实体边界：
+     * 如果截断位置之前最后一个 '&' 之后还没有 ';'，就把那个 '&' 之前作为截断点。
      */
-    private String escape(String value) {
-        return value == null ? null : HtmlUtils.htmlEscape(value);
+    private String truncateAtEntityBoundary(String value, int maxLength) {
+        if (value.length() <= maxLength) {
+            return value;
+        }
+        String cut = value.substring(0, maxLength);
+        int lastAmp = cut.lastIndexOf('&');
+        if (lastAmp >= 0 && cut.indexOf(';', lastAmp) < 0) {
+            // 尾部那个 & 开头的实体被切断了，退回到它前面
+            return cut.substring(0, lastAmp);
+        }
+        return cut;
     }
 
     private String statusName(Integer status) {

@@ -7,6 +7,37 @@ services:
       MYSQL_ROOT_PASSWORD: root
     ports:
       - "3310:3306"
+    # ------------------------------------------------------------------
+    # 慢查询日志
+    #
+    # 【为什么用 command 参数而不是挂一个 .cnf 配置文件】
+    #   一开始的写法是把配置写成 mysql/conf.d/slow.cnf，再 bind mount 到
+    #   /etc/mysql/conf.d/ 下（官方镜像的 /etc/my.cnf 里有 !includedir 那一行，
+    #   本来是给用户放自定义配置的）。结果配置【完全没有生效】，
+    #   启动日志里只有一行很容易被划过去的警告：
+    #       [Warning] World-writable config file '/etc/mysql/conf.d/slow.cnf' is ignored.
+    #   原因是 MySQL 出于安全考虑会【直接忽略权限为 777 的配置文件】——
+    #   别人能改的配置文件等于能改数据库行为。
+    #   而 Windows 文件系统没有 POSIX 权限概念，bind mount 进去的文件
+    #   一律显示成 -rwxrwxrwx(777)，于是必然被忽略。
+    #   这个坑最阴的地方是：Linux 服务器上跑得好好的（文件是 644），
+    #   只有本机 Windows 开发环境静默失效 —— 典型的"线上对、本地错"，
+    #   而且错得一点声音都没有。
+    #   改成命令行参数之后，权限语义完全不参与，Windows 和 Linux 行为一致。
+    #   （这也是官方镜像文档里推荐的传参方式）
+    # ------------------------------------------------------------------
+    command:
+      - mysqld
+      - --slow-query-log=ON
+      # 写进数据目录：数据目录是具名卷，容器重建、镜像升级日志都还在。
+      # 默认文件名带容器 hostname，容器一重建就找不到上一个文件了。
+      - --slow-query-log-file=/var/lib/mysql/slow.log
+      # 阈值 100 毫秒。这个数字是按本项目实测值反推的，不是抄来的：
+      # 优化后的前台列表查询 0.11ms、优化前 183ms ——
+      # 定在 100ms 等于"比应有水平慢三个数量级就报警"。
+      # 官方的默认值是 10 秒，那个值意味着"用户早就关页面了你才知道"。
+      - --long-query-time=0.1
+      - --log-output=FILE
     volumes:
       - mysql_data:/var/lib/mysql
   redis:

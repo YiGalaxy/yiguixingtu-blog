@@ -64,7 +64,35 @@ services:
       MYSQL_PASSWORD: ${DB_PASSWORD:?必须在 .env 里设置 DB_PASSWORD}
     # ⚠️ 【刻意不写 ports】—— 不把 3306 暴露到宿主机/公网。
     #    容器之间用服务名 mysql 互相访问，不需要对外开端口。
+    # ------------------------------------------------------------------
+    # 慢查询日志（与 docker-compose.yaml 里的参数保持一致，两边行为一样）
+    #
+    # 【为什么是 command 参数，不是挂 .cnf 文件 —— 这个坑值得记一笔】
+    #   最初的写法是写一个 slow.cnf 再 bind mount 到 /etc/mysql/conf.d/，
+    #   结果配置【完全没生效】，日志里只有一行极易忽略的警告：
+    #       [Warning] World-writable config file '...' is ignored.
+    #   MySQL 会主动忽略权限为 777 的配置文件（能被别人改的配置 =
+    #   能被别人改数据库行为）。而 Windows 文件系统没有 POSIX 权限，
+    #   bind mount 进去一律是 777，于是必然被忽略。
+    #   危险之处在于：Linux 服务器上是好的，只有本机 Windows 静默失效。
+    #   换成命令行参数后，权限语义不再参与，两个平台行为一致。
+    #
+    # 【为什么线上也一定要开这个日志】
+    #   官方默认 slow_query_log=OFF、long_query_time=10s ——
+    #   等于没有慢查询记录。本项目优化掉的那条列表查询优化前 183ms，
+    #   在默认配置下永远不可能出现在任何日志里。
+    #   线上出问题时，能拿到"当时哪条 SQL 慢、扫了多少行"是排查的前提。
+    # ------------------------------------------------------------------
+    command:
+      - mysqld
+      - --slow-query-log=ON
+      # 放数据目录（具名卷）里，容器重建日志不丢
+      - --slow-query-log-file=/var/lib/mysql/slow.log
+      - --long-query-time=0.1
+      - --log-output=FILE
     volumes:
+      # 具名卷：容器删了数据还在（docker compose down 不会删卷，加 -v 才会）。
+      # 慢查询日志也写在这个目录里，所以它同样不会随容器重建而丢失。
       - mysql_data:/var/lib/mysql
     healthcheck:
       # 健康检查决定"backend 什么时候可以启动"。

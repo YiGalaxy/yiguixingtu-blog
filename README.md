@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-76%20passing-success)
+![Tests](https://img.shields.io/badge/tests-138%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **76 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **138 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -75,7 +75,7 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
-- 集成测试 12 个类 **133 个用例**，行覆盖率 **86%**
+- 集成测试 17 个类 **138 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
 
@@ -137,7 +137,8 @@ com.yigalaxy.yiguixingtu
 src/main/resources
 ├── application.properties
 └── db/migration
-    └── V1__init.sql                # Flyway 迁移脚本：user / category / article 建表
+    ├── V1__init.sql                # Flyway 迁移脚本：user / category / article 建表
+    └── V2__add_article_sort_index.sql  # 列表排序用的复合索引（附实测依据）
 
 src/test/java/com/yigalaxy/yiguixingtu
 ├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
@@ -148,14 +149,22 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── UserAdminTest                   # 用户管理（含 token 即时失效）
 ├── ArticleAdminTest                # 后台文章管理
 ├── ArticlePublicTest               # 前台公开接口（草稿隔离）
+├── ArticleViewCountTest            # 浏览量：Redis 计数 + 定时批量落库
+├── ArticleIndexTest                # 索引契约：迁移已执行 + 列顺序 + 对真实查询可用
+├── UploadAdminTest                 # 封面上传（类型/大小校验、权限）
+├── LogoutTokenTest                 # 登出后旧 token 立即失效（jti 黑名单）
+├── SecurityHeadersTest             # 四个安全响应头
 ├── PaginationLimitTest             # 分页全局上限（从 Mapper 层验证插件兜底）
 ├── ProfileDevConfigTest            # dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单
 ├── ProfileProdConfigTest           # prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量
 ├── AdminBootstrapInitTest          # 管理员初始化引导（空库也能进后台）
 └── YiguixingtuApplicationTests     # 冒烟
 
-docs/demo-data
-└── demo_users.sql                  # 本地演示数据（100 个用户），切勿在生产执行
+docs
+├── demo-data
+│   └── demo_users.sql              # 本地演示数据（100 个用户），切勿在生产执行
+└── perf
+    └── explain-article-list.sql    # 列表索引优化的可复现实测脚本（造 20 万行再量）
 
 Dockerfile                          # 后端镜像（多阶段构建，非 root 运行）
 .dockerignore                       # 构建上下文排除清单（含个人材料，见文件内说明）
@@ -193,17 +202,18 @@ docker compose up -d
 
 **不需要手工建表，也不需要执行任何 SQL 脚本。**
 
-应用启动时由 **Flyway** 自动执行 `src/main/resources/db/migration/V1__init.sql`，
+应用启动时由 **Flyway** 自动执行 `src/main/resources/db/migration/` 下的迁移脚本，
 建好 `user` / `category` / `article` 三张表，并把执行记录写进 `flyway_schema_history` 表。
 **空库直接启动就能用。**
 
-表结构的定义**只有一份**（就是那个 SQL 文件），开发库、测试库、生产库共用它——
+表结构的定义**只有一份**（就是那些 SQL 文件），开发库、测试库、生产库共用它——
 这也是引入 Flyway 的原因：以前 DDL 散在文档和聊天记录里，换台机器就要照抄一遍，
 抄漏一个索引也没人会发现。
 
 ```
 src/main/resources/db/migration/
-└── V1__init.sql          # user / category / article 三张表
+├── V1__init.sql                     # user / category / article 三张表
+└── V2__add_article_sort_index.sql   # 列表排序的复合索引（附实测依据，见「性能」章节）
 ```
 
 命名规则是 `V{版本}__{描述}.sql`（**两个下划线**）。Flyway 靠文件名排序，
@@ -212,6 +222,11 @@ src/main/resources/db/migration/
 > ⚠️ **已经执行过的迁移脚本不要再改。** Flyway 会比对校验和，
 > 改动已应用的 `V1__init.sql` 会让下次启动直接报错。
 > 改表结构的正确做法是**新增** `V2__xxx.sql`，已上线的迁移脚本是历史。
+
+加索引这类操作还额外写了 `ALGORITHM=INPLACE, LOCK=NONE`。MySQL 8 加二级索引本来就支持
+在线执行、不阻塞读写，但那是"默认行为"而不是"保证行为"——条件不满足时它会**悄悄退回**
+到锁表的 COPY 方式。显式写出来之后，做不到在线就**直接报错**，宁可迁移失败被人发现，
+也不要在生产库上偷偷把写操作阻塞几分钟。
 
 **关于 `baseline-on-migrate`（一个容易被误解的配置）**
 
@@ -224,7 +239,8 @@ src/main/resources/db/migration/
 | **空库**（新部署、Testcontainers 容器） | 正常执行 `V1__init.sql`：建表 + 写历史记录 |
 | **已有表的库**（本地开发库） | 打一个"基线 = 版本 1"的标记，**不执行 V1**，当作它已经应用过 |
 
-两种情形共用同一份配置，不需要分环境改。
+两种情形共用同一份配置，不需要分环境改。后续的 `V2` 在两种库上都会正常执行
+（实测：本地已有的开发库上执行耗时 60ms，无锁表）。
 
 **两个建表细节，说明一下为什么这么设计：**
 
@@ -726,11 +742,136 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 |----|------|---------|--------|
 | `user` | 用户 | `uk_username` 唯一 | Flyway `V1__init.sql` |
 | `category` | 文章分类 | `uk_name` 唯一 | Flyway `V1__init.sql` |
-| `article` | 文章（含草稿与浏览量） | `idx_status_create(status, create_time)`、`idx_category` | Flyway `V1__init.sql` |
+| `article` | 文章（含草稿与浏览量） | `idx_status_top_create(status, is_top, create_time)`、`idx_status_create(status, create_time)`、`idx_category(category_id)` | Flyway `V1` + `V2` |
 | `flyway_schema_history` | Flyway 自己的迁移记录表 | —— | Flyway 自动创建 |
 
-> 表结构**不要手动改**。需要改表就新增一个迁移脚本（`V2__xxx.sql`），
+> `article` 上为什么是两个"看起来很像"的复合索引、它们各自服务哪条 SQL，
+> 见「性能」章节——**它们是两条不同排序路径的支撑，谁也不能替谁**。
+>
+> 表结构**不要手动改**。需要改表就新增一个迁移脚本（`V3__xxx.sql`），
 > 让开发库、测试库、生产库走同一条路径。
+
+## 性能
+
+### 前台列表的索引优化（183ms → 0.11ms）
+
+前台首页那条 SQL 长这样（`deleted = 0` 是 MyBatis-Plus 逻辑删除插件自动加的）：
+
+```sql
+SELECT ... FROM article
+WHERE deleted = 0 AND status = 1
+ORDER BY is_top DESC, create_time DESC
+LIMIT 0, 10;
+```
+
+在 **20 万行**（16 万已发布、2000 置顶）的数据上实测，`V1` 只有
+`idx_status_create(status, create_time)` 时的执行计划是：
+
+```
+-> Limit: 10 row(s)  (cost=3414 rows=10) (actual time=183..183 rows=10 loops=1)
+    -> Sort: is_top DESC, create_time DESC, limit input to 10 row(s) per chunk  (actual time=183..183 rows=10)
+        -> Filter: (deleted = 0)  (cost=3414 rows=98510) (actual time=0.0677..163 rows=160000)
+            -> Index lookup on article using idx_status_create (status=1)  (actual time=0.0593..155 rows=160000)
+```
+
+**读法**：索引只用到第一列 `status` —— 因为 `ORDER BY` 里出现了索引中没有的 `is_top`，
+索引的有序性就断了。于是 MySQL 把 `status = 1` 的 **16 万行全部取出来**，
+排一次序（`Using filesort`），最后只留 10 行。
+为了 10 行结果干了 16 万行的活，慢的不是"取数据"，而是"取出来又扔掉"。
+
+`V2` 加的索引 `idx_status_top_create(status, is_top, create_time)` 把这段补齐：
+
+```
+-> Limit: 10 row(s)  (cost=3417 rows=10) (actual time=0.107..0.11 rows=10 loops=1)
+    -> Filter: (deleted = 0)  (cost=3417 rows=9883) (actual time=0.105..0.108 rows=10)
+        -> Index lookup on article using idx_status_top_create (status=1) (reverse)  (actual time=0.0835..0.0857 rows=10)
+```
+
+| | 优化前 | 优化后 |
+|---|---|---|
+| 执行计划 | `ref` + **Using filesort** | `ref` + **Backward index scan** |
+| 预估扫描行数 | 98,510 | 98,830（但**实际只读了 10 行**就停） |
+| 实际耗时 | **183 ms** | **0.11 ms** |
+
+关键在 `Backward index scan`：索引里 `status` 定住之后，`is_top`、`create_time`
+本来就是按顺序存的，而 `ORDER BY` 恰好是同方向的 `DESC, DESC`，
+所以 MySQL 可以从索引尾部**倒着扫、取够 10 行就停**——排序整个消失了。
+
+**为什么老索引 `idx_status_create` 必须留着（差点被当成重复索引删掉）**
+
+看到 `(status, is_top, create_time)` 很容易觉得 `(status, create_time)` 是它的前缀、可以删。
+不是：复合索引只能用**最左前缀**，`status` 后面跟的是 `is_top`，
+所以它撑不住"按发布时间排序"那条路径。用户在前台点"按发布时间排序"时 SQL 变成
+`ORDER BY create_time DESC`，实测走的正是 `idx_status_create`（0.068ms）。
+**两个索引服务两条不同的排序路径，谁也不能替谁。**
+
+**两个"想过但量完之后否掉"的方案**（记下来是因为"不加"也需要理由）
+
+| 候选 | 想法 | 实测结果 | 结论 |
+|---|---|---|---|
+| `(status, deleted, is_top, create_time)` | `deleted = 0` 也是等值条件，塞进去能少一次回表 | 也能消掉 filesort，但 `type` 从 `ref` 退化成 `range`，估算代价 3417 → 122555，实测 **0.11ms → 0.30ms** | 否。`deleted` 只有 0/1 两个值、选择性极差，只让索引变宽 |
+| `(status, category_id, is_top, create_time)` | 前端按分类筛选时也快 | 该查询 **0.12ms → 0.072ms** | 否。两者都在 1 毫秒以内，用户感知不到；而每多一个二级索引，每次写入都要多维护一棵 B+ 树 |
+
+> **怎么复现这些数字**：`docs/perf/explain-article-list.sql` 是一个自包含脚本，
+> 自己建一个一次性的 `ygt_bench` 库、造 20 万行、把上面每个方案都量一遍、最后删库。
+> 跑法见文件头注释。**不要**在项目自己的库上跑（它会 DROP DATABASE）。
+
+**索引有了，怎么保证它不会被人悄悄删掉**
+
+`ArticleIndexTest` 把"索引应当长什么样"钉成了 5 条断言：
+V2 迁移确实执行成功（防"迁移文件写了但没生效"——这个项目真的踩过）、
+列顺序正确、老索引还在、两条查询的 `possible_keys` 里都能看到对应索引。
+
+> 这里刻意**没有**断言"不能出现 filesort"：Testcontainers 里的表几乎是空的，
+> 数据量小的时候优化器会**理性地**选择全表扫描，那种断言必然时绿时红。
+> 一个会随机变红的用例比没有用例更糟，因为它会让人开始无视红灯。
+> 耗时对比放在上面那个可复现脚本里，不放测试里。
+
+### 慢查询日志
+
+MySQL 官方镜像的默认值是 `slow_query_log = OFF`、`long_query_time = 10` ——
+**等于没有慢查询记录**。上面那条 183ms 的 SQL，在默认配置下永远不可能出现在任何日志里。
+所以两套 compose 都显式开了这个日志：
+
+```yaml
+command:
+  - mysqld
+  - --slow-query-log=ON
+  - --slow-query-log-file=/var/lib/mysql/slow.log   # 写进数据目录，容器重建也不丢
+  - --long-query-time=0.1                           # 100ms
+  - --log-output=FILE
+```
+
+`0.1` 这个阈值是按本项目实测值反推的：优化后的列表查询 0.11ms、优化前 183ms，
+定在 100ms 等于"比应有水平慢三个数量级就报警"。官方默认的 10 秒，
+意味着用户早就关掉页面了你才知道。
+
+看日志：
+
+```bash
+docker exec yiguixingtu-mysql cat /var/lib/mysql/slow.log
+```
+
+每条记录都会带 `Query_time` / `Lock_time` / `Rows_examined` / `Rows_sent`，
+其中 **`Rows_examined` 远大于 `Rows_sent`** 就是最典型的"索引没排上用场"信号
+（上面的优化前正是这个形状：`Rows_examined=160000`，`Rows_sent=10`）。
+
+> ⚠️ **为什么写 `command` 参数，而不是挂一个 `.cnf` 配置文件**（踩过的坑）
+>
+> 最初的写法是写一个 `slow.cnf` 再 bind mount 到 `/etc/mysql/conf.d/`
+> （官方镜像的 `/etc/my.cnf` 里有 `!includedir`，本来就是留给用户放自定义配置的），
+> 结果配置**完全没有生效**，启动日志里只有一行极易忽略的警告：
+>
+> ```
+> [Warning] World-writable config file '/etc/mysql/conf.d/slow.cnf' is ignored.
+> ```
+>
+> MySQL 出于安全考虑会**主动忽略权限为 777 的配置文件**（能被别人改的配置 =
+> 能被别人改数据库行为）。而 Windows 文件系统没有 POSIX 权限概念，
+> bind mount 进去的文件一律是 `-rwxrwxrwx`，于是必然被忽略。
+> 这个坑最阴的地方是：**Linux 服务器上跑得好好的（文件是 644），
+> 只有本机 Windows 开发环境静默失效**——典型的"线上对、本地错"，而且一点声音都没有。
+> 换成命令行参数后，权限语义完全不参与，两个平台行为一致。
 
 ## 安全
 
@@ -998,7 +1139,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 76 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 138 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1010,10 +1151,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 76 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 138 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**8 个测试类，76 个用例，全部通过：**
+**17 个测试类，138 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -1021,10 +1162,20 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `UserRegisterTest` | 3 | 注册成功、用户名重复、参数校验 |
 | `JwtSecurityTest` | 4 | JWT 签发/解析、无 token 401、游客 403 |
 | `GlobalExceptionHandlerTest` | 3 | 异常到统一返回体的映射 |
-| `UserAdminTest` | 18 | 用户管理全部接口 + 自我保护 + 分页夹取 + **禁用/删除/降级后的 token 即时失效** |
+| `UserAdminTest` | 21 | 用户管理全部接口 + 自我保护 + 分页夹取 + **禁用/删除/降级后的 token 即时失效** |
 | `ArticleAdminTest` | 26 | 后台文章增删改查、草稿隔离、状态流转、权限、逻辑删除（用 `JdbcTemplate` 直查物理行） |
-| `ArticlePublicTest` | 14 | 前台列表与详情、只返回已发布、浏览量、分页边界 |
+| `ArticlePublicTest` | 14 | 前台列表与详情、只返回已发布、分页边界、排序白名单 |
+| `ArticleViewCountTest` | 10 | 浏览量：Redis 计数、累加不丢、定时批量落库、落库后增量清零 |
+| `ArticleIndexTest` | 5 | 索引契约：V2 迁移确实执行、列顺序正确、老索引没被误删、两条查询都能用上对应索引 |
+| `UploadAdminTest` | 10 | 封面上传：类型/大小白名单、UUID 重命名、非管理员 403 |
+| `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |
+| `SecurityHeadersTest` | 7 | 四个安全响应头，含 401 与上传响应两条易漏路径 |
+| `PaginationLimitTest` | 2 | 分页全局上限（从 Mapper 层验证插件兜底，接口层测不到） |
+| `ProfileDevConfigTest` | 6 | dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单 |
+| `ProfileProdConfigTest` | 3 | prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量 |
+| `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
+| **合计** | **138** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

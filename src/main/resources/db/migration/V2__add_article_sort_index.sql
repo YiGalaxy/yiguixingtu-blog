@@ -1,0 +1,75 @@
+-- =====================================================================
+-- V2 · 给 article 补一个"按置顶 + 时间排序"的复合索引
+--
+-- 【为什么要动索引：先把问题量出来，再动手】
+--   前台列表的 SQL 长这样（MyBatis-Plus 拼出来的，deleted = 0 是逻辑删除插件加的）：
+--
+--     SELECT ... FROM article
+--     WHERE deleted = 0 AND status = 1
+--     ORDER BY is_top DESC, create_time DESC
+--     LIMIT 0, 10;
+--
+--   V1 里只有 idx_status_create (status, create_time)。
+--   在 20 万行（其中 16 万已发布、2000 置顶）的数据上实测，它的执行计划是：
+--
+--     -> Limit: 10 row(s)  (actual time=183..183 rows=10)
+--         -> Sort: is_top DESC, create_time DESC, limit input to 10 row(s) per chunk
+--             -> Filter: (deleted = 0)  (actual time=0.0677..163 rows=160000)
+--                 -> Index lookup using idx_status_create (status=1)  (rows=160000)
+--
+--   读法（这几行是本次优化的全部依据，逐个说清楚）：
+--     · 索引只用到第一列 status —— 因为 is_top 不在索引里，
+--       一旦 ORDER BY 里出现索引中没有的列，索引的"有序性"就断了；
+--     · 于是 MySQL 把 status = 1 的【16 万行】全部取出来，
+--       再去排序、最后只留 10 行 —— 为了 10 行结果干了 16 万行的活；
+--     · Extra 里的 Using filesort 就是"额外做了一次排序"，
+--       它出现在 Extra 里基本就等于"索引没排上用处"；
+--     · 整个查询 183ms，而其中真正花在返回数据上的时间是 0ms 级别的 ——
+--       也就是 99% 的时间花在"取出来又扔掉"。
+--
+--   为什么加了 is_top 就能解决：
+--     复合索引 (status, is_top, create_time) 里的键是【按这个顺序排好序】存的。
+--     status 是等值条件（=1），定住第一段；
+--     后面 is_top、create_time 在这个 status 内部天然有序，
+--     而 ORDER BY 恰好就是 is_top DESC, create_time DESC ——
+--     方向一致，于是 MySQL 可以从索引尾部【倒着扫】(Backward index scan)，
+--     取够 10 行就停。实测从 183ms 降到 0.11ms，扫描行数从 160000 降到 10。
+--
+-- 【为什么是一个新索引，而不是改掉 idx_status_create 的列顺序】
+--   idx_status_create (status, create_time) 仍然有它不可替代的用途：
+--   用户在前台点"按发布时间排序"时，SQL 变成 ORDER BY create_time DESC，
+--   这时需要的正是 (status, create_time) —— 实测这条 SQL 走的就是它，0.068ms。
+--   如果把它的中间插进 is_top，(status, create_time) 的顺序就被破坏了，
+--   这条排序会重新退化成 filesort。
+--   一句话：两个索引服务两种排序，谁也不能替谁。
+--
+-- 【为什么不把 category_id 也塞进来（做过对比，结论是不值得）】
+--   前台按分类筛选时 SQL 会多一个 category_id = ?。
+--   候选索引 (status, category_id, is_top, create_time) 实测能让这条查询
+--   从 0.12ms 变成 0.072ms —— 两者都在 1 毫秒以内，差距用户完全感知不到。
+--   而每多一个二级索引，每次 INSERT / UPDATE 都要多维护一棵 B+ 树
+--   （本表写操作不少，浏览量落库、状态流转、后台编辑都会触发）。
+--   用"每写一次都要付代价"换"读快 0.05 毫秒"不划算，所以不加。
+--   —— 这个判断的关键是【两个方案都量过】，而不是"感觉不用加"。
+--
+-- 【为什么用 ALGORITHM=INPLACE, LOCK=NONE 显式写出来】
+--   MySQL 8 加二级索引本来就支持在线进行（不阻塞读写），
+--   但这是"默认行为"，不是"保证行为" —— 一旦某个条件不满足，
+--   它会【悄悄退回】到锁表的 COPY 方式。生产库上几十万行锁表几分钟是要出事的。
+--   显式写上这两个参数之后，如果无法在线执行，MySQL 会【直接报错】，
+--   而不是默默锁表。宁可迁移失败被人发现，也不要偷偷把线上写阻塞了。
+--   （加二级索引不重建聚簇索引，所以必须用 INPLACE；这是它能在线做的原因）
+-- =====================================================================
+
+ALTER TABLE `article`
+    ADD INDEX `idx_status_top_create` (`status`, `is_top`, `create_time`),
+    ALGORITHM = INPLACE,
+    LOCK = NONE;
+
+-- 顺带说明一个"看着能省其实不能省"的念头：
+--   有人会想把 deleted 塞进索引最前面（idx_status_deleted_top_create）,
+--   认为这样连 deleted = 0 都能在索引里判掉、省一次回表。
+--   实测确实也能消掉 filesort，但优化器给出的估算代价反而更高
+--   （type 从 ref 退化成 range，cost 3417 → 122555，实测 0.11ms → 0.30ms），
+--   因为 deleted 只有 0/1 两个值、选择性极差，放在等值条件里帮不上忙，
+--   只让索引变宽。所以最终没有加。

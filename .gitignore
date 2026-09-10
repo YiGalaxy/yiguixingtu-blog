@@ -47,3 +47,9 @@ _preview*
 ### 本地存储的上传文件（app.upload.storage=local 时产生） ###
 uploads/
 
+### 提交信息草稿（用 git commit -F 时临时写的文件） ###
+### 理由：这些文件写完就该删掉，但「删掉」这一步很容易忘。
+###       真的忘过一次：git add -A 把提交信息草稿一起提交进去了，
+###       只能靠 git commit --amend 补救。加进忽略名单可以根治。
+_commit_msg*.txt
+

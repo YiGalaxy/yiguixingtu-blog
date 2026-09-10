@@ -158,8 +158,8 @@
   前台列表 300 次/分钟、发表评论 20 次/分钟），Nginx 那层按客户端 IP 限流；
   被限流返回 **429** —— 两层的分工与数值理由见「部署」章节
 - **操作审计**：文章的增 / 改 / 发布下架 / 删除，用户的启用禁用 / 改角色 /
-  重置密码 / 删除，标签的增 / 改 / 删，评论的审核 / 删除 —— 共 13 类管理动作
-  全部留痕（操作人、来源 IP、traceId、改动内容快照）；
+  重置密码 / 删除，标签的增 / 改 / 删，评论的审核 / 删除，分类的增 / 改 / 删
+  —— 共 16 类管理动作全部留痕（操作人、来源 IP、traceId、改动内容快照）；
   **业务提交之后才异步落库**，回滚掉的操作不会被记下来 —— 见「操作审计」
 - **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
@@ -189,10 +189,12 @@ com.yigalaxy.yiguixingtu
 │   ├── Result                      # 统一返回包装 {code, message, data}
 │   ├── ResultCode                  # 结果码枚举
 │   ├── metrics/BusinessMetrics     # 自定义业务指标（浏览量落库 / 登录 / token 拉黑）
+│   ├── idempotency/IdempotencyService   # 接口幂等：SET NX 占位 + 结果缓存（见「接口幂等」章节）
 │   └── exception
 │       ├── BusinessException       # 自定义业务异常
 │       └── GlobalExceptionHandler  # 全局异常处理器（6 类异常）
 ├── config
+│   ├── RedisConfig                 # @EnableCaching + Jackson（注册 JavaTimeModule，否则 LocalDateTime 序列化报错）
 │   ├── MybatisPlusConfig           # 分页插件（全局上限 100 兜底）
 │   ├── SecurityConfig              # Spring Security 过滤链 + JWT + CORS + 401/403 JSON + 安全响应头
 │   ├── WebMvcConfig                # /uploads/** 映射到本地存储目录
@@ -214,7 +216,7 @@ com.yigalaxy.yiguixingtu
 ├── audit
 │   ├── OperationLog                # 审计记录实体（对应 operation_log 表，刻意没有逻辑删除）
 │   ├── OperationAction             # 操作类型枚举（CREATE_ARTICLE / DELETE_USER …）
-│   ├── AuditTarget                 # 操作对象类型（ARTICLE / USER）
+│   ├── AuditTarget                 # 操作对象类型（ARTICLE / USER / TAG / COMMENT / CATEGORY）
 │   ├── OperationLogEvent           # 事件对象（带上用户 / IP / traceId 的快照）
 │   ├── OperationLogRecorder        # 业务代码只调它一行：抄上下文 + 发事件
 │   ├── OperationLogListener        # @Async + AFTER_COMMIT：业务提交后才落库
@@ -235,7 +237,7 @@ com.yigalaxy.yiguixingtu
 │   ├── cache/PublishedArticleCache # 详情页那份库数据的可缓存读取（防击穿）
 │   ├── cache/ArticleCacheVersion   # 缓存版本号（列表与详情各一个，写操作一起推进）
 │   ├── task/ViewCountSyncTask      # 定时把 Redis 增量批量落库
-│   └── dto/                        # ArticleForm / ArticleQuery / ArticleVO
+│   └── dto/                        # ArticleForm / ArticleQuery / ArticleVO / ArticleStatsVO / ArticleArchiveVO / ArticleRssVO
 ├── upload
 │   ├── controller/UploadController # POST /upload（ADMIN）
 │   ├── service/UploadService       # 类型白名单 + UUID 重命名 + 按日期分目录
@@ -249,14 +251,14 @@ com.yigalaxy.yiguixingtu
 │   ├── entity/Category
 │   ├── mapper/CategoryMapper              # 含一条手写 COUNT（要自己写 deleted = 0）
 │   └── dto/                               # CategoryVO / CategoryForm
-└── tag
-    ├── TagController                      # 前台：标签列表（公开，带文章数）
-    ├── AdminTagController                 # 后台：标签增删改查（ADMIN）
-    ├── service/TagService(+Impl)          # 含"给文章打标签"与缓存失效
-    ├── entity/Tag                         # ⚠️ 没有 @TableLogic：标签是物理删除
-    ├── mapper/TagMapper                   # 含两个手写聚合查询（文章数 / 批量查标签）
-    ├── mapper/ArticleTagMapper            # article_tag 关联表（纯关联，没有实体）
-    └── dto/                               # TagForm / TagVO
+├── tag
+│   ├── TagController                      # 前台：标签列表（公开，带文章数）
+│   ├── AdminTagController                 # 后台：标签增删改查（ADMIN）
+│   ├── service/TagService(+Impl)          # 含"给文章打标签"与缓存失效
+│   ├── entity/Tag                         # ⚠️ 没有 @TableLogic：标签是物理删除
+│   ├── mapper/TagMapper                   # 含两个手写聚合查询（文章数 / 批量查标签）
+│   ├── mapper/ArticleTagMapper            # article_tag 关联表（纯关联，没有实体）
+│   └── dto/                               # TagForm / TagVO
 └── comment
     ├── CommentController                  # 前台：看评论 + 发评论（**游客可用**，发表有限流）
     ├── AdminCommentController             # 后台：审核 / 删除（ADMIN）
@@ -301,7 +303,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── SecurityHeadersTest             # 四个安全响应头
 ├── MetricsEndpointTest             # 指标端点与自定义业务指标
 ├── TracingTest                     # 链路追踪：traceId 进日志 + 进响应头
-├── OperationLogTest                # 操作审计：8 类写操作都留痕 / IP 取真实客户端 / 回滚与失败不记账
+├── OperationLogTest                # 操作审计：16 类写操作都留痕 / IP 取真实客户端 / 回滚与失败不记账
 ├── PaginationLimitTest             # 分页全局上限（从 Mapper 层验证插件兜底）
 ├── ProfileDevConfigTest            # dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单
 ├── ProfileProdConfigTest           # prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量

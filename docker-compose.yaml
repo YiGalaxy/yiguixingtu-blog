@@ -6,7 +6,7 @@ services:
       MYSQL_DATABASE: yiguixingtu
       MYSQL_ROOT_PASSWORD: root
     ports:
-      - "3307:3306"
+      - "3310:3306"
     volumes:
       - mysql_data:/var/lib/mysql
   redis:

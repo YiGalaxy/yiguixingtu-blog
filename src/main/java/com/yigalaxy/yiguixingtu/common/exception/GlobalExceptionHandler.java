@@ -3,6 +3,9 @@ package com.yigalaxy.yiguixingtu.common.exception;
 import com.yigalaxy.yiguixingtu.common.Result;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.DisabledException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.FieldError;
@@ -21,7 +24,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(BusinessException.class)
     public Result<?> handleBusinessException(BusinessException e) {
         log.warn("业务异常: {}", e.getMessage());
-        return Result.error(e.getResultCode());
+        return Result.error(e.getResultCode(),e.getMessage());
     }
 
     /** ② 参数校验失败（@Valid 触发） */
@@ -54,5 +57,29 @@ public class GlobalExceptionHandler {
     public Result<?> handleException(Exception e) {
         log.error("系统异常", e);
         return Result.error(ResultCode.ERROR);
+    }
+
+    /**
+     * 【新增】权限不足：@PreAuthorize 拦截（如游客调用管理员接口）
+     *
+     * 【为什么必须单独处理？】
+     * 方法级权限校验抛出的 AccessDeniedException 发生在 Controller 方法内部，
+     * 如果不单独接住，就会被下面 @ExceptionHandler(Exception.class) 兜底捕获，
+     * 错报成"500 服务器内部错误"——把"没权限"和"服务器崩了"混为一谈。
+     *
+     * 【为什么返回 ResponseEntity 而不是 Result？】
+     * 我们需要同时决定两件事：HTTP 状态码 = 403，以及响应体 = {"code":403,...}。
+     * 只返回 Result 的话，HTTP 状态码会一直是 200，前端和测试都判断不出来。
+     *
+     * 【和 SecurityConfig 保持一致】
+     * SecurityConfig 的 accessDeniedHandler 也是返回 403 + {"code":403,"message":"无权限访问"}，
+     * 这样无论拒绝发生在"过滤器层"还是"方法层"，对前端都是同一种表现。
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<Result<?>> handleAccessDenied(AccessDeniedException e) {
+        log.warn("权限不足: {}", e.getMessage());
+        return ResponseEntity
+                .status(HttpStatus.FORBIDDEN)                  // HTTP 403
+                .body(Result.error(ResultCode.FORBIDDEN));     // {"code":403,"message":"无权限访问"}
     }
 }

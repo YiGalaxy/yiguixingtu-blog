@@ -19,7 +19,9 @@ public enum ResultCode {
 
     ERROR(500, "服务器内部错误"),
 
-    USERNAME_EXISTS(400,"账号已存在");
+    USERNAME_EXISTS(400,"账号已存在"),
+
+    USER_NOT_FOUND(404,"用户不存在");
 
 
 

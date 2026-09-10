@@ -29,6 +29,16 @@ import java.util.List;
  *   这里只管"配置长什么样"，不管"用户上传的东西合不合法"。
  *   校验上传的文件是业务逻辑，放 Service；配置项本身写错了会在启动时报错，
  *   不需要业务代码兜底。
+ *
+ * 【⚠️ 这份配置里为什么没有任何"对象存储（OSS）"的项】
+ *   项目最初留了一套 OSS 实现（`OssFileStorage` + storage=oss 开关 + 一堆 oss-* 配置），
+ *   最后定为【只用本地磁盘】，于是把那一整套连依赖一起删掉了。理由与取舍见
+ *   README「文件上传」章节：单台 ECS + 个人博客的量级，本地磁盘够用，
+ *   少一个外部依赖就少一处会失败的地方。
+ *   将来真要上对象存储时，做法是"实现 FileStorage 接口 + 加回它自己的配置项"，
+ *   UploadService 一行都不用改（它只依赖接口）——
+ *   留着没人用的实现和密钥配置，反而是一种负担：多一份要跟着改的代码、
+ *   多一个会过期的密钥、也多一条"配错了但没人发现"的路径。
  * =====================================================================
  */
 @Data
@@ -37,23 +47,23 @@ import java.util.List;
 public class UploadProperties {
 
     /**
-     * 存储方式：local（存本地磁盘，默认）/ oss（存阿里云 OSS）。
+     * 文件写到哪个目录（相对或绝对路径都行）。
      *
-     * 【为什么要做成可切换的，而不是直接写死 OSS】
-     *   1. 本地开发和测试不应该依赖真实 OSS 凭据与外网 ——
-     *      否则 clone 下来的人根本没法验证上传功能，CI 也跑不了
-     *   2. 上线初期可以先不配 OSS，用本地存储把站点跑起来，
-     *      等 OSS 配好再改一个配置切过去，不需要改代码、不需要重新构建
+     * 【线上为什么必须是挂载点里的路径】见 docker-compose.prod.yaml 里
+     * {@code UPLOAD_LOCAL_DIR=/app/uploads} 那段的说明：
+     * 写成容器自己的可写层，容器一重建图片就全丢了，而且没有任何报错。
      */
-    private String storage = "local";
-
-    /** 本地存储时，文件写到哪个目录（相对或绝对路径都行） */
     private String localDir = "./uploads";
 
     /**
-     * 本地存储时，访问这些文件的地址前缀。
-     * 本地开发是 http://localhost:8082/uploads，
-     * 线上如果 Nginx 也把 /uploads 反代到后端，就填 https://你的域名/uploads。
+     * 访问这些文件的地址前缀。
+     * 本地开发是 http://localhost:8082，
+     * 线上填"浏览器能访问到后端 /uploads/** 的那个前缀"（本项目是 https://域名/api）。
+     *
+     * 【为什么它必须和浏览器看到的一致】本地存储返回的 URL 是
+     * {@code {base-url}/uploads/xxx}，这个字符串会直接存进文章表并展示给浏览器；
+     * 填成内网地址（比如 http://backend:8082）在容器里自己访问得到，
+     * 但用户的浏览器访问不到 —— 表现为"后台上传成功、前台图片裂了"。
      */
     private String baseUrl = "http://localhost:8082";
 
@@ -86,44 +96,13 @@ public class UploadProperties {
      */
     private DataSize maxSize = DataSize.ofMegabytes(5);
 
-    // ---------------- 以下是 OSS 专用配置（storage=oss 时才需要） ----------------
-
-    /** OSS 的 Endpoint，形如 https://oss-cn-hangzhou.aliyuncs.com */
-    private String ossEndpoint;
-
-    /** Bucket 名称 */
-    private String ossBucket;
-
     /**
-     * 访问密钥 ID。
+     * 存储路径的前缀（相当于"目录"），默认 cover。
+     * 真正的路径形如 {@code cover/2026/09/{uuid}.jpg}。
      *
-     * ⚠️ 【生产环境务必用 RAM 子账号的密钥，不要用主账号 AccessKey】
-     *   主账号密钥权限是整个账号（能改账单、能删所有资源），
-     *   一旦泄漏后果不可控。RAM 子账号可以只授权这一个 Bucket 的读写，
-     *   就算泄漏，损失也被限制在一个桶里 —— 这就是"最小权限原则"。
+     * 【为什么叫 key 而不是"文件名"】它描述的是"存储里的位置"，
+     * 换到对象存储语义下就是 object key —— 名字保持中性，
+     * 将来实现别的 FileStorage 时不用跟着改。
      */
-    private String ossAccessKeyId;
-
-    /** 访问密钥 Secret（同样来自 RAM 子账号） */
-    private String ossAccessKeySecret;
-
-    /**
-     * 对象 key 的前缀（相当于 OSS 里的目录），默认 cover。
-     * 真正的 key 形如 cover/2026/09/xxxx.jpg
-     */
-    private String ossKeyPrefix = "cover";
-
-    /**
-     * 是否给返回的图片地址附带签名（私有 Bucket 才需要）。
-     *
-     * 【公有读 vs 私有读，怎么选】
-     *   · 公有读：图片地址固定、能被 CDN 直接缓存，博客封面图一般这么用
-     *   · 私有读：必须带签名才能访问，适合不对外公开的文件；
-     *     签名 URL 有有效期，过期就失效
-     *   本项目博客封面是公开内容，默认 false（公有读）；需要时配置成 true 即可。
-     */
-    private boolean ossSignedUrl = false;
-
-    /** 签名 URL 的有效期（秒），仅 ossSignedUrl=true 时生效 */
-    private long ossSignedUrlExpireSeconds = 3600L;
+    private String keyPrefix = "cover";
 }

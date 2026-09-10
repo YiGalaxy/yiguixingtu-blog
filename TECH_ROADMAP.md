@@ -163,7 +163,7 @@
 | 6 | **Flyway** | `db/migration/V1__init.sql` | 表是手工建的，DDL 散在 md 里，换台机器就要照抄 SQL；**也是 Testcontainers 的前置**（容器起来是空库，没迁移就没表） | 1.1 | Schema 版本化 | M1 后 |
 | 7 | **Testcontainers** | `AbstractIntegrationTest` | 76 个用例强连本机 3310/6380，没起容器全红，**CI 跑不了** | 1.2 | 容器化集成测试 | M1 后 |
 | 8 | **GitHub Actions + JaCoCo** | `.github/workflows/ci.yml` | 有测试却没有 CI，覆盖率也没数字；之后接 CD 到 ECS（B6） | 1.3 · B6 | CI/CD、代码覆盖率 | M1 后 |
-| 9 | **阿里云 OSS SDK** | `upload` 模块 | 封面图目前只能填外链 URL，没有上传能力 | 3.2 | 对象存储、RAM 最小权限、签名 URL | M3 后 |
+| 9 | ~~**阿里云 OSS SDK**~~ **已作废** | ~~`upload` 模块~~ | 封面图原来只能填外链 URL、没有上传能力 —— 上传能力做了（3.2），但存储最终定为**服务器本地磁盘**，OSS 实现与依赖已于 2026-09-10 删除，见 B4 的变更记录 | 3.2 | ~~对象存储、RAM 最小权限、签名 URL~~ → 改为"文件校验 + 本地磁盘 + 具名卷持久化" | ✅ |
 | 10 | **Dockerfile 多阶段 + 三容器 compose** | `Dockerfile`、`docker-compose.yaml` | compose 现在只有 mysql/redis，没有 backend、没有 healthcheck/restart | 3.3 | 容器化部署 | M3 后 |
 | 11 | **Micrometer Tracing（Brave）+ logback 结构化日志** | 依赖 `micrometer-tracing-bridge-brave` + `logback-spring.xml` | 全项目**没有任何日志配置**；**traceId 不自研 Filter**，由 Spring Boot 官方链路追踪自动注入，日志 pattern 直接取用 | 5.1 | 链路追踪、可观测性 | M5 后 |
 | 12 | **micrometer + Prometheus** | actuator + 自定义业务指标 | actuator 已在 `pom.xml`，只差注册表；不知道缓存命中率/限流拒绝数就无法定位问题 | 5.7 | 可观测性、自定义指标 | M5 后 |
@@ -186,7 +186,7 @@
 
 | 简历位置 | 写什么 | 依据 |
 |---|---|---|
-| **项目经历 · 技术栈框** | 加 `Testcontainers`、`Flyway`、`GitHub Actions`、`Resilience4j`、`Redisson`、`阿里云 ECS / OSS` | 都是"项目里真有一处配置/代码能指出来"的 |
+| **项目经历 · 技术栈框** | 加 `Testcontainers`、`Flyway`、`GitHub Actions`、`Resilience4j`、`Micrometer Tracing`、`阿里云 ECS` —— **⚠️ 不要加 OSS**：存储最终是服务器本地磁盘，OSS 那套实现已删除（见 B4 变更记录） | 都是"项目里真有一处配置/代码能指出来"的 |
 | **技能栏 · 后端开发** | 加 `Spring AOP`、`Resilience4j` | `Spring AOP` 指 `@Transactional` / `@PreAuthorize` 这些**现成的**切面；`Resilience4j` 对应 4.1 的限流与熔断降级 |
 | **技能栏 · 数据库与缓存** | `Redis` 从"缓存（Hash + TTL、主动失效）"升级为 **"缓存穿透 / 击穿 / 雪崩"**，并加 `Redisson 分布式锁` | 对应 2.1 / 2.2 / 5.4 |
 | **技能栏 · 工程化与测试** | 加 `Flyway`、`Testcontainers`、`GitHub Actions + JaCoCo`、`Micrometer Tracing` | 对应 1.1 / 1.2 / 1.3 / 5.1 |
@@ -310,7 +310,7 @@
 | 层 | 方案 | 管什么 |
 |---|---|---|
 | **入口层** | **Nginx `limit_req_zone` + `limit_req`** | 挡住"还没进 JVM"的洪水（爬虫、CC）。**零代码、零成本**（Nginx 本来就在那） |
-| **应用层** | **Resilience4j `@RateLimiter`** | 按业务维度细粒度限流（登录按 IP、发文按用户）；顺带用 `@CircuitBreaker` 做**熔断降级**（调 OSS 超时时快速失败，不拖垮线程） |
+| **应用层** | **Resilience4j `@RateLimiter`** | 按业务维度细粒度限流（登录按 IP、发文按用户）；`@CircuitBreaker` 做**熔断降级**（原本的假想场景是"调 OSS 超时时快速失败"，**现在项目没有外部依赖可熔断**，所以这条只作为备选：将来接了对象存储/第三方接口再启用） |
 
 **为什么选 Resilience4j 而不是 Sentinel**（面试很可能问，这是加分回答）
 - **Resilience4j 是纯库**：加依赖 + 注解 + `application.properties` 写规则，**零额外进程**
@@ -394,9 +394,19 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 - 已有数据库要设 `spring.flyway.baseline-on-migrate=true`，否则启动直接报错
 - 成本：半天。关键词：Schema 版本化
 
-### B4 · 封面图上传：阿里云 OSS + 文件校验
+### B4 · 封面图上传：文件校验 + 存储（**原计划是阿里云 OSS，最终改为服务器本地磁盘**）
 
-> 已确定用**阿里云 OSS**（不自建 MinIO）。
+> **⚠️ 2026-09-10 变更记录：下面这套 OSS 方案没有采用，留在这里只作决策记录。**
+>   实际做法是**存在部署服务器自己的磁盘上 + 具名卷持久化**：单台 ECS + 个人博客的
+>   图片量级本地磁盘够用，少一个外部依赖就少一处会失败的地方（网络、密钥过期、配额、计费）。
+>   连带后果是：`OssFileStorage`、`aliyun-sdk-oss` 依赖、`app.upload.storage` 开关与
+>   全部 `oss-*` 配置项**已经删除**；只保留 `FileStorage` 接口作为将来换存储的接缝。
+>   为什么删而不是留作备选：那是一条**没有测试覆盖也没人走过**的路径（要真实密钥与公网），
+>   坏了不会有任何用例变红，只会在某天"顺手切过去"时炸在线上。
+>   面试里的对应讲法也换了：从"对象存储 + RAM 最小权限 + 签名 URL"换成
+>   **"为什么这个量级不需要对象存储、以及什么时候必须换（多实例时本地磁盘不共享）"**。
+
+> 原计划：已确定用**阿里云 OSS**（不自建 MinIO）。
 
 - 新增 `upload` 模块：`POST /upload`（ADMIN），依赖 `aliyun-sdk-oss`
 - 要点：类型白名单（jpg/png/webp）、大小限制（`spring.servlet.multipart.max-file-size`）、**UUID 重命名**防覆盖、按日期分目录（`article/2026/09/xxx.jpg`）
@@ -431,18 +441,19 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 |---|---|
 | ECS 地域 / 实例规格 | `<待填>` |
 | ECS 公网 IP | `<待填>` |
-| OSS bucket / endpoint / 地域 | `<待填>` |
+| ~~OSS bucket / endpoint / 地域~~ | **不再需要**（存储最终用服务器本地磁盘，OSS 实现已删除） |
 | 域名 | `www.yigalaxy.xin`（已申请） |
 | 备案号 | `<待填>` |
-| 前端形态（SSG 静态 / SSR Node） | `<待填>` —— 决定前端放 OSS + CDN 还是 ECS 跑容器 |
-| 阿里云账号授权方式 | `<待填>` —— RAM 子账号 / STS 临时凭证 |
+| 前端形态 | **SSR Node 容器**（已定：w3.3 前端 Dockerfile + compose 里的 `frontend` 服务），不是 SSG 静态产物 |
+| ~~阿里云账号授权方式~~ | **不再需要**（没有对象存储密钥要管了） |
 
 **运维**
-- [ ] MySQL 定时备份（`mysqldump` + crontab），备份文件丢 OSS（**B7**）
+- [ ] MySQL 定时备份（`mysqldump` + crontab），备份文件**留在服务器本地目录**（不上传 OSS，见 B7 的变更说明）
+- [ ] **别忘了单独备份上传的图片**（具名卷 `uploads_data`，README「备份与恢复」有现成命令）
 - [ ] 容器加 `restart: unless-stopped`，服务器重启后自动恢复
 - [ ] 出问题先看 `docker compose logs -f backend`
 
-**验收**：手机 4G 打开域名能发文、能看到 OSS 上的图；`docker compose ps` 三容器健康；**重启 Docker 后服务自动恢复**
+**验收**：手机 4G 打开域名能发文、能看到自己上传的封面图；`docker compose ps` 四容器健康；**重启 Docker 后服务自动恢复**
 
 ### B6 · 持续部署（CD）
 
@@ -452,7 +463,9 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 
 ### B7 · 备份与恢复演练
 
-- `mysqldump --single-transaction`（不锁表）+ gzip + 上传 OSS + crontab 每日 3 点，保留 7 天
+- `mysqldump --single-transaction`（不锁表）+ gzip + **存服务器本地目录** + crontab 每日 3 点，保留 7 天
+  （原计划是"上传 OSS"，随 OSS 一起作废；README「备份与恢复」里另外补了**备份上传目录**——
+   数据库备份和图片备份是两件事，只备份数据库会导致"库恢复了、图全是裂的"）
 - **关键**：光备份不算会，"**恢复演练**"才算——真删一张表再恢复一次，把过程写进 README
 - 成本：半天。关键词：数据安全、可恢复性（面试问"你数据怎么保证不丢"时的答案）
 
@@ -640,8 +653,12 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 
 ### 简历同步规则（`resume.html`）
 
-1. **部署声明是"预写"的，带一道核对门**：项目经历最后一条 bullet 结尾已写「经 Nginx 反向代理部署到**阿里云 ECS**，图片资源存**阿里云 OSS**」，标题右侧徽章写「已上线」。
-   `<ul>` 后面留了一段**不可见的 HTML 注释**（不打印到 PDF）做投递前核对：若 B4 的 OSS 上传没做，就删掉 OSS 那半句；若还没上线，就删掉 ECS 部分与徽章里的「已上线」。**核对完删掉注释。**
+1. **部署声明是"预写"的，带一道核对门**：项目经历最后一条 bullet 结尾已写「经 Nginx 反向代理部署到**阿里云 ECS**，封面图存服务器本地磁盘并用**具名卷**持久化」，标题右侧徽章写「已上线」。
+   `<ul>` 后面留了一段**不可见的 HTML 注释**（不打印到 PDF）做投递前核对：**若还没上线，就删掉 ECS 部分与徽章里的「已上线」**。**核对完删掉注释。**
+   ⚠️ 2026-09-10 更新：原来的核对门里有一条"若 OSS 上传没做就删掉 OSS 那半句"——
+   那条**已经执行完毕**：存储最终定为服务器本地磁盘、OSS 实现与依赖已删除，
+   所以简历里的 OSS 字样与"Redisson 分布式锁"（5.4 的幂等实际用的是 Redis `SET NX`，
+   项目并没引入 Redisson）都已按实际情况改掉。**不要把它们加回来。**
 2. **技能栏那条"了解"行不单独占行**：四行技能表之后跟一行普通小字「了解 **Redis 高并发**、**Spring Cloud**」——这是**知识声明**，不是项目陈述，被深挖时答概念即可，不算虚报。
    它**刻意不列概念清单**（穿透/击穿/雪崩、Nacos/Gateway 那些）：写上去既臃肿，又等于给面试官递上一串必答题。那些词是你的**复习提纲**，不写在简历上。
    **M1 完成后升级**：缓存三件套变成真做过 → 从这一行**移出**、升级进「数据库与缓存」的掌握级；这一行只留 `Spring Cloud`。
@@ -712,7 +729,7 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 | **权限矩阵（E6）** | README 有"18 个接口 × 角色"矩阵，且每一条都能在 `UserAdminTest` / `ArticleAdminTest` 里找到对应用例 |
 | Testcontainers | `docker compose down` 之后 `mvn test` 仍全绿 |
 | CI | push 后 Actions 跑 `mvn verify` + 覆盖率报告 + README 徽章 |
-| OSS 上传 | 传 jpg 成功返回可访问地址；传 .exe / 超限文件被拒；RAM 子账号只对指定前缀有写权限 |
+| OSS 上传 | ~~传 jpg 成功返回可访问地址；RAM 子账号只对指定前缀有写权限~~ **已作废**（不上 OSS）。改为：传 jpg 成功返回可访问地址、文件真的落到 `app.upload.local-dir`、且**重建容器后仍在**（具名卷） |
 | 阿里云部署 | 公网域名可访问；三容器健康；**重启 Docker 后自动恢复**；**MySQL/Redis 不对公网暴露** |
 | 文档（G） | README 的端口/接口数/模块状态与代码 100% 一致 |
 
@@ -765,7 +782,7 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 - [ ] **web-0 仓库抢救（半天，最紧急）**：把已经写好的 2200 行按功能补进仓库 —— 现在 `git ls-tree -r HEAD` 只有 7 个文件，**clone 下来连 `npm install` 都跑不了**
 - [ ] **web-1 前端工程化**：Vitest 测试环境 + CI + API 地址环境变量化（+1 天）
 - [ ] **web-2 前台补齐**：分类筛选、统计接口、去掉硬编码假数据（+1 天）
-- [ ] **web-3 上线准备**：封面上传组件、静态资源上 OSS、Dockerfile、README（+1–2 天）
+- [x] **web-3 上线准备**：封面上传组件 ✅、静态资源（改由 Nginx 托管，**不上 OSS**）✅、Dockerfile ✅、README ✅
 - [ ] **web-5 安全体验**：登出链路、记住密码明文问题、traceId 提示、防连点（+1 天）
 - [ ] **web-7 SEO 与性能**：首页 SSR、meta/OG、sitemap、按需引入（+1 天）
 
@@ -1138,7 +1155,7 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 | # | 提交标题 | 内容 | 测试要求 |
 |---|---|---|---|
 | **3.1** | `新增多环境配置拆分，将跨域白名单与Swagger开关移入配置` | `application-dev/prod.properties`、CORS 白名单配置化（现写死在 `SecurityConfig.java:159`）、prod 关 Swagger 与 `StdOutImpl` | 新增用例：dev 与 prod profile 下行为差异（Swagger 是否可访问、SQL 日志是否输出） |
-| **3.2** | ✅ `新增封面图上传接口，类型与大小白名单校验` | `upload` 模块、`POST /upload`（ADMIN）、类型白名单 + 大小限制 + UUID 重命名 + 按日期分目录。**⚠️ 方案变更：最终存服务器本地磁盘（具名卷持久化），不用 OSS** —— 理由见 §9 与后端 README「文件上传」；`OssFileStorage` 仅作为可切换的备选实现保留 | 新增 `UploadAdminTest`：正常 jpg 成功；`.exe` 被拒 400；超限被拒；**非 ADMIN 403** —— **已完成** |
+| **3.2** | ✅ `新增封面图上传接口，类型与大小白名单校验` | `upload` 模块、`POST /upload`（ADMIN）、类型白名单 + 大小限制 + UUID 重命名 + 按日期分目录。**⚠️ 方案变更：最终存服务器本地磁盘（具名卷持久化），不用 OSS** —— 理由见 §9 与后端 README「文件上传」。**2026-09-10 追加：那套 OSS 实现（`OssFileStorage`）、`aliyun-sdk-oss` 依赖、`app.upload.storage` 开关与全部 `oss-*` 配置项已经**彻底删除**（留着等于一条没人走过、CI 也验证不了的代码路径）；`FileStorage` 接口保留，作为将来换存储的唯一接缝 | 新增 `UploadAdminTest`：正常 jpg 成功；`.exe` 被拒 400；超限被拒；**非 ADMIN 403**；另加两条守住"删干净了"（容器里只有一种存储实现）与配置改名后仍生效 —— **已完成** |
 | **3.3** | `新增Dockerfile多阶段构建与三容器编排，支持一键部署` | 多阶段 `Dockerfile`（非 root 运行）、`.dockerignore`、compose 扩成 backend+mysql+redis（healthcheck + restart + `depends_on: service_healthy`）、prod 不映射数据库端口 | `docker compose up -d` 后容器 healthy；**重启 Docker 服务自动恢复** |
 | **3.4** | `完善部署文档与生产环境必需配置说明` | README 部署章节：ECS 步骤、必需环境变量（`JWT_SECRET`）、OSS 配置项、备份与恢复步骤 | 无代码改动 → 跑一次全量测试 |
 | **3.5** | `新增管理员初始化引导，解决空库无法登录后台的问题` | 解决 §0.2 #13：全新库注册只能得到 GUEST，而提升角色又要求 ADMIN。做法二选一 —— **①**（推荐）`app.bootstrap-admin.*` 配置项 + 启动时若"一个 ADMIN 都不存在"则按配置创建管理员并打印一次性提示；**②** 提供 `docs/bootstrap/init_admin.sql` 引导脚本。两种都要保证**幂等**（重复启动不会重复建、已有 ADMIN 时静默跳过） | 新增用例：空库启动后存在管理员且能登录后台；**已有 ADMIN 时重复启动不新增账号**；未配置 bootstrap 时不报错 |
@@ -1478,9 +1495,9 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 | E2 | **无 CI** | 无 `.github/` | 🔴 |
 | E3 | **API 地址硬编码** `http://localhost:8082`，无环境变量覆盖 | `nuxt.config.ts:7` | 🔴 上线必改 |
 | E4 | **SSR 未区分服务端 / 浏览器地址**：生产环境服务端要走内网（`http://backend:8082`），浏览器要走公网域名，现在只有一个 `apiBase` | `nuxt.config.ts:5-9` | 🟡 部署坑 |
-| E5 | **大资源进 public**：`bg-star.mp4` **12.4 MB** + `bg-music.mp3` 2 MB，会进构建产物和仓库 | `public/` | 🟡 应走 OSS/CDN（正好接后端 3.2） |
-| E6 | **前端形态未定**：没有 `ssr` / `routeRules` / nitro preset 配置，SSG 还是 SSR 没决定 | `nuxt.config.ts` | 🟡 决定 3.3 怎么部 |
-| E7 | 封面图仍是本地 `public` 资源（后端做 OSS 后前端要接） | `index.vue:184` | 🟡 |
+| E5 | ~~**大资源进 public**：`bg-star.mp4` **12.4 MB** + `bg-music.mp3` 2 MB，会进构建产物和仓库~~ **✅ 已解决（w3.2）** | ~~`public/`~~ → `static-media/`，由 Nginx 的 `location /media/` 托管；`.output/public` 17.24 MB → 3.51 MB | **当时设想走 OSS/CDN，最终走的是 Nginx 本地托管**（见 B4 变更记录） |
+| E6 | **前端形态未定**：没有 `ssr` / `routeRules` / nitro preset 配置，SSG 还是 SSR 没决定 | `nuxt.config.ts` | 🟡 决定 3.3 怎么部 —— **✅ 已定：SSR Node 容器**（w3.3） |
+| E7 | ~~封面图仍是本地 `public` 资源（后端做 OSS 后前端要接）~~ **✅ 已解决（w3.1）** | 后台上传组件 → `POST /upload`，图片存服务器本地磁盘 | 原以为要接 OSS，实际不需要 |
 | E8 | README 是 **Nuxt 官方 starter 原文**（全英文模板），未定制；也没有 `.env.example`（`.gitignore` 忽略了 `.env`） | `README.md`、`.gitignore` | 🟡 |
 | E9 | 没有 remote 仓库 | `git remote -v` 为空 | 🟡 |
 
@@ -1722,7 +1739,8 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 - Spring Cache `@Cacheable` / `@CacheEvict`；MyBatis-Plus 分页插件 / 逻辑删除 / 条件构造器
 - **`@Transactional` / `@PreAuthorize` 声明式切面 —— 这两个本身就是"主流做法"**，不需要也不应该被"自研切面"替换
 - `@Scheduled` 定时任务（Spring 自带）、`@Async`（Spring 自带）
-- Testcontainers / Flyway / GitHub Actions / Docker 多阶段构建 / Nginx 反向代理 / 阿里云 OSS SDK
+- Testcontainers / Flyway / GitHub Actions / Docker 多阶段构建 / Nginx 反向代理
+  （原清单里还有"阿里云 OSS SDK"，随 OSS 实现一起删除，见 B4 变更记录）
 
 **这次调整对简历的影响**
 

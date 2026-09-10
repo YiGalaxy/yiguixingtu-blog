@@ -77,8 +77,8 @@ WORKDIR /app
 COPY --from=builder /build/target/*.jar app.jar
 
 # 【上传目录：必须在这里先建出来，而且属主必须是 app】
-#   封面图存在服务器磁盘上（app.upload.storage=local），目录由
-#   app.upload.local-dir 指定，compose 里挂的是 /app/uploads。
+#   封面图存在服务器磁盘上，目录由 app.upload.local-dir 指定，
+#   compose 里挂的是 /app/uploads。
 #
 #   ⚠️ 为什么非要在镜像里 mkdir 一次（明明代码里 Files.createDirectories 会自己建）
 #     因为 compose 挂的是【具名卷】：卷第一次被使用时，Docker 会把镜像里

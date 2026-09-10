@@ -40,7 +40,7 @@
 | 限流 | Resilience4j 2.4.0（`resilience4j-spring-boot4`）—— 注解式限流，**不写自研切面**；与 Nginx `limit_req` 组成两层，见「部署」章节 |
 | 链路追踪 | Micrometer Tracing + Brave（traceId 进日志 + 响应头 `X-Trace-Id`），见「可观测」 |
 | 操作审计 | Spring 事件机制（`@TransactionalEventListener` + `@Async`）+ 自建 `operation_log` 表，**不写自研切面**，见「操作审计」 |
-| 图片存储 | 本地磁盘（默认，本项目即用此方案）；阿里云 OSS SDK 3.18.1 作为可切换的备选，见「配置」章节 |
+| 图片存储 | 服务器本地磁盘 + 具名卷持久化；**不接对象存储**（理由与"将来怎么换"见「文件上传」章节） |
 | 工具库 | Lombok |
 | 测试 | JUnit 5 + MockMvc（`spring-boot-starter-webmvc-test`）+ **Testcontainers 2.0.5** |
 | 代码覆盖率 | JaCoCo 0.8.13 |
@@ -92,8 +92,8 @@
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
-  图片存服务器本地磁盘（可按配置切到阿里云 OSS，见「配置」章节）
-- 集成测试 **25 个类 209 个用例**，行覆盖率 **86.7%**
+  图片存服务器本地磁盘，并用**具名卷**持久化
+- 集成测试 **25 个类 211 个用例**，行覆盖率 **89.4%**
 
 ### 🚧 规划中
 
@@ -165,9 +165,8 @@ com.yigalaxy.yiguixingtu
 ├── upload
 │   ├── controller/UploadController # POST /upload（ADMIN）
 │   ├── service/UploadService       # 类型白名单 + UUID 重命名 + 按日期分目录
-│   ├── storage/FileStorage         # 接口
-│   ├── storage/LocalFileStorage    # 本地磁盘（默认）
-│   ├── storage/OssFileStorage      # 阿里云 OSS（备选，本项目未启用）
+│   ├── FileStorage                 # 存储接口（依赖倒置：将来换对象存储时 UploadService 不用改）
+│   ├── LocalFileStorage            # 本地磁盘（唯一实现，见「文件上传」章节）
 │   └── UploadProperties            # 上传配置绑定
 └── category
     ├── controller/CategoryController      # 分类列表（公开）
@@ -469,11 +468,9 @@ mybatis-plus.configuration.log-impl=org.apache.ibatis.logging.nologging.NoLoggin
 | `REDIS_PORT` | ⬜ | 默认 `6379` |
 | `CORS_ALLOWED_ORIGINS` | ✅ | **前端域名**，例如 `https://你的域名`；多个用英文逗号分隔 |
 | `SERVER_PORT` | ⬜ | 默认 `8082` |
-| `UPLOAD_STORAGE` | ⬜ | `local`（默认）/ `oss`。**本项目用 local**（存在服务器磁盘上） |
 | `UPLOAD_LOCAL_DIR` | ⬜ | 上传目录，compose 里已设成 `/app/uploads`（必须是挂载点路径） |
-| `UPLOAD_BASE_URL` | ⬜ | 图片地址前缀，compose 里复用 `PUBLIC_API_BASE`，保证与浏览器看到的地址一致 |
-| `OSS_*` | ⬜ | 只有把 `UPLOAD_STORAGE` 切成 `oss` 时才需要，见「配置」章节 |
-| `UPLOAD_BASE_URL` | ⬜ | 仅 `local` 时用：图片对外的地址前缀，例如 `https://你的域名` |
+| `UPLOAD_BASE_URL` | ⬜ | 图片对外地址前缀；compose 里复用 `PUBLIC_API_BASE`，保证与浏览器看到的地址一致 |
+| `UPLOAD_KEY_PREFIX` | ⬜ | 存储路径前缀，默认 `cover`（形如 `cover/2026/09/{uuid}.png`） |
 
 #### 跨域白名单（**上线必改这一项**）
 
@@ -581,17 +578,32 @@ spring.datasource.hikari.max-lifetime=1800000
 #### 文件上传（封面图存在服务器磁盘上）
 
 ```properties
-# local（本地磁盘，默认，本项目就用这个）/ oss（阿里云 OSS，备选）
-app.upload.storage=${UPLOAD_STORAGE:local}
 app.upload.local-dir=${UPLOAD_LOCAL_DIR:./uploads}
 app.upload.base-url=${UPLOAD_BASE_URL:http://localhost:8082}
 app.upload.allowed-extensions=jpg,jpeg,png,gif,webp
+app.upload.key-prefix=${UPLOAD_KEY_PREFIX:cover}
 app.upload.max-size=5MB
 ```
 
 **本项目用本地磁盘存封面图，不用对象存储。** 理由很简单：单台 ECS +
 个人博客的图片量级，本地磁盘完全够用，**少一个外部依赖就少一处会失败的地方**
 （网络抖动、密钥过期、配额限制、还要多付一份钱）。
+
+> 📌 **那一套 OSS 代码已经删掉了（2026-09-10）**
+> 项目早期确实写过一个 `OssFileStorage`（和 `LocalFileStorage` 实现同一个 `FileStorage`
+> 接口），用 `app.upload.storage=local|oss` 这个开关切换，`aliyun-sdk-oss` 依赖也在 pom 里。
+> 后来定为只用本地磁盘，于是把**实现类、依赖、一堆 `oss-*` 配置项、以及部署文档里的密钥说明
+> 一起删了**。
+>
+> 为什么要"删掉"而不是"留着备选"？留下它的代价不只是几百 KB 的 jar：
+>   · 它是**一条没有测试覆盖、也没人走过的代码路径**（要真实密钥与公网才能跑），
+>     坏了不会有任何用例变红 —— 只会在某天"顺手切过去试试"时炸在线上
+>   · 它带着一套**密钥配置**，配置项长期不用的典型结局是"过期了没人知道"
+>   · `FileStorage` 这个接口本身没有一起删 —— **存储位置恰恰是几乎一定会变的那种东西**，
+>     保留接口的成本是一个空文件，好处是换存储时 `UploadService` 一行都不用改。
+>     将来真要上对象存储（图片多到磁盘吃紧、或者要上多台机器做负载均衡 ——
+>     那时本地磁盘在每台机器上各自独立，用户上传的图在另一台就看不到），
+>     照着接口写一个新实现 + 它自己的配置项即可。
 
 图片的完整地址形如：
 
@@ -619,32 +631,19 @@ app.upload.max-size=5MB
 > 镜像里没这个目录的话，新卷会建成 `root:root`，
 > 而非 root 运行的进程第一次上传就会 `Permission denied`。
 
-**OSS 是保留但未启用的备选方案**
+**什么时候才真的需要换成对象存储**
 
-代码里仍然保留了一个 `OssFileStorage`（实现同一个 `FileStorage` 接口），
-把 `app.upload.storage` 改成 `oss` 并配好下面几项就能切过去，
-不用改一行代码、也不用重新构建：
-
-```properties
-app.upload.storage=oss
-app.upload.oss-endpoint=${OSS_ENDPOINT}          # https://oss-cn-hangzhou.aliyuncs.com
-app.upload.oss-bucket=${OSS_BUCKET}
-app.upload.oss-access-key-id=${OSS_ACCESS_KEY_ID}
-app.upload.oss-access-key-secret=${OSS_ACCESS_KEY_SECRET}
-```
-
-**什么时候真的需要切到 OSS**：
 ① 图片多到 ECS 磁盘吃紧；② 将来上多台机器做负载均衡 ——
 那时本地磁盘在每台机器上是各自独立的，用户上传的图在另一台上就看不到，
 必须换成对象存储（或共享盘）。
 
-> ⚠️ 要用 OSS 的话，**必须用 RAM 子账号的 AccessKey，不要用主账号密钥。**
-> 主账号密钥等于整个账号的权限（能改账单、能删所有资源），一旦泄漏后果不可控；
-> RAM 子账号可以只授权这一个 Bucket 的读写，就算泄漏，损失也被限制在一个桶里。
-> 这是最小权限原则最典型的一个应用场景。
->
-> 缺配置时**启动会直接失败**并告诉缺哪一项，而不是等用户第一次上传才发现 ——
-> 与下面 prod 凭据不给默认值是同一个取向。
+换的时候要动的东西（都要改，缺一个就出问题）：
+· 照 `FileStorage` 接口写一个新实现（例如 `OssFileStorage`），
+  它自己负责"拼 URL / 调官方 SDK / 校验自己的配置项"
+· 加回它自己的配置项与密钥注入（**必须用 RAM 子账号并只授权那一个 Bucket**，
+  不要用主账号 AccessKey：主账号密钥等于整个账号的权限，泄漏了能改账单、能删所有资源）
+· `UploadService` 与 `UploadController` **一行都不用改**（它们只依赖接口）
+· 记得给它写用例 —— 上一版被删掉的原因之一就是"这条路径没有测试覆盖"
 
 #### 数据库迁移（Flyway）
 
@@ -1963,10 +1962,10 @@ mvn test
 
 | 维度 | 覆盖率 |
 |------|:---:|
-| 行覆盖 | **86.7%**（1,045 / 1,206） |
-| 方法覆盖 | **95.0%**（228 / 240） |
-| 指令覆盖 | **86.5%**（4,450 / 5,146） |
-| 分支覆盖 | 64.4%（244 / 379） |
+| 行覆盖 | **89.4%**（1,045 / 1,169） |
+| 方法覆盖 | **97.9%**（228 / 233） |
+| 指令覆盖 | **89.3%**（4,450 / 4,983） |
+| 分支覆盖 | 65.8%（244 / 371） |
 
 > 分支覆盖率明显低于行覆盖率，是因为大量的**参数校验分支、异常兜底分支、
 > 空值判断分支**不会被每个用例都走到——这是正常的，不必为了刷数字硬凑用例。
@@ -1980,7 +1979,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 209 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 211 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1992,10 +1991,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 209 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 211 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**25 个测试类，209 个用例，全部通过：**
+**25 个测试类，211 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -2012,7 +2011,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleDetailCacheTest` | 11 | 详情缓存：走缓存、**浏览量不被冻住**、写操作后立刻更新、下架即 404、自愈重建、**12 线程并发只查库 1 次（防击穿）**、TTL 有效 |
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
-| `UploadAdminTest` | 10 | 封面上传：类型/大小白名单、UUID 重命名、非管理员 403 |
+| `UploadAdminTest` | 12 | 封面上传：类型/大小白名单、UUID 重命名、非管理员 403；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
 | `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |
 | `SecurityHeadersTest` | 7 | 四个安全响应头，含 401 与上传响应两条易漏路径 |
 | `MetricsEndpointTest` | 8 | 指标端点：Prometheus 格式与内容、未开放的端点确实不可达、登录/登出/浏览量落库指标真的会涨 |
@@ -2023,7 +2022,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `OperationLogTest` | 11 | 操作审计：8 类写操作都留痕（含操作人/对象/IP/traceId/detail 快照）、IP 取 `X-Forwarded-For` 真实客户端、**失败与回滚的操作不记账**、审计行里不含明文密码 |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **209** | |
+| **合计** | **211** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

@@ -1,6 +1,8 @@
 package com.yigalaxy.yiguixingtu;
 
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
+import com.yigalaxy.yiguixingtu.upload.FileStorage;
+import com.yigalaxy.yiguixingtu.upload.LocalFileStorage;
 import com.yigalaxy.yiguixingtu.upload.UploadProperties;
 import com.yigalaxy.yiguixingtu.user.entity.User;
 import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
@@ -8,6 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.TestPropertySource;
@@ -15,6 +18,7 @@ import org.springframework.test.context.TestPropertySource;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -29,15 +33,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 文件上传接口测试（UploadController / UploadService）
  *
  * 【测试用的是哪种存储】
- *   默认的 local（本地磁盘）—— 见下面 @TestPropertySource 把目录指到一个临时路径。
- *   这样测试【不需要任何 OSS 凭据、不连外网】，但仍然把整条路径跑通了：
+ *   本地磁盘（项目现在只有这一种）—— 见下面 @TestPropertySource 把目录指到一个临时路径。
+ *   这样测试【不需要任何云端凭据、不连外网】，但仍然把整条路径跑通了：
  *   上传 → 校验 → 写文件 → 返回 URL → 这个 URL 能被匿名 GET 到。
  *   比 mock 掉存储更有价值：mock 只能证明"我调用了它"，而这里证明"文件真的落盘了"。
  *
- * ⚠️ 诚实说明：{@code OssFileStorage} 这一段【没有自动化测试】——
- *    它需要真实的 OSS 凭据与公网，不适合放进 CI。
- *    它里只有"拼 URL + 调官方 SDK"两件事，风险集中在配置（endpoint/bucket/密钥），
- *    所以那部分用启动时校验来兜（缺配置直接启动失败）。
+ * 【历史上这里有一条"诚实说明"，现在它已经不适用了】
+ *   以前写着"{@code OssFileStorage} 没有自动化测试，因为它需要真实凭据与公网"。
+ *   那正是后来把整套 OSS 实现删掉的原因之一：**一条没人走过、CI 也验证不了的代码路径**，
+ *   它坏了不会有任何测试变红，只会等线上出问题。所以现在存储只有一种实现，
+ *   本测试类覆盖的就是线上真正跑的那条路。
  *
  * 【用到的东西】
  *   · {@link MockMultipartFile} —— 在测试里伪造一个 multipart 上传项，
@@ -75,6 +80,14 @@ class UploadAdminTest extends AbstractIntegrationTest {
 
     @Autowired
     private UploadProperties uploadProperties;
+
+    /**
+     * 直接拿容器，用来数"一共有几个 FileStorage 实现"。
+     * 【为什么不用注入 List&lt;FileStorage&gt;】那样在"一个都没有"时会注入失败，
+     * 而这条用例恰恰要区分"0 个 / 1 个 / 2 个"三种情况，读容器最直白。
+     */
+    @Autowired
+    private ApplicationContext context;
 
     private String adminToken;
     private String guestToken;
@@ -232,6 +245,48 @@ class UploadAdminTest extends AbstractIntegrationTest {
                         .header("Authorization", "Bearer " + adminToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(400));
+    }
+
+    @Test
+    @DisplayName("⑪ 容器里只有一种存储实现（本地磁盘），没有第二个“可切换”的实现")
+    void fileStorage_shouldHaveExactlyOneImplementation() {
+        // 【这条用例守的是"删干净了"，而不是某个功能】
+        //   项目早期有 LocalFileStorage + OssFileStorage 两个实现，靠 app.upload.storage
+        //   这个开关选一个。现在定为只用本地磁盘，OSS 那套（实现类 + 依赖 + 一堆
+        //   oss-* 配置）已经删掉了 —— 但"删掉"这件事很容易被后人无意中回滚：
+        //   比如从旧分支拷回一个 OssFileStorage 文件，那时容器里就有两个 FileStorage
+        //   候选 Bean，注入会直接失败（而且报错是启动期的 NoUniqueBeanDefinitionException，
+        //   看起来像配置问题）。所以这里把"只有一个实现、且它必须是本地磁盘"钉住。
+        //
+        //   顺带说明为什么"多一个没人用的实现"值得专门写用例拦：
+        //   那条路径没有测试覆盖、也没有人走过，坏了不会有任何用例变红 ——
+        //   它只会在某天"顺手切过去试试"时炸在线上。
+        Map<String, FileStorage> beans = context.getBeansOfType(FileStorage.class);
+        assertEquals(1, beans.size(),
+                "存储实现应当只有一个，实际=" + beans.keySet());
+        assertTrue(beans.values().iterator().next() instanceof LocalFileStorage,
+                "唯一的存储实现必须是本地磁盘：实际=" + beans.values().iterator().next().getClass().getName());
+    }
+
+    @Test
+    @DisplayName("⑫ 存储路径前缀取自 app.upload.key-prefix（改名后仍然生效）")
+    void upload_objectKey_shouldUseConfiguredPrefix() throws Exception {
+        // 前缀这个配置项原本叫 oss-key-prefix（跟着 OSS 一起进来的名字），
+        // 现在存储只有本地磁盘，名字已经改成 key-prefix。改名属于"只改字符串"的改动，
+        // 编译器帮不上忙 —— 配置名写错不会报错，只会让前缀悄悄变成默认值。
+        // 所以这里直接读配置对象 + 断言真实上传出来的 URL，两头都钉住。
+        assertEquals("cover", uploadProperties.getKeyPrefix(),
+                "默认前缀应当是 cover（application.properties 的 app.upload.key-prefix）");
+
+        String url = extractUrl(mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "prefix.png", "image/png", TINY_PNG))
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+
+        assertNotNull(url, "上传应当返回 url");
+        assertTrue(url.contains("/uploads/cover/"),
+                "URL 里应当带上配置的前缀（形如 /uploads/cover/2026/09/xxx.png），实际=" + url);
     }
 
     // ================================================================

@@ -1,7 +1,6 @@
 package com.yigalaxy.yiguixingtu.upload;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -13,17 +12,16 @@ import java.nio.file.Paths;
  * =====================================================================
  * 本地磁盘存储 —— 把文件写到服务器/本机的一个目录里
  *
- * 【什么时候用它】
- *   {@code app.upload.storage=local}（默认值）。也就是：本地开发、自动化测试，
- *   以及"还没配 OSS 但想先把站点跑起来"的初期。
- *   见 {@link UploadProperties#getStorage()} 的注释。
+ * 【它现在是 FileStorage 的【唯一】实现】
+ *   项目早期还有一套 `OssFileStorage`（对象存储），靠 `app.upload.storage`
+ *   这个配置项在两者之间切换；后来定为只用本地磁盘，那一套连同依赖一起删掉了。
+ *   所以这里【不再需要 @ConditionalOnProperty】—— 没有第二个候选 Bean 要区分，
+ *   留着条件装配只会让人以为"还有别的实现没启用"。
+ *
+ * 【什么时候用它】一直是它：本地开发、自动化测试、线上部署都是这套。
+ *   见 README「文件上传」章节里"为什么不用对象存储"的取舍说明。
  *
  * 【用到的东西】
- *   · {@code @ConditionalOnProperty} —— Spring Boot 的条件装配：
- *     只有配置项匹配时才创建这个 Bean。
- *     这里要求 {@code app.upload.storage} 等于 {@code local}，
- *     并且 {@code matchIfMissing = true} —— 意思是"没配这项时也算匹配"，
- *     这样什么都不配的情况下默认走本地存储，开箱即用。
  *   · {@link Files#createDirectories} + {@link Files#write} —— JDK 自带的 NIO，
  *     不需要引入任何第三方库
  *   · {@code Paths.get(...).resolve(...)} —— 拼路径用 resolve 而不是字符串相加，
@@ -42,7 +40,6 @@ import java.nio.file.Paths;
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "app.upload.storage", havingValue = "local", matchIfMissing = true)
 public class LocalFileStorage implements FileStorage {
 
     private final UploadProperties properties;

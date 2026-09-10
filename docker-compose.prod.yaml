@@ -177,7 +177,8 @@ services:
       # 少一个外部依赖就少一处会失败的地方（网络、密钥、配额、计费）。
       # 什么时候该换：图片多到磁盘吃紧、或者将来要上多台机器做负载均衡
       # （多实例时本地磁盘就不共享了，那时必须换成对象存储或共享盘）。
-      UPLOAD_STORAGE: local
+      # 【为什么这里没有 storage=oss 之类的开关】项目已经把整套 OSS 实现删掉了，
+      # 现在只有本地磁盘一种存储（见 README「文件上传」章节的取舍说明）。
       # 【为什么目录必须写成 /app/uploads】
       #   它是下面 volumes 里挂载点的路径。写错的话文件会落到容器自己的
       #   可写层里 —— 容器一重建（docker compose up -d --build 就会重建）
@@ -278,5 +279,5 @@ volumes:
   # 具名卷：容器删了数据还在（docker compose down 不会删卷，加 -v 才会）
   mysql_data:
   redis_data:
-  # 用户上传的封面图（app.upload.storage=local 时写到这里，见 backend 服务里的说明）
+  # 用户上传的封面图（写到这里，见 backend 服务里 UPLOAD_LOCAL_DIR 的说明）
   uploads_data:

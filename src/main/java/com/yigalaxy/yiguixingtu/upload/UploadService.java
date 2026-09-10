@@ -95,8 +95,9 @@ public class UploadService {
             throw new BusinessException(ResultCode.ERROR, "读取文件失败，请重试");
         }
 
-        // Content-Type 优先用客户端声明的；没声明就按扩展名猜一个，
-        // 免得 OSS 里存成 application/octet-stream 导致浏览器直接下载而不是显示
+        // Content-Type 优先用客户端声明的；没声明就按扩展名猜一个。
+        // 它对本地存储的意义是"浏览器打开图片时是显示还是下载"——
+        // 缺了它（或猜成 application/octet-stream）浏览器会直接把图当文件下载下来
         String contentType = StringUtils.hasText(file.getContentType())
                 ? file.getContentType()
                 : guessContentType(extension);
@@ -105,14 +106,13 @@ public class UploadService {
     }
 
     /**
-     * 构造对象路径，形如 {@code cover/2026/09/3f2b....jpg}。
+     * 构造存储路径，形如 {@code cover/2026/09/3f2b....jpg}。
      *
      * 【为什么要按年月分目录】
-     *   1. 一个目录下文件太多时，无论本地文件系统还是 OSS 的控制台，
-     *      浏览和排查都会变慢
+     *   1. 一个目录下文件太多时，浏览、备份、排查都会变慢
+     *     （本地文件系统里几万个文件挤在一个目录，`ls` 和备份都很难受；
+     *      将来换成对象存储也一样 —— 它的控制台按 key 里的 / 展示成目录树）
      *   2. 方便按时间清理历史文件
-     *   顺带说明：OSS 本身没有真正的"目录"，key 里带 / 只是让控制台
-     *   按目录树展示，所以这么做不会带来任何额外开销
      *
      * 【为什么文件名用 UUID 而不是保留原名】
      *   · 原名可能重复 → 后传的覆盖先传的（真实事故）
@@ -120,8 +120,8 @@ public class UploadService {
      *   · 原名可能含中文、空格、特殊字符，进 URL 还要编码，纯属自找麻烦
      */
     private String buildObjectKey(String extension) {
-        String prefix = StringUtils.hasText(properties.getOssKeyPrefix())
-                ? properties.getOssKeyPrefix() : "cover";
+        String prefix = StringUtils.hasText(properties.getKeyPrefix())
+                ? properties.getKeyPrefix() : "cover";
         String uuid = UUID.randomUUID().toString().replace("-", "");
         return prefix + "/" + LocalDate.now().format(DATE_DIR) + "/" + uuid + "." + extension;
     }

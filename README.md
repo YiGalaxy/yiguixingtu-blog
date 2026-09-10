@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-160%20passing-success)
+![Tests](https://img.shields.io/badge/tests-174%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **160 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **174 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -32,7 +32,7 @@
 | ORM | MyBatis-Plus 3.5.17（含 `mybatis-plus-jsqlparser` 分页/条件构造） |
 | 数据库 | MySQL 8 |
 | 数据库迁移 | Flyway 12（`spring-boot-flyway` + `flyway-core` + `flyway-mysql`） |
-| 缓存 | Redis 7（当前用于缓存认证信息、Token 黑名单、浏览量计数，见「认证与鉴权」） |
+| 缓存 | Redis 7（缓存认证信息 / Token 黑名单 / 文章列表，另用作浏览量计数器，见「认证与鉴权」「文章列表缓存」） |
 | 安全 | Spring Security 7 + JWT（jjwt 0.12.6）+ BCrypt |
 | 参数校验 | Spring Validation（`spring-boot-starter-validation`） |
 | 接口文档 | springdoc-openapi 3.0.0（OpenAPI / Swagger UI） |
@@ -63,6 +63,8 @@
 - 文章详情（Markdown 源码正文，游客可访问）
 - **草稿隔离**：草稿只有管理员能看到，游客直接访问返回 **404**（而不是 403，避免泄露"这里有一篇草稿"）
 - **浏览量异步计数**：详情页只写 Redis，定时任务每 5 分钟批量落库（见下文「浏览量为什么是异步的」）
+- **文章列表缓存**：前台列表走 Redis 缓存，写操作用**版本号**同步失效；
+  带**防穿透**（空结果也缓存 30 秒）与**防雪崩**（TTL 随机抖动）—— 见下文「文章列表缓存」
 
 **分类**
 - 分类列表（游客可访问）
@@ -77,19 +79,18 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
-- 集成测试 20 个类 **160 个用例**，行覆盖率 **86%**
+- 集成测试 21 个类 **174 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
 
 - 标签（tag）与文章标签关联
 - 评论 / 留言与审核
 - 分类的后台增删改（目前只有只读列表接口）
-- 文章封面图上传（OSS）
-- 文章列表 / 详情缓存、浏览量异步落库
-- 站点统计接口
+- 文章**详情**缓存（列表缓存已完成）
+- 站点统计接口（`GET /article/stats`）
 - 归档
-- 容器化部署（Dockerfile）与 CI
-- 管理员初始化引导（空库目前无法产生管理员，见「怎么得到第一个管理员账号」）
+- 全文搜索（目前是 `LIKE '%关键词%'`，用不上索引；要快要上 ES）
+- 接口限流与操作审计
 
 > 详细的开发计划、技术选型取舍与分阶段提交清单见仓库根目录 `TECH_ROADMAP.md`。
 
@@ -169,6 +170,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── UserAdminTest                   # 用户管理（含 token 即时失效）
 ├── ArticleAdminTest                # 后台文章管理
 ├── ArticlePublicTest               # 前台公开接口（草稿隔离）
+├── ArticleCacheTest                # 列表缓存：命中/失效/TTL/防穿透
 ├── ArticleViewCountTest            # 浏览量：Redis 计数 + 定时批量落库
 ├── ArticleIdempotencyTest          # 接口幂等（Idempotency-Key）
 ├── ArticleIndexTest                # 索引契约：迁移已执行 + 列顺序 + 对真实查询可用（含分页 COUNT 的覆盖索引）
@@ -748,6 +750,113 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 > 而反过来做（先写库成功再删 Redis）会让同一批数字被重复累加，
 > 而"数字偏大"更容易被人当成作弊。更严格的做法是用消息队列做可靠投递，
 > 对浏览量的精度要求来说不值得。
+
+## 文章列表缓存
+
+前台列表是全站最热的读接口，所以给它加了 Redis 缓存。这一节讲清楚
+**缓存怎么组织、什么时候失效、以及为什么不能用最直觉的那种失效方式**。
+
+### 缓存 key 的结构
+
+```
+article:page:v1 : {版本号} : {页码}:{每页}:{分类}:{关键词}:{排序}:{方向}
+└─── 缓存名:格式版本 ──┘   └─ 版本号 ─┘ └────── 查询条件的归一化字符串 ──────┘
+```
+
+- **格式版本 `v1`**：哪天 `ArticleVO` 的结构变了，改成 `v2` 就能让旧缓存
+  立刻全部作废，而不会被当成新结构读出来 —— 比手动 `FLUSHDB` 安全，也说得清。
+- **版本号**：失效机制的核心，见下。
+- **查询条件**：由 `ArticleQuery.toCacheKey()` 归一化生成。归一化很关键 ——
+  不传 `size` 与显式传 `size=10` 结果一样，必须命中同一条缓存；
+  `size=51 / 52 / 999` 实际都会被夹到 50，也必须同一条，
+  否则"改个 size 就能绕过缓存"，缓存等于形同虚设。
+
+### 失效为什么用「版本号」而不是「删缓存」
+
+最直观的写法是 `@CacheEvict(allEntries = true)`：写操作时把缓存名下所有 key 删掉。
+**这个方案在这里不成立**，而且原因很隐蔽：
+
+> **`RedisCache.clear()` 不是同步完成的。**
+> 用一个"只碰缓存、不碰数据库"的探针实测（同一线程内顺序打印）：
+>
+> | 操作 | 立刻查 Redis | 500ms 后再查 |
+> |---|---|---|
+> | `cache.put(k, v)` | 已写入 | —— |
+> | `cache.clear()` | **还在！** | 已删除 |
+> | `cache.evict(k)` | 已删除 | —— |
+>
+> 方法返回时还没删完，删除在后台继续跑。业务表现就是
+> **"发布文章后刷新前台，有时看得到、有时看不到"** —— 取决于那次刷新
+> 有没有赶在后台删除完成之前。而且显式指定 `BatchStrategies.keys()`
+> 也不能把它变同步，说明这是该 API 的语义，不是配置问题。
+
+改成版本号之后：
+
+```
+读：key = 版本号 + 查询条件   →  命中就直接返回
+写：只做一件事 —— INCR 一个计数器（article:page:version）
+```
+
+版本号一变，之前所有 key **再也拼不出来** —— 等于一瞬间全部作废，
+但**一条数据都不用删**。换来四个好处：
+
+| | 删缓存方案 | 版本号方案 |
+|---|---|---|
+| 失效时机 | 异步，可能读到旧数据 | **同步**（`INCR` 发完才返回，且后续读走同一条连接，顺序有保证） |
+| 写入代价 | O(缓存条数) | **O(1)**：不管缓存里有 10 条还是 10 万条，都只是一次 `INCR` |
+| 需要的命令 | `KEYS`/`SCAN` 批量匹配并删除 | 不需要任何批量匹配 |
+| 旧数据 | 删掉 | 留着等 TTL 自然过期（TTL 到了自己消失，不会无限增长） |
+
+> **代价说清楚**：旧版本的 key 不会被主动清理，短时间内 Redis 里会同时存在
+> 新老两个版本的少量 key。因为 TTL 只有 5 分钟（带抖动），它们会自己消失。
+
+**写入侧的失效点有四处**：新建、编辑、发布/下架、删除 —— 四个都调了同一个
+`bump()`，并且各有一条用例盯着（`ArticleCacheTest`）。
+
+### 防穿透 与 防雪崩
+
+| 问题 | 是什么 | 这里怎么防 |
+|------|--------|-----------|
+| **缓存穿透** | 有人拿一堆**必然查不到**的条件反复刷接口，缓存永远不命中、请求全落到数据库 | **把"没有结果"也缓存起来**，但只给 **30 秒** TTL。30 秒足够挡掉重复的恶意查询，又不会让"刚发布的文章看不到"持续太久 |
+| **缓存雪崩** | 一批缓存在**同一时刻**被写入，于是会在同一秒集体失效，请求瞬间全压到数据库 | 每条缓存的 TTL 加 **0~60 秒随机抖动**，把过期时间摊开 |
+
+这两件事由 `RedisConfig` 里的 `TtlFunction` 按内容分别决定时长：
+空结果 30 秒、有内容 5 分钟 + 抖动。
+
+### ⚠️ 两个查了很久才查清的"假故障"（都记在测试注释里）
+
+排查缓存问题时，**"看起来没生效"和"真的没生效"很难区分**。
+这里有两个坑，结论都是"功能其实是好的，是我读证据的方式错了"：
+
+**① "空结果根本不会被缓存" —— 错的。**
+
+真相是缓存写入是**异步发出**的。用 `redis-cli MONITOR` 抓命令流能看到：
+
+```
+[连接A] GET  "article:page:v1:1:...:ZZTXB..."    ← 缓存未命中
+[连接A] KEYS "article:page:v1:*"                 ← 测试在这里数 key，数到 0
+[连接B] SET  "article:page:v1:1:...:ZZTXB..."    ← put 在 22 微秒之后才被 Redis 处理
+```
+
+`SET` 里的值清清楚楚是 `{"records":["java.util.Collections$EmptyList",[]],"total":0}` ——
+**空结果被正常缓存了**。只是接口方法返回时写命令可能还在路上，
+测试紧接着用**另一条连接**发 `KEYS`，两条连接的命令到达 Redis 的先后顺序没有保证。
+
+所以测试改成"等一小会儿再看"（有上限的轮询）：断言的对象是
+**缓存最终有没有写进去**，而不是**写命令有没有在方法返回前就到 Redis** ——
+后者本来就不是任何缓存实现会承诺的语义。
+
+**② "`put` 偶发不落地" —— 同一个原因，见上。**
+
+> 教训：**断言了一条系统并不承诺的时序，测试就会随机红。**
+> 遇到"偶发失败"时，先问自己："我这个断言依赖了什么保证？那个保证存在吗？"
+
+### 一个已知边界（有用例钉着）
+
+**绕过应用直接改库（手工 SQL、DBA 改数据、别的服务直连同一个库），
+缓存不会知道**，数据最多在 TTL 之后才自愈。这是"旁路缓存"必然的代价，
+不是 bug。`ArticlePublicTest` 里专门有一条用例把这个边界固定下来：
+将来如果有人加了 CDC / 触发器来失效缓存，那条用例会变红，提醒他行为变了。
 
 ## 统一返回与错误处理
 
@@ -1471,7 +1580,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 160 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 174 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1483,10 +1592,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 160 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 174 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**20 个测试类，160 个用例，全部通过：**
+**21 个测试类，174 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -1496,7 +1605,8 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `GlobalExceptionHandlerTest` | 5 | 异常到统一返回体的映射（含「地址不存在 → 真 404」「方法用错 → 真 405」） |
 | `UserAdminTest` | 21 | 用户管理全部接口 + 自我保护 + 分页夹取 + **禁用/删除/降级后的 token 即时失效** |
 | `ArticleAdminTest` | 26 | 后台文章增删改查、草稿隔离、状态流转、权限、逻辑删除（用 `JdbcTemplate` 直查物理行） |
-| `ArticlePublicTest` | 14 | 前台列表与详情、只返回已发布、分页边界、排序白名单 |
+| `ArticlePublicTest` | 15 | 前台列表与详情、只返回已发布、分页边界、排序白名单 |
+| `ArticleCacheTest` | 13 | 列表缓存：第二次走缓存、四个写操作都让缓存失效、TTL 区间、空结果也缓存（防穿透）、key 归一化 |
 | `ArticleViewCountTest` | 10 | 浏览量：Redis 计数、累加不丢、定时批量落库、落库后增量清零 |
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
@@ -1510,7 +1620,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ProfileProdConfigTest` | 3 | prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量 |
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **160** | |
+| **合计** | **174** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

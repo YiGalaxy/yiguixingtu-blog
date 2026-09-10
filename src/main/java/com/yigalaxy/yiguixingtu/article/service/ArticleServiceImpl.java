@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.yigalaxy.yiguixingtu.article.cache.ArticleCacheVersion;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
@@ -14,7 +15,9 @@ import com.yigalaxy.yiguixingtu.category.entity.Category;
 import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
+import com.yigalaxy.yiguixingtu.config.RedisConfig;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -28,6 +31,40 @@ import java.util.stream.Collectors;
 
 /**
  * 文章服务实现。
+ *
+ * =====================================================================
+ * 【缓存策略：一处在读，四处失效】
+ *
+ * 读：{@link #pagePublished} 加了 {@code @Cacheable}，
+ *     前台文章列表走 Redis 缓存（配置见 {@link RedisConfig}）。
+ *
+ * 写：新增 / 编辑 / 改状态 / 删除 这四个操作末尾都会调用
+ *     {@link ArticleCacheVersion#bump()}，让之前缓存的列表【立刻】失效。
+ *
+ * 【为什么不按"改哪条就更新哪条"来维护缓存】
+ *   列表缓存的 key 是按（页码、每页条数、分类、关键词、排序）拼出来的，
+ *   一篇文章会同时出现在很多条缓存里（第 1 页、第 2 页、按某分类筛的那一页、
+ *   按某关键词搜到的那一页……），而且一改就可能跨页移动。
+ *   想把"该更新哪几条"算清楚，成本远高于直接全部作废重查；
+ *   列表接口本来就是"读多写少"，写一次让后面几次重新读库完全可以接受。
+ *   这是缓存一致性里很常见的一处取舍：**宁可作废得粗一点，也不要出现脏数据**。
+ *
+ * 【为什么不是 @CacheEvict(allEntries = true) —— 这里踩过一个真坑】
+ *   最直观的写法是 {@code @CacheEvict(allEntries = true)}：把缓存名下所有 key 删掉。
+ *   实测发现 Spring Data Redis 的 {@code RedisCache.clear()}【是异步的】——
+ *   方法返回时还没删完，删除在后台继续跑，于是"写完之后立刻读"依然读到旧数据，
+ *   业务上的表现就是"发布文章后刷新前台，有时看得到有时看不到"。
+ *   （显式指定 BatchStrategies.keys() 也不能把它变同步，详见 ArticleCacheVersion 的类注释）
+ *
+ *   所以改成【版本号】方案：读缓存的 key 里带一个版本号，
+ *   写操作只把版本号 INCR 一下 —— INCR 是原子且同步的，
+ *   版本一变，旧 key 就再也拼不出来，等于瞬间全部作废，而一条数据都不用删。
+ *
+ * 【为什么注解放在 Service 而不是 Controller】
+ *   Spring Cache 是靠【代理】实现的（AOP）。代理要生效，调用必须"从外部进来"——
+ *   同类内部方法互相调用（this.xxx()）会绕过代理、注解直接失效。
+ *   放在 Service 的对外方法上，正好是 Controller 从外部调用的入口，代理必然生效。
+ * =====================================================================
  */
 @Slf4j
 @Service
@@ -35,23 +72,46 @@ public class ArticleServiceImpl implements ArticleService {
 
     private final ArticleMapper articleMapper;
     private final CategoryMapper categoryMapper;
+    private final ArticleCacheVersion articleCacheVersion;
 
     /** 浏览量计数器：详情页只写它（Redis），落库交给 ViewCountSyncTask */
     private final ArticleViewCounter viewCounter;
 
     public ArticleServiceImpl(ArticleMapper articleMapper,
                               CategoryMapper categoryMapper,
-                              ArticleViewCounter viewCounter) {
+                              ArticleViewCounter viewCounter,
+                              ArticleCacheVersion articleCacheVersion) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
         this.viewCounter = viewCounter;
+        this.articleCacheVersion = articleCacheVersion;
     }
 
     // =================================================================
     //  查询
     // =================================================================
 
+    /**
+     * 前台已发布文章列表 —— 走 Redis 缓存。
+     *
+     * 【key 为什么长这样】
+     *   {@code @articleCacheVersion.current() + ':' + #query.toCacheKey()}
+     *   · 前半段是【缓存版本号】：写操作（发文/改文/删文）会把版本号 +1，
+     *     版本号一变，之前所有缓存 key 就再也拼不出来 = 全部立刻失效。
+     *     为什么不用 allEntries 清缓存，见 ArticleCacheVersion 的类注释
+     *     （结论：Spring 的 RedisCache.clear() 是异步的，写后立刻读会读到旧数据）
+     *   · 后半段是【查询条件的归一化字符串】，见 ArticleQuery.toCacheKey()
+     *     （把默认值、被夹取的 size、空关键词都归一化，避免同一份数据存很多份）
+     *
+     * 【SpEL 里的 @ 是什么意思】
+     *   {@code @articleCacheVersion} 表示"从 Spring 容器里按 bean 名取这个对象"，
+     *   后面直接跟方法调用。bean 名默认就是类名首字母小写，即 ArticleCacheVersion
+     *   → articleCacheVersion。所以每次算缓存 key 时都会现取一次版本号，
+     *   保证刚被 bump 过的版本立刻生效。
+     */
     @Override
+    @Cacheable(cacheNames = RedisConfig.CACHE_ARTICLE_PAGE,
+            key = "@articleCacheVersion.current() + ':' + #query.toCacheKey()")
     public IPage<ArticleVO> pagePublished(ArticleQuery query) {
         // 【安全核心】写死 1。不管前端传什么 status，这里都不理会。
         return doPage(query, 1);
@@ -72,8 +132,15 @@ public class ArticleServiceImpl implements ArticleService {
     private IPage<ArticleVO> doPage(ArticleQuery query, Integer forceStatus) {
 
         // ---- 参数兜底：防止前端传 0、负数或超大 size ----
+        // 默认值与上限都取 ArticleQuery 上的常量，而不是就地写 10 / 50：
+        // 因为 ArticleQuery.toCacheKey() 生成缓存 key 时也要用同一套规则
+        // （把 size 归一化成"实际生效值"，否则 ?size=51 / 52 / 99 会各自
+        //  变成不同的 key、每次都未命中，缓存就白做了）。
+        // 两处共用常量，就不会出现"只改了一边"导致 key 与真实查询对不上的情况。
         long pageNo = (query.getPage() == null || query.getPage() < 1) ? 1L : query.getPage();
-        long pageSize = (query.getSize() == null || query.getSize() < 1) ? 10L : Math.min(query.getSize(), 50L);
+        long pageSize = (query.getSize() == null || query.getSize() < 1)
+                ? ArticleQuery.DEFAULT_PAGE_SIZE
+                : Math.min(query.getSize(), ArticleQuery.MAX_PAGE_SIZE);
 
         Page<Article> page = new Page<>(pageNo, pageSize);
 
@@ -175,6 +242,10 @@ public class ArticleServiceImpl implements ArticleService {
 
         articleMapper.insert(article);
 
+        // 【让列表缓存失效】把版本号 +1，之前缓存的列表瞬间全部作废
+        // （为什么不是 @CacheEvict(allEntries = true)，见 ArticleCacheVersion 的类注释）
+        articleCacheVersion.bump();
+
         // insert 之后，MyBatis-Plus 会把刚生成的自增主键【回填】到 article 对象里，
         // 所以这里能直接拿到新文章的 ID。
         return article.getId();
@@ -209,6 +280,9 @@ public class ArticleServiceImpl implements ArticleService {
                 .set(Article::getCategoryId, form.getCategoryId())
                 .set(Article::getStatus, form.getStatus() == null ? exist.getStatus() : form.getStatus())
                 .set(Article::getIsTop, form.getIsTop() == null ? exist.getIsTop() : form.getIsTop()));
+
+        // 改完内容要让列表缓存失效（标题/摘要/分类/置顶都可能变，列表显示会跟着变）
+        articleCacheVersion.bump();
     }
 
     @Override
@@ -227,6 +301,9 @@ public class ArticleServiceImpl implements ArticleService {
         articleMapper.update(null, new LambdaUpdateWrapper<Article>()
                 .eq(Article::getId, id)
                 .set(Article::getStatus, status));
+
+        // 发布/下架会直接影响前台列表能不能看到这篇，必须让缓存失效
+        articleCacheVersion.bump();
     }
 
     @Override
@@ -238,6 +315,9 @@ public class ArticleServiceImpl implements ArticleService {
         // @TableLogic 会把它变成 UPDATE article SET deleted = 1 WHERE id = ?
         // （不是真的 DELETE，历史数据还在，误删可以人工恢复）
         articleMapper.deleteById(id);
+
+        // 删掉的不能再出现在列表里
+        articleCacheVersion.bump();
     }
 
     // =================================================================

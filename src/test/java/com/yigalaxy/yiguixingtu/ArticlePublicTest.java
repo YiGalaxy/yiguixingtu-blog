@@ -3,6 +3,7 @@ package com.yigalaxy.yiguixingtu;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
+import com.yigalaxy.yiguixingtu.article.service.ArticleService;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.category.entity.Category;
 import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
@@ -50,6 +51,10 @@ class ArticlePublicTest extends AbstractIntegrationTest {
 
     @Autowired
     private ArticleMapper articleMapper;
+
+    /** 用例⑦要用它走"真正的下架路径"（进而触发缓存失效） */
+    @Autowired
+    private ArticleService articleService;
 
     @Autowired
     private CategoryMapper categoryMapper;
@@ -188,15 +193,18 @@ class ArticlePublicTest extends AbstractIntegrationTest {
     void unpublishedArticle_shouldDisappearFromPublic() throws Exception {
         Article a = insertArticle("先发布再下架", 1);
 
-        // 下架前：看得到
+        // 下架前：看得到（这一次会把结果写进列表缓存）
         mockMvc.perform(get("/article/page").param("keyword", mark))
                 .andExpect(jsonPath("$.data.total").value(1));
 
-        // 直接改库模拟"下架"
-        articleMapper.update(null,
-                new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<Article>()
-                        .eq(Article::getId, a.getId())
-                        .set(Article::getStatus, 0));
+        // 走 Service 下架 —— 也就是后台那个「下架」按钮真正走的路径。
+        //
+        // 【这里原来是"直接用 Mapper 改库"来模拟下架，加了缓存之后必须改掉】
+        //   Mapper 上没有任何缓存失效逻辑（那是 Service 的职责），
+        //   所以直接改库时缓存并不知道数据变了，前台还会返回旧结果。
+        //   而"用户点了下架，前台立刻看不到"这条要求，说的是【通过接口下架】。
+        //   用 Mapper 去模拟，验的就不是这条要求了，而是下面⑧那条已知边界。
+        articleService.updateStatus(a.getId(), 0);
 
         // 下架后：列表没了，详情也 404
         mockMvc.perform(get("/article/page").param("keyword", mark))
@@ -204,6 +212,35 @@ class ArticlePublicTest extends AbstractIntegrationTest {
 
         mockMvc.perform(get("/article/{id}", a.getId()))
                 .andExpect(jsonPath("$.code").value(ResultCode.ARTICLE_NOT_FOUND.getCode()));
+    }
+
+    @Test
+    @DisplayName("⑧ 绕过应用直接改库 -> 前台不会立刻变（缓存一致性的已知边界，不是 bug）")
+    void directDbChange_shouldNotInvalidateCacheImmediately() throws Exception {
+        Article a = insertArticle("绕过应用改库", 1);
+
+        mockMvc.perform(get("/article/page").param("keyword", mark))
+                .andExpect(jsonPath("$.data.total").value(1));
+
+        // 故意绕过 Service（也就绕过了"推进缓存版本号"这一步）直接改库
+        articleMapper.update(null,
+                new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<Article>()
+                        .eq(Article::getId, a.getId())
+                        .set(Article::getStatus, 0));
+
+        // 前台这次仍然返回旧结果 —— 这不是 bug，而是"旁路缓存"必然的代价：
+        //   缓存失效是靠应用层在写操作后主动触发的（这里是版本号 +1），
+        //   任何绕过应用层的写（手工 SQL、别的服务直连同一个库、DBA 改数据）
+        //   缓存都不会知道。数据最多在 TTL（正常 5 分钟）之后才自愈。
+        //
+        // 【为什么要把这条"限制"也写成用例】
+        //   一是把边界钉死：将来如果有人加了"数据库触发器/CDC 来失效缓存"，
+        //   这条用例会红，提醒他行为变了、要同步改文档；
+        //   二是防止有人看到"改了库前台没变"就以为是 bug 去乱改缓存逻辑。
+        //   真正需要外部改库也能立刻生效的场景，正确解法是消息/CDC，
+        //   不是把 TTL 调成 0（那等于取消缓存）。
+        mockMvc.perform(get("/article/page").param("keyword", mark))
+                .andExpect(jsonPath("$.data.total").value(1));
     }
 
     // ================================================================

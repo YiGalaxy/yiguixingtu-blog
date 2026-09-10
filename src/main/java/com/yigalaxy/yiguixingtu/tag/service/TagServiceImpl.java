@@ -200,6 +200,18 @@ public class TagServiceImpl implements TagService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void clearArticleTags(Long articleId) {
+        if (articleId == null) {
+            return;
+        }
+        int removed = articleTagMapper.deleteByArticleId(articleId);
+        if (removed > 0) {
+            log.info("文章 {} 被删除，一并解除 {} 条标签关联", articleId, removed);
+        }
+    }
+
+    @Override
     public List<Long> listArticleIdsByTagId(Long tagId) {
         if (tagId == null) {
             return Collections.emptyList();
@@ -302,30 +314,35 @@ public class TagServiceImpl implements TagService {
     @Transactional(rollbackFor = Exception.class)
     public void replaceArticleTags(Long articleId, List<Long> tagIds) {
 
-        // 先清空旧关联（覆盖式语义：前端提交什么，最终就是什么）
-        articleTagMapper.deleteByArticleId(articleId);
-
         Set<Long> distinctTagIds = (tagIds == null ? Collections.<Long>emptyList() : tagIds).stream()
                 .filter(Objects::nonNull)
                 .collect(Collectors.toCollection(LinkedHashSet::new));
 
-        if (distinctTagIds.isEmpty()) {
-            // 清空标签也是一个合法操作（用户把标签全部取消），到此为止
-            articleCacheVersion.bump();
-            return;
+        // 【第一步：先校验，再动任何数据】
+        //
+        // 为什么要强调这个顺序：最初的写法是"先删旧关联、再校验标签是否存在"，
+        // 结果"传了不存在的标签"这条路上，旧关联已经被删掉了 ——
+        // 虽然方法上的 @Transactional 会让整个事务回滚、旧关联最终还是回来，
+        // 但那个保证依赖"事务配置不出错"（比如有人把 @Transactional 去掉、
+        // 或者调用方在无事务的状态下进到这里，用户就会静默丢掉全部标签）。
+        //
+        // 调整成"先校验"之后，失败的路径【根本没有产生副作用】——
+        // 不管事务怎么配，用户都不会因为一次校验失败丢掉标签。
+        // 这是"让正确性不依赖某个配置"的典型做法，代价只是把一次查询提前。
+        if (!distinctTagIds.isEmpty()) {
+            long found = tagMapper.selectCount(new LambdaQueryWrapper<Tag>().in(Tag::getId, distinctTagIds));
+            if (found != distinctTagIds.size()) {
+                throw new BusinessException(ResultCode.TAG_NOT_FOUND, "有标签已不存在，请刷新页面后重试");
+            }
         }
 
-        // 【为什么要校验标签存在】
-        //   前端可能拿着一份过期数据提交（比如某个标签刚被别的管理员删了）。
-        //   不校验的话，关联行会指向一个不存在的标签 —— 那行数据永远查不出名字，
-        //   看起来就是"标签列表里少了一个"这种莫名其妙的现象。
-        //   这里宁可让本次保存失败并提示刷新，也不要写入脏关联。
-        long found = tagMapper.selectCount(new LambdaQueryWrapper<Tag>().in(Tag::getId, distinctTagIds));
-        if (found != distinctTagIds.size()) {
-            throw new BusinessException(ResultCode.TAG_NOT_FOUND, "有标签已不存在，请刷新页面后重试");
-        }
+        // 【第二步：清空旧关联】（覆盖式语义：前端提交什么，最终就是什么）
+        articleTagMapper.deleteByArticleId(articleId);
 
-        articleTagMapper.insertBatch(articleId, distinctTagIds);
+        // 【第三步：写入新的关联】
+        if (!distinctTagIds.isEmpty()) {
+            articleTagMapper.insertBatch(articleId, distinctTagIds);
+        }
 
         // 标签的文章数变了（新打上的 +1、去掉的 -1），让标签列表缓存失效
         articleCacheVersion.bump();

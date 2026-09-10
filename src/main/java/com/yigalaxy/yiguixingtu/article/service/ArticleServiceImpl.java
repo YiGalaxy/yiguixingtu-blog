@@ -96,18 +96,27 @@ public class ArticleServiceImpl implements ArticleService {
      */
     private final OperationLogRecorder operationLogRecorder;
 
+    /**
+     * 标签服务。
+     * 文章与标签是多对多：关联的读写都在标签模块里（它管着 article_tag 表与失效规则），
+     * 文章这边只负责"在正确的时候调它"——这样"标签变了要失效哪些缓存"就只有一处实现。
+     */
+    private final com.yigalaxy.yiguixingtu.tag.service.TagService tagService;
+
     public ArticleServiceImpl(ArticleMapper articleMapper,
                               CategoryMapper categoryMapper,
                               ArticleViewCounter viewCounter,
                               ArticleCacheVersion articleCacheVersion,
                               PublishedArticleCache publishedArticleCache,
-                              OperationLogRecorder operationLogRecorder) {
+                              OperationLogRecorder operationLogRecorder,
+                              com.yigalaxy.yiguixingtu.tag.service.TagService tagService) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
         this.viewCounter = viewCounter;
         this.articleCacheVersion = articleCacheVersion;
         this.publishedArticleCache = publishedArticleCache;
         this.operationLogRecorder = operationLogRecorder;
+        this.tagService = tagService;
     }
 
     // =================================================================
@@ -165,6 +174,23 @@ public class ArticleServiceImpl implements ArticleService {
                 ? ArticleQuery.DEFAULT_PAGE_SIZE
                 : Math.min(query.getSize(), ArticleQuery.MAX_PAGE_SIZE);
 
+        // ---- 标签筛选：先查出"这个标签下有哪些文章" ----
+        //
+        // 【为什么要分成两步，而不是写一条 JOIN 的子查询】
+        //   关联表在标签模块里，文章模块不该去拼它的 SQL（那是把两个模块的
+        //   表结构焊在一起）；而且"用 IN (id, id, ...)"这种写法让数据库
+        //   直接用主键索引取文章，执行计划比 EXISTS 子查询更好预测。
+        //
+        // 【空结果的处理很关键】标签下没有文章时直接返回空页，
+        //   不去查库、更不能把空集合拼进 IN ()（那是 SQL 语法错误）。
+        List<Long> taggedArticleIds = null;
+        if (query.getTagId() != null) {
+            taggedArticleIds = tagService.listArticleIdsByTagId(query.getTagId());
+            if (taggedArticleIds.isEmpty()) {
+                return new Page<>(pageNo, pageSize, 0);
+            }
+        }
+
         Page<Article> page = new Page<>(pageNo, pageSize);
 
         LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<Article>()
@@ -173,6 +199,8 @@ public class ArticleServiceImpl implements ArticleService {
                 // 后台：才允许按前端传的 status 筛
                 .eq(forceStatus == null && query.getStatus() != null, Article::getStatus, query.getStatus())
                 .eq(query.getCategoryId() != null, Article::getCategoryId, query.getCategoryId())
+                // 标签筛选：限定在这批文章 id 里
+                .in(taggedArticleIds != null, Article::getId, taggedArticleIds)
                 // 关键词：标题 或 摘要 命中即可。
                 // and(...) 是为了把这两个 or 条件包成一组：(title like ? or summary like ?)，
                 // 否则它会和前面的 status / categoryId 平级，变成
@@ -244,7 +272,23 @@ public class ArticleServiceImpl implements ArticleService {
         if (article == null) {
             throw new BusinessException(ResultCode.ARTICLE_NOT_FOUND);
         }
-        return toVO(article, getCategoryName(article.getCategoryId()));
+        // 后台详情（含草稿）也带上标签：管理员的编辑界面要用它回显多选框
+        return withTags(toVO(article, getCategoryName(article.getCategoryId())));
+    }
+
+    /**
+     * 给单个 VO 补上标签。
+     * 【为什么单个也要走 mapByArticleIds】那个方法内部是"IN + 内存分组"，
+     * 传一个 id 时就是一次普通查询，没必要为单篇再写一套逻辑
+     * （两处逻辑迟早会不一致，而这里的不一致表现是"列表有标签、详情没有"）。
+     */
+    private ArticleVO withTags(ArticleVO vo) {
+        List<com.yigalaxy.yiguixingtu.tag.dto.TagVO> tags =
+                tagService.mapByArticleIds(List.of(vo.getId())).get(vo.getId());
+        if (tags != null) {
+            vo.setTags(tags);
+        }
+        return vo;
     }
 
     /**
@@ -311,6 +355,11 @@ public class ArticleServiceImpl implements ArticleService {
 
         articleMapper.insert(article);
 
+        // 【写标签关联】必须在 insert 之后：MyBatis-Plus 这时候才把自增主键
+        // 回填到 article 对象里，关联表的 article_id 要用它。
+        // 同一个事务里，所以"文章建了、标签没写上"这种半成品不会出现。
+        tagService.replaceArticleTags(article.getId(), form.getTagIds());
+
         // 【让列表缓存失效】把版本号 +1，之前缓存的列表瞬间全部作废
         // （为什么不是 @CacheEvict(allEntries = true)，见 ArticleCacheVersion 的类注释）
         articleCacheVersion.bump();
@@ -360,6 +409,13 @@ public class ArticleServiceImpl implements ArticleService {
         // 改完内容要让列表缓存失效（标题/摘要/分类/置顶都可能变，列表显示会跟着变）
         articleCacheVersion.bump();
 
+        // 3. 覆盖式地重写标签关联（把旧的全部清掉，再写入这次提交的那些）。
+        //    标签不存在时它会先校验再抛异常（校验发生在任何写入之前，
+        //    见 TagServiceImpl.replaceArticleTags 的注释），所以"保存失败"不会
+        //    让用户丢掉原有标签；再加上同一个事务，内容改动也会一起撤销 ——
+        //    不会出现"标题改了、标签没改"的半成品。
+        tagService.replaceArticleTags(id, form.getTagIds());
+
         // 记一笔审计。detail 里带上"改成了什么标题"——
         // 只记"谁在什么时候改了哪篇"的话，事后想查"标题是被谁改成这样的"还是得去翻日志
         operationLogRecorder.record(OperationAction.UPDATE_ARTICLE, AuditTarget.ARTICLE, id,
@@ -400,6 +456,14 @@ public class ArticleServiceImpl implements ArticleService {
         // @TableLogic 会把它变成 UPDATE article SET deleted = 1 WHERE id = ?
         // （不是真的 DELETE，历史数据还在，误删可以人工恢复）
         articleMapper.deleteById(id);
+
+        // 【顺手清掉标签关联】文章的关联行留着没有任何意义：
+        //   · 标签的文章数统计已经是 JOIN article 且过滤 deleted，不会算错
+        //   · 但那些行会永远堆在关联表里（每删一篇文章就多几条垃圾），
+        //     而且万一将来有人"恢复"一篇文章，会带出它删除时那一刻的旧标签 ——
+        //     那不是恢复，是"穿越"。
+        // 标签模块负责这件事的语义（它管着 article_tag 表），这里只调用。
+        tagService.clearArticleTags(id);
 
         // 删掉的不能再出现在列表里
         articleCacheVersion.bump();
@@ -474,9 +538,25 @@ public class ArticleServiceImpl implements ArticleService {
                 .collect(Collectors.toMap(Category::getId, Category::getName));
 
         // 3. 逐个转换，分类名直接从 Map 里取，不再查库
-        return articles.stream()
+        List<ArticleVO> voList = articles.stream()
                 .map(a -> toVO(a, categoryNameMap.get(a.getCategoryId())))
                 .collect(Collectors.toList());
+
+        // 4. 标签同理，也是"避免 N+1"：10 篇文章各查一次标签 = 10 次 SQL，
+        //    这里用一条 IN 查询把整页的标签一次取回来，再在内存里按文章分组。
+        //    （这段刻意放在分类之后：分类是一对一，标签是多对多，
+        //      多对多必须走"批量查 + 内存分组"这条路，语义上更值得注释一句。）
+        List<Long> articleIds = articles.stream().map(Article::getId).collect(Collectors.toList());
+        Map<Long, List<com.yigalaxy.yiguixingtu.tag.dto.TagVO>> tagMap =
+                tagService.mapByArticleIds(articleIds);
+        for (ArticleVO vo : voList) {
+            List<com.yigalaxy.yiguixingtu.tag.dto.TagVO> tags = tagMap.get(vo.getId());
+            // 没有标签时保持 VO 里那个空的 ArrayList（而不是塞 null），前端可以直接遍历
+            if (tags != null) {
+                vo.setTags(tags);
+            }
+        }
+        return voList;
     }
 
     /**

@@ -62,9 +62,25 @@ public class PublishedArticleCache {
     private final ArticleMapper articleMapper;
     private final CategoryMapper categoryMapper;
 
-    public PublishedArticleCache(ArticleMapper articleMapper, CategoryMapper categoryMapper) {
+    /**
+     * 标签服务：详情要带上这篇文章的标签。
+     *
+     * 【为什么标签放在缓存里面，而不是像浏览量那样在外面合并】
+     *   两者性质完全不同：
+     *     · 浏览量每次访问都变，所以必须留在缓存外（否则 INCR 就不再执行了）
+     *     · 标签只有在"改标签/改标签名/删标签"时才变，而那些操作都会推进缓存版本号
+     *       （见 TagServiceImpl 里的 bump），所以缓存里的标签不会变脏
+     *   放进缓存里，一次缓存未命中查一次标签；放在外面则是每次都多一次查询 ——
+     *   详情是访问量最大的接口，这个差别不小。
+     */
+    private final com.yigalaxy.yiguixingtu.tag.service.TagService tagService;
+
+    public PublishedArticleCache(ArticleMapper articleMapper,
+                                 CategoryMapper categoryMapper,
+                                 com.yigalaxy.yiguixingtu.tag.service.TagService tagService) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
+        this.tagService = tagService;
     }
 
     /**
@@ -130,6 +146,14 @@ public class PublishedArticleCache {
         vo.setAuthorId(article.getAuthorId());
         vo.setCreateTime(article.getCreateTime());
         vo.setUpdateTime(article.getUpdateTime());
+
+        // 标签：详情只有一篇文章，所以用"按 id 批量查"这个方法查一个也不会浪费
+        // （它内部是 IN (...) + 内存分组，传一个 id 就退化成一次普通查询）
+        java.util.List<com.yigalaxy.yiguixingtu.tag.dto.TagVO> tags =
+                tagService.mapByArticleIds(java.util.List.of(article.getId())).get(article.getId());
+        if (tags != null) {
+            vo.setTags(tags);
+        }
         return vo;
     }
 }

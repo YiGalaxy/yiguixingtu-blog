@@ -48,6 +48,16 @@ public class ArticleQuery {
     private Long categoryId;
 
     /**
+     * 标签ID筛选：只看这个标签下的文章。
+     *
+     * 【为什么不是一个 tagIds 列表】前台标签页/标签云是"点一个标签看一批文章"，
+     *   一次只筛一个标签。多标签（AND / OR 语义）会让 UI 和 SQL 都复杂一档，
+     *   而博客读者并没有这个需求。
+     */
+    @Schema(description = "标签ID筛选")
+    private Long tagId;
+
+    /**
      * 【注意】这个字段只有后台接口认。
      * 前台调 /article/page 时，Service 会写死 status=1，
      * 前端就算传 status=0 想偷看草稿，也会被无视。
@@ -96,7 +106,7 @@ public class ArticleQuery {
      *     ② 关键词最终会被用在 LIKE '%...%' 上，超长关键词本身没有任何查询价值。
      *   如果以后要更严格，可以改成对关键词做一次摘要（比如取 hash）再拼 key。
      *
-     * @return 形如 {@code 1:10:all:all:default:default} 的稳定字符串
+     * @return 形如 {@code 1:10:all:all:all:default:default} 的稳定字符串
      */
     public String toCacheKey() {
         // ---- 页码兜底：与 ArticleServiceImpl.doPage() 的判断保持一致 ----
@@ -116,6 +126,7 @@ public class ArticleQuery {
         return effectivePage
                 + ":" + effectiveSize
                 + ":" + (categoryId == null ? "all" : categoryId)
+                + ":" + (tagId == null ? "all" : tagId)
                 + ":" + kw
                 + ":" + sort
                 + ":" + order;

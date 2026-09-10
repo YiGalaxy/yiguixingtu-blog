@@ -40,6 +40,26 @@ public class ArticleVO {
     @Schema(description = "分类名称")
     private String categoryName;
 
+    /**
+     * 该文章挂的标签（只有 id / name，按 sort、id 排序）。
+     *
+     * 【为什么用 TagVO 而不是 List&lt;String&gt;】
+     *   前端点标签要跳转到"按标签筛选"的列表页，那需要标签 id；
+     *   只给名字的话前端还得再查一次 id —— 而名字是可能改的，
+     *   用名字做筛选条件会让链接在标签改名后失效。
+     *
+     * 【它是怎么被填上的（这点很重要）】
+     *   列表接口一页 10 篇，如果每篇都单独查一次标签就是 10 次 SQL（N+1）。
+     *   所以 Service 用一条 IN 查询把整页的标签一次取回来，在内存里分组填充
+     *   （见 TagService.mapByArticleIds）。
+     *
+     * 【空数组还是 null】
+     *   没有标签时给【空数组】而不是 null：前端可以直接 v-for，
+     *   不用再写一层判空（这一点和 TagVO.articleCount 给 0 而不是 null 是同一个考虑）。
+     */
+    @Schema(description = "标签列表（没有标签时是空数组）")
+    private java.util.List<com.yigalaxy.yiguixingtu.tag.dto.TagVO> tags = new java.util.ArrayList<>();
+
     @Schema(description = "状态：0草稿 1已发布")
     private Integer status;
 

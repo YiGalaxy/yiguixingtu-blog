@@ -63,6 +63,18 @@ public interface TagService {
     void replaceArticleTags(Long articleId, List<Long> tagIds);
 
     /**
+     * 清空一篇文章的全部标签（文章被删除时用）。
+     *
+     * 【为什么不复用 replaceArticleTags(articleId, null)】
+     *   语义不同：那个是"用户把标签都取消了"，这个是"这篇文章没了"。
+     *   调用方的意图值得在方法名上体现出来 —— 读代码的人看到
+     *   {@code clearArticleTags(id)} 不需要再去想"传 null 是什么意思"。
+     *   实现上它就是一条 DELETE，不额外校验、不推进缓存版本号
+     *  （文章被删除时调用方自己会 bump）。
+     */
+    void clearArticleTags(Long articleId);
+
+    /**
      * 查某个标签下的【全部】文章 id（不过滤状态，由调用方决定）。
      * 返回空列表表示这个标签下没有文章 —— 调用方据此直接返回空页，不必再查库。
      */

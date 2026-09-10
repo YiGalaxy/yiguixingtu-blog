@@ -2123,14 +2123,24 @@ compose 里的独立项目名 `yiguixingtu-prod` 保证了它和本地开发容�
 | prod profile | `/actuator/health` 返回 UP；`/v3/api-docs` 返回 401（**Swagger 确实关掉了**） |
 | 内容链路 | 建分类 + 标签 + 文章（带 `tagIds`）→ `?tagId=` 筛选 total=1、详情带 1 个标签、归档 1 个月、RSS 1 条且**含正文** |
 | 评论链路 | 游客发评论 → `status=0` 且**带 createTime** → 前台 total=0（看不到）→ 接口通过 → 前台 total=1 |
-| **前端 SSR（容器间互访）** | 首页 HTML 28KB，**含刚发的文章标题**与 canonical；文章页 82KB **含那条评论**；标签是真实内链 `<a href="/?tagId=1">`（可被爬虫跟随） |
-| sitemap / robots | `/sitemap.xml` 200 且含 `/article/1`；`/robots.txt` 200 且 `Sitemap:` 用的是配置的域名（守 `PUBLIC_SITE_URL`） |
+| **前端 SSR（容器间互访）** | 首页 HTML 30KB，**含刚发的文章标题**与 canonical；文章页 82KB **含那条评论**；**可被爬虫跟随的标签内链在文章页**：`<a class="doc-tag" href="/?tagId=1">` |
+| 归档页（SSR） | `/archive` HTML 里 `class="am-item"` 的条数 **= 接口的 total**（实测 2 = 2），且有「20xx 年 x 月」分组标题 —— 守"全部内链真的进了服务端 HTML" |
+| sitemap / robots / feed | `/sitemap.xml` 200 且含 `/article/1` 与 `/archive`；`/robots.txt` 200 且 `Sitemap:` 用的是配置的域名；`/feed.xml` 200 且**能被严格 XML 解析器解析**并含标题与 `pubDate` |
+| **按需引入的组件样式真的在** | 样式是**按路由**的，所以分页查：首页 CSS（93KB）里有 `.el-message`（每个页面都靠它显示提示）、`.el-button`；**后台页** CSS（238KB）里有 `.el-table` / `.el-dialog` / `.el-input` / `.admin .panel` / `.ed-row`；同时**反向确认**站点没用到的 `.el-calendar` / `.el-carousel` / `.el-cascader` 在**两个页面里都是 0 处** |
 | 操作审计 | 上面那些管理动作在 `operation_log` 里逐条留痕（CREATE_CATEGORY / CREATE_TAG / CREATE_ARTICLE / UPDATE_COMMENT_STATUS） |
-| 上传落卷 | 上传的封面写进 `/app/uploads/cover/2026/09/…png`，`GET` 返回 200；**`--force-recreate` 重建容器后文件还在、还能访问**（守"具名卷有没有真的挂上"） |
-| 应用层限流 | 连续 6 次登录 → `200,200,200,200,429,429`（配额 5 次/分钟，返回**真 HTTP 429**） |
+| 上传落卷 | 上传的封面写进 `/app/uploads/cover/2026/09/…png`，`GET` 返回 200；**`--force-recreate` 重建容器后文件还在、内容逐字节一致**（守"具名卷有没有真的挂上"） |
+| 应用层限流 | 连续 8 次登录 → `200,200,200,200,200,429,429,429`（配额 5 次/分钟，返回**真 HTTP 429**）；并且验证了"前 5 次确实进到了控制器"——否则一次 JSON 解析失败也会让 8 次都返回 200，看起来像限流失效 |
+| 日志落卷 | `/app/logs/yiguixingtu.log` 属主 `app`、64 行；重建容器后仍在（守 `LOG_DIR` 指向挂载点） |
 
+> ⚠️ **首页上的标签不是链接，这是设计**（2026-09-11 校正一条旧记录）：
+> 首页把标签渲染成 `<button class="tagp">`，点击后**原地筛选**并由前端改地址栏，
+> 所以**按设计就没有 `href`**；可被爬虫跟随的 `/?tagId=N` 内链在**文章详情页**。
+> 之前那句"标签是真实内链"写在首页那行下面，容易被理解成"首页有内链"——
+> 我自己在验收脚本里就照着查错过一次（查首页 → 假失败），所以这里写清是哪个页面。
+>
 > 演练完 `docker compose down -v` 把演练用的容器与卷全部删掉，
-> 开发环境（8082 / 3310 / 6380）不受任何影响。
+> 开发环境（8082 / 3310 / 6380）不受任何影响。**实测**：演练后 `docker ps -a` 里
+> 与 `yiguixingtu-prod` 相关的容器与卷都是 0 个，dev 后端与两个 dev 容器照常运行。
 
 #### ⚠️ 镜像构建会下载 Maven 依赖 —— 国内网络务必注意
 

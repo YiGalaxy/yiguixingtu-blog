@@ -664,7 +664,7 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 | **M2** | ⬜ 待做 | **A1 + A2**：缓存三件套 + 浏览量计数 | 「数据库与缓存」升级为掌握级；那条 `了解 Redis 高并发` **从"了解"行移出** |
 | **M3** | ✅ 完成（3.1 多环境 · 3.2 OSS上传 · 3.3 Dockerfile+四容器 · 3.4 部署文档 · 3.5 管理员引导） | **E1 + B4 + B5 + B6**：多环境 → OSS 上传 → 上线 → CD | 徽章「已上线」与结尾「阿里云 ECS + OSS」**变成真的**；过一遍 §8「简历同步规则」第 1 条的不可见注释核对门 |
 | **M4** | ⬜ 待做 | **A3 + A4**：Nginx + Resilience4j 限流、Spring 事件驱动的操作审计 | 技能栏加 `Resilience4j`（限流与熔断降级）、`Redisson`；「切面与事务」那条**保持原样** —— `@Transactional` / `@PreAuthorize` 就是最主流的用法，不需要改 |
-| **M5** | 🔄 进行中（5.2 ✅ 5.3 ✅ 5.7 ✅ 5.9 ✅ / 5.1 卡住待查 / 其余待做） | **D + E 其余**：traceId、压测对比、幂等、错误码统一 | 面试纵深：**这些是"做过才答得出"的细节** |
+| **M5** | 🔄 进行中（5.1 ✅ 5.2 ✅ 5.3 ✅ 5.7 ✅ 5.9 ✅ / 5.4 5.6 5.8 待做） | **D + E 其余**：幂等、错误码统一、压测对比 | 面试纵深：**这些是"做过才答得出"的细节** |
 | **M6** | ⬜ 待做 | **C / F**：标签评论、搜索、消息队列、前端站点 | 按需，别为了关键词硬做 |
 
 **顺序理由**：B1/B2 只是给测试和 CI 加壳、**不改业务代码**，风险最低，却立刻把 76 个用例从"只能自己跑"变成"任何人都能验证"，所以排在最前面；A 批改的是现有业务代码，收益最快但风险略高，紧随其后；E1/B5 负责把东西真正交付出去；D/E 其余是**在 A/B 建好的东西上加纵深**（traceId 的价值要靠 A4 的异步日志才体现）；C 需要新业务模块，放最后。
@@ -1123,34 +1123,39 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 
 ### M5 · 可观测与安全（2–3 天，9 个提交）
 
-> ### 🔄 进度：5.2 ✅（登出 token 失效）· 5.3 ✅（索引 + 慢查询日志）· 5.7 ✅（Prometheus 指标）· 5.9 ✅（安全响应头 + Dependabot）· 5.1 ⏸ 卡住
+> ### 🔄 进度：5.1 ✅ · 5.2 ✅ · 5.3 ✅ · 5.7 ✅ · 5.9 ✅（还剩 5.4 幂等 / 5.6 错误码 / 5.8 压测；5.5 验证码为可选）
 >
-> **5.7 已完成**（本次提交）：`micrometer-registry-prometheus` +
+> **5.1 已完成**（本次提交）：traceId 进日志 + 进响应头，`TracingTest` 5 个用例全绿。
+>
+> **真正卡住的东西其实是个"假故障"——记录清楚，免得以后重蹈**
+>   排查到最后发现，traceId 其实【一直在正常生成】。之前判它"没生效"，
+>   是因为两条证据都读错了：
+>     · ① 测试里用 Logback 的 ListAppender 截日志、然后【请求结束之后】去读
+>       `event.getMDCPropertyMap()` —— 而 LoggingEvent 对 MDC 是【懒快照】，
+>       第一次调用它时才去读当前线程的 MDC。请求结束、作用域已经关了，
+>       读到的当然是空。要在 appender 入队时调 `prepareForDeferredProcessing()`
+>       把它变成即时快照，这才是"日志发生那一刻"的真实值。
+>     · ② 断言 `tracer.currentSpan()` 在测试线程里不为 null —— 可测试线程
+>       不在任何请求里，没有活动 span，返回 null 才是对的。
+>   换成"在请求里用一个过滤器打印当前 span / MDC"之后，证据立刻清楚了：
+>   请求期间 `currentSpan` 有值、`MDC={traceId=..., spanId=...}` 也有值。
+>
+> **一个真实的小坑（不是假故障，值得记）**
+>   设了 `management.tracing.propagation.type=b3` 之后，响应头里【不会】自动出现
+>   `X-B3-TraceId`。查下去是 Boot 4 的行为：它把 tracing 的
+>   receiver / sender / default 三个 observation handler 包进了
+>   `FirstMatchingCompositeObservationHandler`，入站请求永远先被 receiver 匹配，
+>   负责写响应头的 sender 永远轮不到。而 `management.observations.*` 里没有
+>   能改这个分组行为的配置项。
+>   解决：用十几行的 `TraceResponseHeaderFilter`（servlet 过滤器读
+>   `tracer.currentSpan()` 写 `X-Trace-Id`）——这是 Brave 自己的 TracingFilter
+>   几十年就在用的做法，不算自研。CORS 里还要 `addExposedHeader("X-Trace-Id")`，
+>   否则前端 fetch 读不到这个头。
+>
+> **5.7 已完成**（上一个提交）：`micrometer-registry-prometheus` +
 > `/actuator/prometheus` + 5 个业务指标 + `MetricsEndpointTest`（8 个用例）。
->
-> **⚠️ 它顺手给 5.1 带来了一条关键线索（这条比 5.7 本身更值钱）**
->   指标跑通之后，"HTTP 请求根本不会创建 observation" 这个假设被推翻了 ——
->   因为 `http_server_requests` 指标本来就来自同一条 Observation 管道
->   （`ServerHttpObservationFilter` → `ObservationRegistry` → 各个 handler）。
->   测试里断言它真的出现了，实测也确实出现了。
->   也就是说：**observation 被创建了，只是 TracingObservationHandler
->   没有被注册进去**（或者注册的是另一个 ObservationRegistry 实例）。
->   下一步应该去查的是"registry 上到底挂了哪些 handler"，
->   而不是继续查"为什么没创建 observation"。
->
-> **5.7 里几个刻意的取舍**
->   · 指标端点放行在同一个端口上，**没有**用 `management.server.port` 挪到 8081。
->     挪端口确实是更严格的做法（主端口上根本没有 /actuator），
->     没采用的具体原因：固定端口会和本机同时在跑的开发服务抢 8081，
->     测试里要改成随机端口 + `@LocalManagementPort` 才不冲突，
->     而收益只是"把护栏从部署挪到配置里"。
->     最终选择"用网络位置保护它"：后端端口只绑 127.0.0.1（见下面的改动）
->     + Nginx 只反代 /api/ + 云安全组不开 8082，三道一起用。
->   · 顺带把 prod 的前后端端口都改成 `"127.0.0.1:xxxx:xxxx"`。
->     原来写 `"8082:8082"` 会绑到 0.0.0.0，等于绕过 Nginx 直接对公网开了一个口，
->     限流/访问日志/HTTPS 全都失效 —— 这一条本身就是个真实的安全问题。
->   · "缓存命中率"这个指标**没做**：缓存（M2）还没落地，
->     现在埋一条永远为 0 的指标比不埋更糟。等 M2 做完再补。
+> 它确实给 5.1 指了路：`http_server_requests` 指标存在 → observation 是创建的
+> → 问题不在"没创建 observation"，而在于把"没读到"当成了"没生成"。
 >
 > **5.3 已完成**（上一个提交）：`V2__add_article_sort_index.sql` + 慢查询日志。
 > 实测（20 万行，见 `docs/perf/explain-article-list.sql`）：
@@ -1169,48 +1174,12 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 >     进去的文件必然是 777 —— 于是 `.cnf` 挂载方式在本机静默失效，
 >     在 Linux 服务器上却是好的。改成 `command` 命令行参数后两边一致
 >
-> **5.1 卡在哪（记录清楚，避免下次从零重来）**
->   已经做到的：
->     · 依赖补齐了两个 —— `spring-boot-micrometer-tracing-brave`（Boot 的自动配置模块）
->       与 `micrometer-tracing-bridge-brave`（真正的 Brave 实现）。
->       ⚠️ 只加前者的话：编译通过、启动正常、`Tracer` Bean 也能注入，
->       但 traceId 永远是空的 —— **又是一个 Boot 4 拆模块导致的静默失效**，
->       和 Flyway 那次（spring-boot-flyway + flyway-core + flyway-mysql 三个都要）是同一个模式
->     · `logback-spring.xml` 本身是好的：日志文件、按天按大小滚动、保留 15 天、
->       格式里带 `[%X{traceId:-}]` 槽位 —— 实测文件真的写出来了，只是槽位永远是空的
->   没做到的：
->     · 日志里没有 traceId、响应头里没有 `X-B3-TraceId`（在**真实启动的服务上**用 curl 验证过，
->       不只是 MockMvc，所以不是测试环境的限制）
->   已排除：
->     · 配置项名字是对的 —— 读 `spring-boot-micrometer-tracing` 的
->       `spring-configuration-metadata.json` 确认过，属性是
->       `management.tracing.sampling.probability` 与 `management.tracing.propagation.type`；
->       另外发现 `management.tracing.propagation.produce` 的**默认值只产出 W3C**
->       （也就是 `traceparent`，不含 `X-B3-TraceId`）——
->       想拿 B3 响应头必须显式把 produce 也设成含 B3
->     · 但既然**日志里连 traceId 都没有**，说明问题不在"传播格式"上，
->       改 produce 的配置解决不了
->     · ⚠️ 而且 5.7 之后，"HTTP 请求没有创建 observation" 这个猜测也**被推翻了**：
->       `http_server_requests` 指标和 traceId 走的是同一条 Observation 管道，
->       而那条指标实测是有的（MetricsEndpointTest 里有断言）。
->       → 所以真正没做成的只有最后一环：
->       **TracingObservationHandler 没挂到 ObservationRegistry 上**
->   下一步建议（比上次更具体）：
->     写一个临时用例，把 `ObservationRegistry` 里的 handler 列表打出来
->     （`observationRegistry.observationConfig().getObservationHandlers()`），
->     看 `TracingObservationHandler` 到底在不在：
->       · 不在 → 问题在自动配置（去查 `MicrometerTracingAutoConfiguration`
->         的生效条件，仍然是 Boot 4 拆模块那一类问题）
->       · 在   → 问题在"我们打日志时用的那个作用域"，而不是 handler 本身
->     这样一刀就能把范围砍成两半，比继续试配置快得多
->   改动暂存在 `git stash`（`stash@{0}`）
->
 > **5.9 已完成**（提交 `002efad`）：四个安全响应头 + Dependabot。
 > 实测：200 与 401 两条路径都带上了三个头，HSTS 在明文请求上正确地不出现。
 
 | # | 提交标题 | 内容 | 测试要求 |
 |---|---|---|---|
-| **5.1** | `新增Micrometer Tracing链路追踪与logback结构化日志` | `micrometer-tracing-bridge-brave`（**自动生成/透传 traceId，不自研 Filter**）+ `logback-spring.xml`（按天滚动 + 保留 15 天）、pattern 加 `[%X{traceId}]`；用 B3 传播以便响应头直接带 `X-B3-TraceId` | 一次请求的日志行共享同一 traceId；⚠️ **异步线程（4.2 的审计监听器）默认拿不到 traceId**，需要给线程池加 `ContextPropagatingTaskDecorator` —— 这一步必须验证到位 |
+| **5.1** | ✅ `新增Micrometer Tracing链路追踪与logback结构化日志` | `spring-boot-micrometer-tracing-brave` + `micrometer-tracing-bridge-brave`（两个都要，Boot 4 拆模块）+ `logback-spring.xml`（按天滚动 + 保留 15 天 + `[%X{traceId}]`）+ `TraceResponseHeaderFilter` 写 `X-Trace-Id` | 一次请求的日志行带同一 traceId 且与响应头一致；两次请求不同 —— **已完成，见上方进度块** |
 | **5.2** | `新增登出接口的Token失效机制` | Redis 黑名单（按 `jti`）或版本号（按用户），二选一；前端登出后旧 token 立即不可用 | 登出后旧 token 调 `/auth/me` → **401**；未登出的 token 不受影响 |
 | **5.3** | ✅ `新增数据库索引优化与慢查询治理`（提交 `V2` + 慢查询日志） | 慢查询日志、`EXPLAIN` 验证 `(status, is_top, create_time)` 复合索引、把前后对比贴进 README | 用例不受影响；README 有 EXPLAIN 对比 —— **已完成，见上方进度块** |
 | **5.4** | `新增基于唯一索引与Redisson锁的接口幂等` | 数据库唯一索引兜底（**主力**）+ Redisson `RLock` 辅助（**不自研 `@Idempotent` 切面**） | 连续两次发布只产生一篇文章；唯一索引冲突时返回友好提示而不是 500 |

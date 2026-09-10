@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-146%20passing-success)
+![Tests](https://img.shields.io/badge/tests-151%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **146 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **151 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -37,6 +37,7 @@
 | 参数校验 | Spring Validation（`spring-boot-starter-validation`） |
 | 接口文档 | springdoc-openapi 3.0.0（OpenAPI / Swagger UI） |
 | 运维监控 | Spring Boot Actuator + Micrometer（Prometheus registry），见「可观测」 |
+| 链路追踪 | Micrometer Tracing + Brave（traceId 进日志 + 响应头 `X-Trace-Id`），见「可观测」 |
 | 对象存储 | 阿里云 OSS SDK 3.18.1（生产用；本地默认存磁盘） |
 | 工具库 | Lombok |
 | 测试 | JUnit 5 + MockMvc（`spring-boot-starter-webmvc-test`）+ **Testcontainers 2.0.5** |
@@ -76,7 +77,7 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
-- 集成测试 18 个类 **146 个用例**，行覆盖率 **86%**
+- 集成测试 19 个类 **151 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
 
@@ -109,6 +110,7 @@ com.yigalaxy.yiguixingtu
 │   ├── SecurityConfig              # Spring Security 过滤链 + JWT + CORS + 401/403 JSON + 安全响应头
 │   ├── WebMvcConfig                # /uploads/** 映射到本地存储目录
 │   ├── SchedulingConfig            # @EnableScheduling（浏览量定时落库要用）
+│   ├── TraceResponseHeaderFilter   # 把当前请求的 traceId 写进响应头 X-Trace-Id
 │   └── AdminBootstrapRunner        # 空库启动时引导创建第一个管理员
 ├── auth
 │   ├── controller/AuthController   # 登录 / 注册 / 登出 / 当前用户
@@ -152,6 +154,7 @@ com.yigalaxy.yiguixingtu
 
 src/main/resources
 ├── application.properties
+├── logback-spring.xml            # 日志：按天滚动 + 保留 15 天 + traceId 槽位
 └── db/migration
     ├── V1__init.sql                # Flyway 迁移脚本：user / category / article 建表
     └── V2__add_article_sort_index.sql  # 列表排序用的复合索引（附实测依据）
@@ -171,6 +174,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── LogoutTokenTest                 # 登出后旧 token 立即失效（jti 黑名单）
 ├── SecurityHeadersTest             # 四个安全响应头
 ├── MetricsEndpointTest             # 指标端点与自定义业务指标
+├── TracingTest                     # 链路追踪：traceId 进日志 + 进响应头
 ├── PaginationLimitTest             # 分页全局上限（从 Mapper 层验证插件兜底）
 ├── ProfileDevConfigTest            # dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单
 ├── ProfileProdConfigTest           # prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量
@@ -469,6 +473,30 @@ if (apiDocsEnabled) {
 于是 prod 下这些路径不再被放行，未登录访问 `/v3/api-docs` 得到 **401**。
 两条路径都有用例盯着（`ProfileDevConfigTest` 断言 dev 下可访问、
 `ProfileProdConfigTest` 断言 prod 下不可访问）。
+
+#### 链路追踪（traceId）
+
+```properties
+management.tracing.sampling.probability=1.0
+management.tracing.propagation.type=b3
+```
+
+一个 traceId 对应**一次请求**，这次请求产生的所有日志行都会带上它。
+线上排查"用户说报错了但我对不上是哪次请求"就靠它：前端把响应头里的
+`X-Trace-Id` 显示给用户，用户报给你，你在日志里搜这个号，这次请求的全貌就出来了。
+
+依赖是 `spring-boot-micrometer-tracing-brave` + `micrometer-tracing-bridge-brave`
+**两个都要** —— 这是 Boot 4 拆模块的老坑：只加前者，编译通过、启动正常、
+`Tracer` Bean 也能注入，但 traceId 永远不出现，一点报错都没有。
+
+> 📌 **一个"以为做好了、其实没有"的插曲**：一开始以为设 `propagation.type=b3`
+> 之后响应头会自动带 `X-B3-TraceId`，实测没有。原因是 Boot 4 把 tracing 的
+> `receiver / sender / default` 三个 observation handler 包进了
+> `FirstMatchingCompositeObservationHandler`，入站请求永远先被 receiver 匹配，
+> 负责写响应头的 sender 轮不到执行。所以给前端的 traceId 是用一个
+> 十几行的 `TraceResponseHeaderFilter` 写的自定义头 `X-Trace-Id`
+> （这在 servlet 过滤器里读 `tracer.currentSpan()` 是几十年来最标准的做法，
+> 见该类的注释）。`propagation.type` 真正管的是"收到上游 B3 头时继续那条 trace"。
 
 #### 文件上传与对象存储
 
@@ -1276,7 +1304,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 146 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 151 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1288,10 +1316,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 146 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 151 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**18 个测试类，146 个用例，全部通过：**
+**19 个测试类，151 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -1308,12 +1336,13 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |
 | `SecurityHeadersTest` | 7 | 四个安全响应头，含 401 与上传响应两条易漏路径 |
 | `MetricsEndpointTest` | 8 | 指标端点：Prometheus 格式与内容、未开放的端点确实不可达、登录/登出/浏览量落库指标真的会涨 |
+| `TracingTest` | 5 | 链路追踪：Tracer 可用、日志 traceId 与响应头 `X-Trace-Id` 一致、两次请求不重复、响应头存在 |
 | `PaginationLimitTest` | 2 | 分页全局上限（从 Mapper 层验证插件兜底，接口层测不到） |
 | `ProfileDevConfigTest` | 6 | dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单 |
 | `ProfileProdConfigTest` | 3 | prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量 |
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **146** | |
+| **合计** | **151** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

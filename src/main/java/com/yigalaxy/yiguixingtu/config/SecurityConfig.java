@@ -337,6 +337,12 @@ public class SecurityConfig {
         config.setAllowedHeaders(List.of("*"));
         // 允许携带凭证（这里用 token，其实可关；先开着省心）
         config.setAllowCredentials(true);
+        // 【浏览器能不能读到这个响应头，取决于这里】
+        // 跨域请求里，响应头默认只有少数几个（Content-Type 等）对前端可见；
+        // X-Trace-Id 是自定义头，不加这一行的话，前端 fetch 里
+        // response.headers.get('X-Trace-Id') 会返回 null ——
+        // 头其实发出了，只是浏览器拦着不让读。这是 CORS 最容易踩的点之一。
+        config.addExposedHeader("X-Trace-Id");
         // 缓存预检结果 1 小时，减少 OPTIONS 预检请求
         config.setMaxAge(3600L);
 

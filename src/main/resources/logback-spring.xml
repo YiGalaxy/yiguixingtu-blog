@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+=====================================================================
+ logback-spring.xml —— 日志配置
+=====================================================================
+
+【为什么需要这个文件】
+  在此之前项目【没有任何日志配置】：
+    · 日志只往控制台打，容器一重启就全没了 —— 线上出事想回头看都没得看
+    · 没有滚动策略，真要写文件的话会一直涨到把磁盘写满
+    · 日志行里没有 traceId，一次请求的多行日志无法串起来
+  这三点在本地都无所谓，一到线上就都变成"排查不了"。
+
+【文件名为什么是 logback-spring.xml 而不是 logback.xml】
+  带 -spring 后缀的文件会被 Spring Boot 接管，因此可以用
+  <springProfile> 这样的标签、也能读 spring 的属性。
+  用不带后缀的 logback.xml 的话，这两样都用不了。
+
+【用到的东西】
+  · ConsoleAppender —— 输出到标准输出。容器化部署下这是【主要】的输出方式：
+    docker logs 直接就能看到，配合日志采集（如阿里云 SLS）也不用额外挂卷。
+  · RollingFileAppender + SizeAndTimeBasedRollingPolicy —— 滚动日志：
+    既按时间（每天一个文件）又按大小（单文件超 50MB 就换一个）切分。
+    只按时间切的话，某天日志量暴涨会得到一个巨大文件；
+    只按大小切的话，又不好按日期找。
+  · maxHistory=15 —— 只保留最近 15 天，老的自动删掉。
+  · gz 后缀 —— 历史日志自动压缩，能省下大约 90% 的空间。
+  · %X{traceId:-} —— 从 MDC 里取 traceId。`:-` 表示"取不到就留空"，
+    这样没有 traceId 的场景（比如启动阶段的日志）不会打出 "traceId=" 这种噪音。
+
+【一个必须说清楚的局限】
+  MyBatis 的 SQL 日志走的是 StdOutImpl（直接 System.out.println），
+  【不经过 logback】，所以那些 SQL 行里【没有 traceId】。
+  本地开发时这样最直观（SQL 就在眼前）；线上本来也不开 SQL 日志。
+  如果将来需要"SQL 也带 traceId"，就把它改成用 logback 输出
+  （把 log-impl 换成 Slf4jImpl，并调整对应 logger 的级别）。
+=====================================================================
+-->
+<configuration>
+
+    <!-- 日志目录。可用环境变量 LOG_DIR 覆盖（容器里挂卷时用得上） -->
+    <property name="LOG_DIR" value="${LOG_DIR:-logs}"/>
+
+    <!--
+      日志格式。
+      [%X{traceId:-}] 放在靠前的位置：排查时往往先按 traceId 过滤，
+      所以让它一眼可见，不用在一长串里找。
+      %-5level 是左对齐 5 位，让 INFO/WARN/ERROR 竖直对齐，扫起来更快。
+    -->
+    <property name="LOG_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] [%thread] %logger{40} - %msg%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/yiguixingtu.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <!-- %d 按天、%i 是当天内的序号（超过 maxFileSize 就递增） -->
+            <fileNamePattern>${LOG_DIR}/yiguixingtu.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <!-- 保留 15 天：够回溯一次"上周出的问题"，又不至于把磁盘占满 -->
+            <maxHistory>15</maxHistory>
+            <!-- 再加一道总量上限，防止 15 天内日志量异常暴涨把盘写满 -->
+            <totalSizeCap>2GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!--
+      【为什么 SQL 日志要单独降噪】
+      dev 环境 MyBatis 用 StdOutImpl，它自己往控制台打，不受这里影响。
+      但 HikariCP、Spring Security 这些框架的 DEBUG 日志非常吵，
+      默认压到 INFO 能让"自己的业务日志"更容易被看到。
+    -->
+    <logger name="com.zaxxer.hikari" level="INFO"/>
+    <logger name="org.springframework.security" level="INFO"/>
+
+    <!-- 本项目自己的日志：dev 下可以调到 DEBUG 看细节 -->
+    <springProfile name="dev">
+        <logger name="com.yigalaxy.yiguixingtu" level="DEBUG"/>
+    </springProfile>
+    <springProfile name="prod">
+        <!-- 线上不写控制台以外的多余东西，级别保持 INFO -->
+        <logger name="com.yigalaxy.yiguixingtu" level="INFO"/>
+    </springProfile>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+
+</configuration>

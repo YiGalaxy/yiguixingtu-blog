@@ -225,6 +225,46 @@
             <version>3.18.1</version>
         </dependency>
 
+        <!-- ==================== 链路追踪（Micrometer Tracing + Brave） ==================== -->
+        <!--
+          【用途】给每个请求生成一个 traceId，并打进日志。
+          出问题时，把前端报错里带的 traceId 拿到日志里一搜，
+          这次请求经过的所有日志行就都在眼前了 —— 这也是前端 w5.3 要做的事。
+
+          【⚠️ 为什么是 spring-boot-micrometer-tracing-brave 而不是 micrometer-tracing-bridge-brave】
+          和 Flyway 那次一模一样的坑：Spring Boot 4 把自动配置按技术拆成了独立模块，
+          只加裸的 bridge 依赖的话，编译能过、启动也不报错，
+          但 traceId 就是【不会出现】——又是一个静默失效。
+          spring-boot-micrometer-tracing-brave 里同时带了自动配置与 Brave 实现，
+          是这个版本下的正确入口。
+
+          【为什么选 Brave 而不是 OpenTelemetry】
+          本项目只是把 traceId 打进日志、方便串联排查，不需要把数据导出到
+          Jaeger / Zipkin 那类后端。Brave 依赖更轻、够用；
+          真接了链路追踪服务再换 opentelemetry 那一支即可（BOM 里有对应模块）。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-micrometer-tracing-brave</artifactId>
+        </dependency>
+        <!--
+          【⚠️ 这个依赖是必须的，而且少它不会报错，只会静默失效 —— 实测踩过】
+          上面那个 spring-boot-micrometer-tracing-brave 只提供
+          【Spring Boot 的自动配置】+ micrometer-tracing 的【API】，
+          而真正干活的【实现】（Brave 的 tracer、span、MDC 装饰器）在下面这个 bridge 里。
+          只加上面那一个的后果（实测）：
+            · 编译通过、启动正常、Tracer Bean 也能注入
+            · 但请求不会创建 span，日志里的 traceId 永远是空的
+            · 响应头里也不会有 X-B3-TraceId
+          和 Flyway 那次是同一种坑（spring-boot-flyway + flyway-core + flyway-mysql 三个都要）。
+          结论：Boot 4 里凡是被拆成独立模块的技术，
+          "Spring Boot 自动配置模块" 与 "厂商实现模块" 往往要【同时】加。
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-brave</artifactId>
+        </dependency>
+
 
     </dependencies>
 

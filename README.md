@@ -290,6 +290,12 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── ArticleViewCountTest            # 浏览量：Redis 计数 + 定时批量落库
 ├── ArticleIdempotencyTest          # 接口幂等（Idempotency-Key）
 ├── ArticleIndexTest                # 索引契约：迁移已执行 + 列顺序 + 对真实查询可用（含分页 COUNT 的覆盖索引）
+├── ArticleArchiveTest              # 归档接口：只含已发布 + 按年月分组 + 月份与月内都倒序 + 走缓存
+├── ArticleRssTest                  # RSS 数据：带正文 + 上限 20 篇（挤掉最早那篇）+ 走缓存
+├── TagTest                         # 标签：前台标签云（带已发布文章数）+ 后台增删改 + 物理删除
+├── ArticleTagTest                  # 打标签与按标签筛选：覆盖式语义 + 校验先于写入 + 草稿不泄漏
+├── CommentTest                     # 评论：游客可发但默认待审核 + XSS 转义 + 公开响应不含邮箱/IP + 限流
+├── CategoryAdminTest               # 分类增删改：有文章时拒绝删除 + 删掉后同名可重建 + 改名前台立刻生效
 ├── UploadAdminTest                 # 封面上传（类型/大小校验、权限）
 ├── LogoutTokenTest                 # 登出后旧 token 立即失效（jti 黑名单）
 ├── SecurityHeadersTest             # 四个安全响应头

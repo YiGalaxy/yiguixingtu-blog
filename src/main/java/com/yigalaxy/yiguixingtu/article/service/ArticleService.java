@@ -4,8 +4,11 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleArchiveVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleRssVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
+
+import java.util.List;
 
 /**
  * 文章服务。
@@ -42,6 +45,17 @@ public interface ArticleService {
      * 归档页是给访客看的导航，草稿出现在里面等于把没写完的东西公示了。
      */
     ArticleArchiveVO archive();
+
+    /**
+     * 【前台】RSS 订阅源的数据：最近 N 篇已发布文章（含正文）。
+     *
+     * 【为什么单独一个方法而不是复用 pagePublished】
+     *   分页列表的 VO 刻意不带正文（longtext，一页 10 篇纯属浪费），
+     *   而 RSS 读者要的正是正文；两者的"要哪些字段"完全不同，
+     *   硬共用一个方法只会让两边都别扭（要么列表带上不需要的大字段，
+     *   要么 RSS 少字段）。数量也不同：RSS 固定取最近若干篇，不吃分页参数。
+     */
+    List<ArticleRssVO> rssItems();
 
     /** 【后台】详情，草稿也能看 */
     ArticleVO getDetail(Long id);

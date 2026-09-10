@@ -111,6 +111,15 @@ public class RedisConfig {
     public static final String CACHE_ARTICLE_ARCHIVE = "article:archive";
 
     /**
+     * RSS 订阅源数据的缓存名（最近 20 篇的正文）。
+     *
+     * 【为什么也要缓存】RSS 阅读器按固定间隔来拉，而它一次要 20 篇 longtext 正文；
+     * 不缓存就是每半小时把 20 个大字段从库里读一遍。同样共用文章版本号 ——
+     * 发文/改文/下架都会推进它，所以缓存不会给出旧内容。
+     */
+    public static final String CACHE_ARTICLE_RSS = "article:rss";
+
+    /**
      * 统计结果的缓存时长：60 秒。
      * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
      * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
@@ -262,6 +271,7 @@ public class RedisConfig {
                 .withCacheConfiguration(CACHE_TAG_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_CATEGORY_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_ARCHIVE, baseConfig)
+                .withCacheConfiguration(CACHE_ARTICLE_RSS, baseConfig)
                 .build();
     }
 

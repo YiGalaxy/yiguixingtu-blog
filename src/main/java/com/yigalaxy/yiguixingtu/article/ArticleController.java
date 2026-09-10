@@ -3,6 +3,7 @@ package com.yigalaxy.yiguixingtu.article;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleArchiveVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleRssVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
 import com.yigalaxy.yiguixingtu.article.service.ArticleService;
@@ -15,6 +16,8 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * 文章接口（前台公开，无需登录）。
@@ -76,6 +79,21 @@ public class ArticleController {
     @GetMapping("/archive")
     public Result<ArticleArchiveVO> archive() {
         return Result.success(articleService.archive());
+    }
+
+    /**
+     * RSS 订阅源的数据（最近 20 篇已发布文章的正文）。
+     *
+     * 【为什么后端只给数据、不直接输出 XML】
+     *   XML/RSS 的格式细节属于"怎么呈现"，而站点域名、feed 标题这些只有前端知道
+     *   （前端的 sitemap.xml / robots.txt 已经是同一个做法：Node 运行时路由按数据现算）。
+     *   两边分工是：**后端给数据，前端拼格式** ——
+     *   这样 RSS 的字段和站点信息不会被复制到两个仓库里各维护一份。
+     */
+    @Operation(summary = "RSS 数据（最近 20 篇，含正文）")
+    @GetMapping("/rss")
+    public Result<List<ArticleRssVO>> rss() {
+        return Result.success(articleService.rssItems());
     }
 
     @Operation(summary = "文章详情")

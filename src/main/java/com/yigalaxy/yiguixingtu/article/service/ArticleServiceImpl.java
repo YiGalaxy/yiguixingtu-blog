@@ -12,6 +12,7 @@ import com.yigalaxy.yiguixingtu.article.cache.PublishedArticleCache;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleArchiveVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleRssVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
 import com.yigalaxy.yiguixingtu.article.cache.ArticleViewCounter;
@@ -29,6 +30,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -83,6 +85,13 @@ public class ArticleServiceImpl implements ArticleService {
      * 500 篇对个人博客等于全部，真到不够用的时候应当改成分年加载，而不是把这个数字调大。
      */
     private static final int ARCHIVE_MAX_ARTICLES = 500;
+
+    /**
+     * RSS 一次给多少篇。
+     * 【为什么是 20】RSS 的通行惯例；正文是 longtext，给太多会让响应体和缓存条目
+     * 膨胀到几 MB，而阅读器也不会翻到那么靠后。
+     */
+    private static final int RSS_MAX_ITEMS = 20;
 
     private final ArticleMapper articleMapper;
     private final CategoryMapper categoryMapper;
@@ -408,6 +417,43 @@ public class ArticleServiceImpl implements ArticleService {
         }
 
         return result;
+    }
+
+    /**
+     * RSS 订阅源的数据：最近若干篇已发布文章（含正文）。
+     *
+     * 【为什么固定取 20 篇】这是 RSS 的通行惯例（阅读器一次也消化不了更多），
+     *   而且正文是 longtext —— 取 100 篇的话响应体和缓存条目会到几 MB 量级，
+     *   而读者根本翻不到那么后面。
+     *
+     * 【为什么带缓存】RSS 阅读器会按固定间隔（常见 30 分钟～1 小时）来拉，
+     *   而它取的是"最近 20 篇的正文"—— 不缓存的话每次都要把 20 个 longtext 从库里读出来。
+     *   key 仍是文章缓存版本号：发文/改文/下架都会推进它，所以内容不会旧。
+     */
+    @Override
+    @Cacheable(cacheNames = RedisConfig.CACHE_ARTICLE_RSS,
+            key = "@articleCacheVersion.current()")
+    public List<ArticleRssVO> rssItems() {
+        // 只查需要的列：列表页要用的 cover/view_count/is_top 等在这里都没用
+        List<Article> articles = articleMapper.selectList(new LambdaQueryWrapper<Article>()
+                .select(Article::getId, Article::getTitle, Article::getSummary,
+                        Article::getContent, Article::getCreateTime)
+                .eq(Article::getStatus, 1)
+                .orderByDesc(Article::getCreateTime)
+                .orderByDesc(Article::getId)
+                .last("LIMIT " + RSS_MAX_ITEMS));
+
+        List<ArticleRssVO> items = new ArrayList<>(articles.size());
+        for (Article article : articles) {
+            ArticleRssVO vo = new ArticleRssVO();
+            vo.setId(article.getId());
+            vo.setTitle(article.getTitle());
+            vo.setSummary(article.getSummary());
+            vo.setContent(article.getContent());
+            vo.setCreateTime(article.getCreateTime());
+            items.add(vo);
+        }
+        return items;
     }
 
     // =================================================================

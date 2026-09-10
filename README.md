@@ -77,6 +77,10 @@
   归档页只用来"找到那篇文章"，多传摘要和封面纯属浪费
   （几百篇的话差别就是几十 KB）。分组在后端做：前端拿到的列表是分页的，
   自己分组会得到"每月只有前几条"的错误结果。带 500 篇上限兜底，同样走缓存
+- **RSS 数据**：`GET /article/rss` 给最近 **20 篇已发布文章的正文**（一条查询取回，
+  而不是让前端拿 id 逐篇去查——那样是 20 次请求）。**XML 由前端拼**（站点域名、
+  feed 标题只有前端知道，和 sitemap.xml 同一个做法）；正文给的是 Markdown 源码，
+  转 HTML 交给前端的渲染器，避免"同一份 Markdown 两套渲染规则"
 
 **分类**
 - 分类列表（游客可访问，走 Redis 缓存 —— 首页 SSR 每次都要用它，而它只在分类被改时才变）
@@ -151,7 +155,7 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   图片存服务器本地磁盘，并用**具名卷**持久化
-- 集成测试 **30 个类 276 个用例**，行覆盖率 **90.4%**
+- 集成测试 **31 个类 283 个用例**，行覆盖率 **90.5%**
 
 ### 🚧 规划中
 
@@ -831,7 +835,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 ## 接口列表
 
-共 **35 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
+共 **36 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
 具体到角色见下方「接口 × 角色权限矩阵」。
 
 | # | 方法 | 路径 | 说明 | 是否需要登录 |
@@ -844,35 +848,36 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 6 | GET | `/article/{id}` | 前台文章详情（仅已发布，返回里带 `tags`） | 否 |
 | 7 | GET | `/article/stats` | 站点统计：文章数 / 总浏览量 / 分类数（首页那三个数字，**只算已发布**） | 否 |
 | 8 | GET | `/article/archive` | 归档：已发布文章**按年月分组**（最新的月份在前），走 Redis 缓存 | 否 |
-| 9 | GET | `/category/list` | 分类列表 | 否 |
-| 10 | GET | `/tag/list` | 标签列表（标签云，**每个标签带已发布文章数**，走 Redis 缓存） | 否 |
-| 11 | GET | `/comment/list` | 某篇文章的评论（**只返回已通过的**，必须带 `articleId`） | 否 |
-| 12 | POST | `/comment` | 发表评论（**游客可用，默认待审核**；有限流：20 次/分钟） | 否 |
-| 13 | GET | `/user/page` | 用户分页查询 | 是（ADMIN） |
-| 14 | PUT | `/user/{id}/status` | 启用 / 禁用用户 | 是（ADMIN） |
-| 15 | PUT | `/user/{id}/role` | 修改用户角色 | 是（ADMIN） |
-| 16 | PUT | `/user/{id}/password` | 重置用户密码 | 是（ADMIN） |
-| 17 | DELETE | `/user/{id}` | 删除用户（逻辑删除） | 是（ADMIN） |
-| 18 | GET | `/admin/article/page` | 后台文章分页（含草稿，多条件筛选） | 是（ADMIN） |
-| 19 | GET | `/admin/article/{id}` | 后台文章详情（含正文） | 是（ADMIN） |
-| 20 | POST | `/admin/article` | 新增文章（可带 `tagIds` 打标签；**可选 `Idempotency-Key` 请求头防重复提交**） | 是（ADMIN） |
-| 21 | PUT | `/admin/article/{id}` | 编辑文章（`tagIds` 是**覆盖式**语义） | 是（ADMIN） |
-| 22 | PUT | `/admin/article/{id}/status` | 发布 / 下架文章 | 是（ADMIN） |
-| 23 | DELETE | `/admin/article/{id}` | 删除文章（逻辑删除） | 是（ADMIN） |
-| 24 | GET | `/admin/tag/list` | 标签列表（后台，**不走缓存**：刚建完就要看得见） | 是（ADMIN） |
-| 25 | POST | `/admin/tag` | 新建标签 | 是（ADMIN） |
-| 26 | PUT | `/admin/tag/{id}` | 编辑标签（改名 / 改排序） | 是（ADMIN） |
-| 27 | DELETE | `/admin/tag/{id}` | 删除标签（**物理删除**，同时解除文章关联） | 是（ADMIN） |
-| 28 | GET | `/admin/comment/page` | 评论分页（含待审核，**带邮箱与 IP**） | 是（ADMIN） |
-| 29 | PUT | `/admin/comment/{id}/status` | 审核评论（1 通过 / 2 拒绝） | 是（ADMIN） |
-| 30 | DELETE | `/admin/comment/{id}` | 删除评论（逻辑删除） | 是（ADMIN） |
-| 31 | GET | `/admin/category/list` | 分类列表（后台） | 是（ADMIN） |
-| 32 | POST | `/admin/category` | 新建分类 | 是（ADMIN） |
-| 33 | PUT | `/admin/category/{id}` | 编辑分类（改名 / 描述 / 排序） | 是（ADMIN） |
-| 34 | DELETE | `/admin/category/{id}` | 删除分类（**分类下有文章时会被拒绝**） | 是（ADMIN） |
-| 35 | POST | `/upload` | 上传图片（封面图），返回可访问 URL | 是（ADMIN） |
+| 9 | GET | `/article/rss` | RSS 数据：最近 20 篇已发布文章的正文（前端用它拼 `feed.xml`），走 Redis 缓存 | 否 |
+| 10 | GET | `/category/list` | 分类列表 | 否 |
+| 11 | GET | `/tag/list` | 标签列表（标签云，**每个标签带已发布文章数**，走 Redis 缓存） | 否 |
+| 12 | GET | `/comment/list` | 某篇文章的评论（**只返回已通过的**，必须带 `articleId`） | 否 |
+| 13 | POST | `/comment` | 发表评论（**游客可用，默认待审核**；有限流：20 次/分钟） | 否 |
+| 14 | GET | `/user/page` | 用户分页查询 | 是（ADMIN） |
+| 15 | PUT | `/user/{id}/status` | 启用 / 禁用用户 | 是（ADMIN） |
+| 16 | PUT | `/user/{id}/role` | 修改用户角色 | 是（ADMIN） |
+| 17 | PUT | `/user/{id}/password` | 重置用户密码 | 是（ADMIN） |
+| 18 | DELETE | `/user/{id}` | 删除用户（逻辑删除） | 是（ADMIN） |
+| 19 | GET | `/admin/article/page` | 后台文章分页（含草稿，多条件筛选） | 是（ADMIN） |
+| 20 | GET | `/admin/article/{id}` | 后台文章详情（含正文） | 是（ADMIN） |
+| 21 | POST | `/admin/article` | 新增文章（可带 `tagIds` 打标签；**可选 `Idempotency-Key` 请求头防重复提交**） | 是（ADMIN） |
+| 22 | PUT | `/admin/article/{id}` | 编辑文章（`tagIds` 是**覆盖式**语义） | 是（ADMIN） |
+| 23 | PUT | `/admin/article/{id}/status` | 发布 / 下架文章 | 是（ADMIN） |
+| 24 | DELETE | `/admin/article/{id}` | 删除文章（逻辑删除） | 是（ADMIN） |
+| 25 | GET | `/admin/tag/list` | 标签列表（后台，**不走缓存**：刚建完就要看得见） | 是（ADMIN） |
+| 26 | POST | `/admin/tag` | 新建标签 | 是（ADMIN） |
+| 27 | PUT | `/admin/tag/{id}` | 编辑标签（改名 / 改排序） | 是（ADMIN） |
+| 28 | DELETE | `/admin/tag/{id}` | 删除标签（**物理删除**，同时解除文章关联） | 是（ADMIN） |
+| 29 | GET | `/admin/comment/page` | 评论分页（含待审核，**带邮箱与 IP**） | 是（ADMIN） |
+| 30 | PUT | `/admin/comment/{id}/status` | 审核评论（1 通过 / 2 拒绝） | 是（ADMIN） |
+| 31 | DELETE | `/admin/comment/{id}` | 删除评论（逻辑删除） | 是（ADMIN） |
+| 32 | GET | `/admin/category/list` | 分类列表（后台） | 是（ADMIN） |
+| 33 | POST | `/admin/category` | 新建分类 | 是（ADMIN） |
+| 34 | PUT | `/admin/category/{id}` | 编辑分类（改名 / 描述 / 排序） | 是（ADMIN） |
+| 35 | DELETE | `/admin/category/{id}` | 删除分类（**分类下有文章时会被拒绝**） | 是（ADMIN） |
+| 36 | POST | `/upload` | 上传图片（封面图），返回可访问 URL | 是（ADMIN） |
 
-**共 35 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
+**共 36 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
 用本地磁盘存储时，上传的图片通过 `GET /uploads/**` 公开读取（无需登录）。
 
 ## 接口 × 角色权限矩阵
@@ -889,6 +894,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `GET /category/list` | ✅ | ✅ | ✅ |
 | `GET /tag/list` | ✅ | ✅ | ✅ |
 | `GET /article/archive` | ✅ | ✅ | ✅ |
+| `GET /article/rss` | ✅ | ✅ | ✅ |
 | `GET /comment/list`（已通过） | ✅ | ✅ | ✅ |
 | `POST /comment`（**游客可发**，默认待审核） | ✅ | ✅ | ✅ |
 | `POST /auth/logout` | ✅ | ✅ | ✅ |
@@ -2107,10 +2113,10 @@ mvn test
 
 | 维度 | 覆盖率 |
 |------|:---:|
-| 行覆盖 | **90.4%**（1,473 / 1,630） |
-| 方法覆盖 | **97.1%**（298 / 307） |
-| 指令覆盖 | **90.5%**（6,459 / 7,137） |
-| 分支覆盖 | 68.8%（372 / 541） |
+| 行覆盖 | **90.5%**（1,492 / 1,649） |
+| 方法覆盖 | **97.1%**（300 / 309） |
+| 指令覆盖 | **90.6%**（6,562 / 7,240） |
+| 分支覆盖 | 68.9%（374 / 543） |
 
 > 分支覆盖率明显低于行覆盖率，是因为大量的**参数校验分支、异常兜底分支、
 > 空值判断分支**不会被每个用例都走到——这是正常的，不必为了刷数字硬凑用例。
@@ -2124,7 +2130,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 276 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 283 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -2136,10 +2142,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 276 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 283 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**30 个测试类，276 个用例，全部通过：**
+**31 个测试类，283 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -2153,6 +2159,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleCacheTest` | 13 | 列表缓存：第二次走缓存、四个写操作都让缓存失效、TTL 区间、空结果也缓存（防穿透）、key 归一化 |
 | `ArticleStatsTest` | 8 | 站点统计：只算已发布、逻辑删除不计入、空库不报错、走缓存、写操作让缓存失效 |
 | `ArticleArchiveTest` | 7 | 归档：只含已发布（草稿不出现）、按年月分组、月份与月内都倒序、空数据返回空分组、匿名可访问、走缓存且写操作后失效、key 带版本号且有 TTL |
+| `ArticleRssTest` | 7 | RSS 数据：按时间倒序、只含已发布、**带正文**（与列表接口最本质的区别）、上限 20 篇且挤掉的是最早那篇、匿名可访问、走缓存、key 带版本号且有 TTL |
 | `ArticleViewCountTest` | 10 | 浏览量：Redis 计数、累加不丢、定时批量落库、落库后增量清零 |
 | `ArticleDetailCacheTest` | 11 | 详情缓存：走缓存、**浏览量不被冻住**、写操作后立刻更新、下架即 404、自愈重建、**12 线程并发只查库 1 次（防击穿）**、TTL 有效 |
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
@@ -2172,7 +2179,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `CategoryAdminTest` | 11 | 分类：新建/编辑/改名后前台立刻生效、重名与空格、**分类下有文章时拒绝删除**、**删掉后同名分类能重建**（名字被释放）、**文章逻辑删除后分类就能删**（守"手写 COUNT 要自己加 deleted=0"）、权限、前台仍公开 |
 | `OperationLogTest` | 14 | 操作审计：管理动作都留痕（含标签、评论、分类的增删改）、发表评论**不**记、回滚与失败不记账、审计行不含明文密码 |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **276** | |
+| **合计** | **283** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

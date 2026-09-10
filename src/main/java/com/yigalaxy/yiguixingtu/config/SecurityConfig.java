@@ -202,6 +202,7 @@ public class SecurityConfig {
                             "/article/page",     // 首页信息流
                             "/article/stats",    // 首页那三个统计数字（文章数 / 浏览量 / 分类数）
                             "/article/archive",  // 归档页（按年月分组的已发布文章）
+                            "/article/rss",      // RSS 数据（前端用它拼 feed.xml）
                             "/article/*",        // 文章详情 /article/123
                             "/category/list",    // 分类列表
                             "/tag/list",         // 标签列表（标签云，带每个标签下的已发布文章数）

@@ -199,6 +199,77 @@ CREATE TABLE `article` (
    字段顺序不能反——`status` 在前才能先用等值条件把范围缩小，
    再用 `create_time` 有序取出，避免 `ORDER BY` 触发额外排序。
 
+#### 可选：导入演示数据
+
+后台「用户管理」页面只有一两条数据是看不出分页、筛选、排序效果的，
+所以提供了一份演示数据脚本：`docs/demo-data/demo_users.sql`
+
+它会插入 **100 个演示用户**（用户名 `demo_001` ~ `demo_100`，中文昵称，全部 `GUEST` 角色，
+注册时间按天散开约 100 天，每 7 个里有 1 个处于禁用状态）。
+
+导入方式（Windows）：
+
+```powershell
+docker cp docs\demo-data\demo_users.sql yiguixingtu-mysql:/tmp/demo_users.sql
+docker exec yiguixingtu-mysql sh -c "mysql -uroot -proot --default-character-set=utf8mb4 yiguixingtu < /tmp/demo_users.sql"
+```
+
+Linux / macOS：
+
+```bash
+docker exec -i yiguixingtu-mysql mysql -uroot -proot --default-character-set=utf8mb4 yiguixingtu < docs/demo-data/demo_users.sql
+```
+
+导入后 `GET /user/page?page=1&size=100` 应返回 100 条记录、`total` 为 101（含管理员）。
+
+**⚠️ 三条注意事项：**
+
+1. **只能用于本地开发与演示，切勿在生产环境执行。** 这些账号共用密码 `demo@123456`，
+   一个已知密码的账号池上线就是漏洞。
+2. **这个文件不能放进 `src/main/resources/db/migration/`。** 那个目录是给 Flyway 用的，
+   一旦放进去，生产环境启动时会**自动执行**。它的位置是 `docs/demo-data/`，这是刻意的。
+3. **一键清理**：
+   ```sql
+   DELETE FROM `user` WHERE username LIKE 'demo%';
+   ```
+
+> 密码哈希不是手工编的，是通过真实的 `POST /auth/register` 接口注册一个账号后取回来的，
+> 所以它能真的通过 BCrypt 校验，可以用来登录（`demo_001` / `demo@123456`）。
+>
+> 顺带说明：`demo_001` 是用注册接口真实创建的，脚本里从 `demo_002` 开始批量插入，
+> 所以文件里看不到 `demo_001` 这一行——一共 100 个（1 + 99）。
+
+#### ⚠️ 怎么得到第一个管理员账号？
+
+**先说结论：一个全新的空库，是进不去后台的。**
+
+原因是一条"鸡生蛋"：
+- 注册接口**只会创建 GUEST**（`UserServiceImpl` 里写死 `user.setRole("GUEST")`）
+- 而把用户提升为 ADMIN 的接口 `PUT /user/{id}/role`，**本身要求调用者已经是 ADMIN**
+
+所以刚建好的库没有任何管理员，也就没有任何办法造出一个管理员。
+**这是当前版本的一个已知缺口**，修复它的提交排在 `TECH_ROADMAP.md` 的 **3.5**（管理员初始化引导）。
+
+在 3.5 完成之前，本地起新库时的引导做法是「**先正常注册，再用 SQL 提升**」：
+
+```sql
+-- 1) 先通过 POST /auth/register 正常注册一个账号（下面假设它叫 myadmin）
+-- 2) 把它提升为管理员
+UPDATE `user` SET role = 'ADMIN' WHERE username = 'myadmin';
+-- 3) 查出它的 id，下一步要用
+SELECT id, username, role FROM `user` WHERE username = 'myadmin';
+```
+
+```bash
+# 4) 清掉这个账号的认证缓存，否则角色变更不会立即生效
+docker exec -it yiguixingtu-redis redis-cli DEL auth:user:<上一步查到的 id>
+```
+
+**为什么第 4 步是必须的？** 用户的角色/状态被缓存进 Redis（key 是 `auth:user:{id}`，TTL 30 分钟），
+用来支持"禁用/改角色后旧 token 立即失效"。直接改库等于绕过了那套缓存清理逻辑，
+缓存里还是旧角色，最长要等 30 分钟才自然过期。
+走 `PUT /user/{id}/role` 接口改角色就不会有这个坑——**这也是"别绕过 API 直接改库"的一个具体例子。**
+
 ### 4. 配置
 
 #### 基础配置

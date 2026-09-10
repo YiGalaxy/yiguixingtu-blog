@@ -9,6 +9,7 @@ import com.yigalaxy.yiguixingtu.audit.AuditTarget;
 import com.yigalaxy.yiguixingtu.audit.OperationAction;
 import com.yigalaxy.yiguixingtu.audit.OperationLogRecorder;
 import com.yigalaxy.yiguixingtu.article.cache.PublishedArticleCache;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleArchiveVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
@@ -27,6 +28,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +76,13 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 public class ArticleServiceImpl implements ArticleService {
+
+    /**
+     * 归档最多取多少篇。
+     * 【为什么是常量而不是配置】它是一道"别把接口撑爆"的保险，不是业务参数；
+     * 500 篇对个人博客等于全部，真到不够用的时候应当改成分年加载，而不是把这个数字调大。
+     */
+    private static final int ARCHIVE_MAX_ARTICLES = 500;
 
     private final ArticleMapper articleMapper;
     private final CategoryMapper categoryMapper;
@@ -329,6 +338,76 @@ public class ArticleServiceImpl implements ArticleService {
                 aggregate == null ? 0L : aggregate.getArticleCount(),
                 aggregate == null ? 0L : aggregate.getViewCount(),
                 categoryCount == null ? 0L : categoryCount);
+    }
+
+    /**
+     * 归档：已发布的文章按年月分组。
+     *
+     * 【为什么在 Java 里分组，而不是让 MySQL 用 DATE_FORMAT 分组】
+     *   SQL 分组当然也能做（GROUP BY DATE_FORMAT(create_time, '%Y-%m')），
+     *   但那样只能拿到"每个月几篇"，拿不到每个月里的【文章列表】——
+     *   要列表就得 GROUP_CONCAT 拼字符串再在 Java 里拆开，很别扭。
+     *   这里的做法是：一条查询按时间倒序取出这些文章（只要 id/title/create_time
+     *   三个字段），在 Java 里顺序扫一遍分组 —— 顺序取出来之后，
+     *   同月的文章天然是连续的，分组只是一次简单的遍历。
+     *
+     * 【为什么要有条数上限】归档页是"一眼看全部"，但它不该变成"一次拉全站"。
+     *   上限 500 篇对个人博客来说等于"全部"，同时避免了哪天文章破万之后
+     *   这个接口把内存和响应体撑爆（真到那个规模，归档页该改成分年加载）。
+     *
+     * 【缓存】和站点统计共用同一个版本号：归档内容只在文章被增删改时变，
+     *   而那些操作都会推进版本号，所以不需要额外维护失效逻辑。
+     */
+    @Override
+    @Cacheable(cacheNames = RedisConfig.CACHE_ARTICLE_ARCHIVE,
+            key = "@articleCacheVersion.current()")
+    public ArticleArchiveVO archive() {
+
+        // 只取三个字段：归档页不需要摘要/封面/正文（几百篇的话差别就是几十 KB）
+        List<Article> articles = articleMapper.selectList(new LambdaQueryWrapper<Article>()
+                .select(Article::getId, Article::getTitle, Article::getCreateTime)
+                .eq(Article::getStatus, 1)
+                .orderByDesc(Article::getCreateTime)
+                .orderByDesc(Article::getId)
+                .last("LIMIT " + ARCHIVE_MAX_ARTICLES));
+
+        ArticleArchiveVO result = new ArticleArchiveVO();
+        result.setTotal((long) articles.size());
+
+        // 按"年-月"分组。因为 SQL 已经按时间倒序取出来了，
+        // 同一个月的文章必然是连续的，所以只需要跟"上一个月的 key"比一次，
+        // 不需要 Map + 排序那一套。
+        ArticleArchiveVO.ArchiveMonth currentMonth = null;
+        String currentKey = null;
+
+        for (Article article : articles) {
+            LocalDateTime time = article.getCreateTime();
+            // 【create_time 可能为 null 吗】表上有默认值 CURRENT_TIMESTAMP，
+            // 正常写入不会是 null；但历史数据/人工插入有可能是。
+            // 这里直接跳过而不是崩掉：归档页少一篇文章，比整个接口 500 好得多。
+            if (time == null) {
+                continue;
+            }
+
+            String key = time.getYear() + "-" + time.getMonthValue();
+            if (!key.equals(currentKey)) {
+                currentMonth = new ArticleArchiveVO.ArchiveMonth();
+                currentMonth.setYear(time.getYear());
+                currentMonth.setMonth(time.getMonthValue());
+                currentMonth.setCount(0);
+                result.getMonths().add(currentMonth);
+                currentKey = key;
+            }
+
+            ArticleArchiveVO.ArchiveArticle item = new ArticleArchiveVO.ArchiveArticle();
+            item.setId(article.getId());
+            item.setTitle(article.getTitle());
+            item.setCreateTime(time);
+            currentMonth.getArticles().add(item);
+            currentMonth.setCount(currentMonth.getCount() + 1);
+        }
+
+        return result;
     }
 
     // =================================================================

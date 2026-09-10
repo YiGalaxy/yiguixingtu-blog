@@ -1,6 +1,7 @@
 package com.yigalaxy.yiguixingtu.article.service;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleArchiveVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
@@ -33,6 +34,14 @@ public interface ArticleService {
      *   放在这个位置，调用方一眼就知道它不会把草稿算进去。
      */
     ArticleStatsVO stats();
+
+    /**
+     * 【前台】归档：把已发布的文章按年月分组（最新的月份在最前面）。
+     *
+     * 【为什么是前台方法】和 pagePublished / stats 同一个口径：只包含已发布 ——
+     * 归档页是给访客看的导航，草稿出现在里面等于把没写完的东西公示了。
+     */
+    ArticleArchiveVO archive();
 
     /** 【后台】详情，草稿也能看 */
     ArticleVO getDetail(Long id);

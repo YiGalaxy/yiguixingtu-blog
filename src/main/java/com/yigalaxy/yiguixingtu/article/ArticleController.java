@@ -1,6 +1,7 @@
 package com.yigalaxy.yiguixingtu.article;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleArchiveVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
@@ -59,6 +60,22 @@ public class ArticleController {
     @GetMapping("/stats")
     public Result<ArticleStatsVO> stats() {
         return Result.success(articleService.stats());
+    }
+
+    /**
+     * 归档：已发布文章按年月分组（最新的月份在前）。
+     *
+     * 【为什么路径是 /article/archive 而不是 /archive】它属于文章资源的一个"视图"，
+     * 和 /article/stats 是同一类东西（都是文章的只读汇总），放在 /article 下面语义最清楚。
+     *
+     * 【路由顺序提醒】`/article/archive` 是具体字符串，而 `/article/{id}` 是"任意一段"。
+     * Spring MVC 会优先匹配更具体的那个，所以归档不会被详情接口抢走
+     * —— ArticleStatsTest 里有一条用例专门盯着这件事（/article/stats 不被抢走）。
+     */
+    @Operation(summary = "归档（按年月分组，仅已发布）")
+    @GetMapping("/archive")
+    public Result<ArticleArchiveVO> archive() {
+        return Result.success(articleService.archive());
     }
 
     @Operation(summary = "文章详情")

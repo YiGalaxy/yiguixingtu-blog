@@ -102,6 +102,15 @@ public class RedisConfig {
     public static final String CACHE_CATEGORY_LIST = "category:list";
 
     /**
+     * 归档的缓存名（按年月分组的文章列表）。
+     *
+     * 【为什么它也能共用文章版本号】归档内容 = "已发布文章按时间分组"，
+     * 它只在文章被增删改（或发布/下架）时变 —— 而那几个操作本来就会推进版本号。
+     * 所以和列表、统计一样，key 只用版本号即可，没有第二套失效逻辑。
+     */
+    public static final String CACHE_ARTICLE_ARCHIVE = "article:archive";
+
+    /**
      * 统计结果的缓存时长：60 秒。
      * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
      * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
@@ -252,6 +261,7 @@ public class RedisConfig {
                 .withCacheConfiguration(CACHE_ARTICLE_STATS, statsConfig)
                 .withCacheConfiguration(CACHE_TAG_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_CATEGORY_LIST, baseConfig)
+                .withCacheConfiguration(CACHE_ARTICLE_ARCHIVE, baseConfig)
                 .build();
     }
 

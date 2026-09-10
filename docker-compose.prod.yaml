@@ -1,0 +1,161 @@
+# =====================================================================
+# 生产环境编排（三个容器：backend + mysql + redis）
+#
+# 【⚠️ 必须给它一个独立项目名（name），这是踩过坑才加的】
+#   compose 默认用【目录名】当项目名，而 docker-compose.yaml（本地开发）
+#   和本文件在同一个目录 —— 于是两者会被当成【同一个项目】。
+#   后果非常危险：执行本文件的 up 会把本地开发的那两个容器
+#   "当成自己的"去接管/改动（实测确实发生了：mysql 被直接接管并加了健康检查），
+#   本地环境会在你不知情的情况下被改掉。
+#   加上 name: yiguixingtu-prod 之后，两套编排彻底分开，可以并存、互不干扰。
+#   （同理，下面每个服务的 container_name 都带了 -prod 后缀，避免与本地重名）
+#
+# 【和 docker-compose.yaml（本地开发用）有什么区别，为什么不合成一个】
+#   两者的目标不同，硬合在一起会互相拖累：
+#
+#   | | docker-compose.yaml（本地） | 这个文件（生产） |
+#   |---|---|---|
+#   | 有哪些服务 | 只有 mysql + redis | backend + mysql + redis |
+#   | 数据库端口 | **映射到宿主机**（3310/6380，方便本地用客户端连） | **完全不映射**（只在容器内网可达） |
+#   | 数据库密码 | 明文 root/root，为了开箱即用 | 必须由环境变量注入 |
+#   | 健康检查 | 没有 | 三个服务都有，backend 依赖另外两个 healthy 才启动 |
+#   | 自动重启 | 没有 | restart: unless-stopped |
+#
+#   尤其"数据库端口不映射"这一条：生产环境把 3306 暴露到公网
+#   是最常见的被拖库原因之一。这里不写 ports，容器之间通过
+#   compose 自动创建的内网用服务名（mysql / redis）互相访问，
+#   外网根本连不到它们。
+#
+# 【怎么用】
+#   1. 先准备一个 .env 文件（和本文件同目录），内容见下方注释
+#   2. docker compose -f docker-compose.prod.yaml up -d --build
+#   3. docker compose -f docker-compose.prod.yaml ps   # 三个都应是 healthy
+#
+# 【.env 要准备什么】（⚠️ 这个文件不要提交）
+#   MYSQL_ROOT_PASSWORD=一个强密码
+#   DB_PASSWORD=一个强密码            # 业务账号的密码（可以和 root 不同）
+#   REDIS_PASSWORD=一个强密码
+#   JWT_SECRET=至少32字节的随机串
+#   CORS_ALLOWED_ORIGINS=https://你的域名
+#   BOOTSTRAP_ADMIN_USERNAME=你的管理员账号
+#   BOOTSTRAP_ADMIN_PASSWORD=一个强密码
+# =====================================================================
+
+# 独立项目名：与本地开发的 docker-compose.yaml 彻底分开（原因见上）
+name: yiguixingtu-prod
+
+services:
+
+  # -------------------------------------------------------------------
+  # MySQL
+  # -------------------------------------------------------------------
+  mysql:
+    image: mysql:8
+    container_name: yiguixingtu-prod-mysql
+    environment:
+      MYSQL_DATABASE: yiguixingtu
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?必须在 .env 里设置 MYSQL_ROOT_PASSWORD}
+      # 单独建一个业务账号，而不是让应用用 root 连库 ——
+      # 这是最小权限原则：应用只需要读写这一个库，用 root 等于给了它改整个实例的权限
+      MYSQL_USER: yiguixingtu
+      MYSQL_PASSWORD: ${DB_PASSWORD:?必须在 .env 里设置 DB_PASSWORD}
+    # ⚠️ 【刻意不写 ports】—— 不把 3306 暴露到宿主机/公网。
+    #    容器之间用服务名 mysql 互相访问，不需要对外开端口。
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # 健康检查决定"backend 什么时候可以启动"。
+      # 用 mysqladmin ping：mysqld 端口开了不代表能接受查询，
+      # 这个命令是真正连上去问一句，更可靠。
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # start_period 里的失败【不算】失败次数：MySQL 首次初始化数据目录要几十秒，
+      # 不给这个宽限期的话，容器还没初始化完就被判定 unhealthy
+      start_period: 40s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # Redis
+  # -------------------------------------------------------------------
+  redis:
+    image: redis:7
+    container_name: yiguixingtu-prod-redis
+    environment:
+      # 【为什么要把密码也放进 environment，明明 command 里已经用了】
+      #   因为下面的健康检查需要它。踩过一次：一开始只在 command 里用
+      #   ${REDIS_PASSWORD} 设密码，没往容器里注入这个环境变量，
+      #   结果健康检查里 `redis-cli -a $$REDIS_PASSWORD` 里的变量是【空的】，
+      #   认证失败 → 容器一直被判定 unhealthy → backend 因依赖它而根本不启动。
+      #   表现是"redis 明明在跑却 unhealthy"，很容易误判成 redis 本身有问题。
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?必须在 .env 里设置 REDIS_PASSWORD}
+    # 用密码启动；--appendonly yes 打开 AOF 持久化，
+    # 这样容器重启后缓存不至于全丢（虽然缓存丢了也能自愈，但频繁冷启动会压数据库）
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?必须在 .env 里设置 REDIS_PASSWORD}", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      # 设了密码之后，redis-cli ping 必须带 -a，否则会收到 NOAUTH 错误
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # 后端应用
+  # -------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: yiguixingtu-prod-backend
+    depends_on:
+      # 【condition: service_healthy 是关键】
+      #   只写 depends_on: [mysql] 的话，compose 只保证"容器启动了"，
+      #   而 MySQL 启动到能接受连接之间还有几十秒。
+      #   应用这时候去连库会失败，Flyway 直接报错，容器退出。
+      #   加上 service_healthy 之后，compose 会等健康检查通过才启动 backend。
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # 激活生产配置（对应 application-prod.properties）
+      SPRING_PROFILES_ACTIVE: prod
+      # 数据库地址用【服务名】mysql，不是 localhost ——
+      # 容器各有自己的网络命名空间，localhost 指的是容器自己。
+      # 这个坑很常见：本地用 localhost 好好的，一进 compose 就连不上。
+      DB_URL: jdbc:mysql://mysql:3306/yiguixingtu?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      DB_USERNAME: yiguixingtu
+      DB_PASSWORD: ${DB_PASSWORD:?必须在 .env 里设置 DB_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?必须在 .env 里设置 REDIS_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?必须在 .env 里设置 JWT_SECRET（至少32字节）}
+      # 前端域名：上线必须改，否则浏览器会跨域失败
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?必须在 .env 里设置 CORS_ALLOWED_ORIGINS（前端域名）}
+      # 管理员初始化引导：库里没有管理员时，第一次启动自动建一个
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      BOOTSTRAP_ADMIN_NICKNAME: ${BOOTSTRAP_ADMIN_NICKNAME:-站长}
+    ports:
+      # 应用端口要对外（Nginx 要反代到它），所以这一个是要映射的
+      - "${BACKEND_PORT:-8082}:8082"
+    healthcheck:
+      # 打 actuator 的健康端点，判断"应用真的能干活了"，而不是只看端口开着。
+      # -f 让 curl 在收到 4xx/5xx 时返回非 0，健康检查才会正确判定失败
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # 启动宽限期给足：Spring 启动 + Flyway 建表 + 管理员引导都要时间
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  # 具名卷：容器删了数据还在（docker compose down 不会删卷，加 -v 才会）
+  mysql_data:
+  redis_data:

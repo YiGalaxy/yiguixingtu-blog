@@ -86,6 +86,13 @@ class ProfileDevConfigTest extends AbstractIntegrationTest {
     }
 
     @Test
+    @DisplayName("健康检查端点未登录也能访问（容器探针要用它，否则容器会被判定 unhealthy 一直被重启）")
+    void actuatorHealth_shouldBeAccessibleWithoutToken() throws Exception {
+        mockMvc.perform(get("/actuator/health"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
     @DisplayName("配置项本身能被解析（防止占位符写错导致启动即失败）")
     void placeholders_shouldResolve() {
         // 这几项都是"写错了要等启动报错才发现"的类型，

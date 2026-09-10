@@ -1,0 +1,58 @@
+# =====================================================================
+# .dockerignore —— 构建镜像时"不要把哪些东西发给 Docker 守护进程"
+#
+# 【它和 .gitignore 的区别】
+#   .gitignore 管的是"什么不进 git 仓库"；
+#   .dockerignore 管的是"什么不进构建上下文"。
+#   两者理由不同：git 关心仓库干净，docker 关心【构建速度与安全】。
+#
+# 【为什么这个文件很重要，而不是可有可无】
+#   1. 速度：`docker build .` 会把整个目录打包发给 Docker 守护进程。
+#      本项目根目录下有 target/（几百 MB 编译产物）和 _preview 之类的临时文件，
+#      不排除的话每次构建都要白白传几百 MB。
+#   2. 安全：⚠️ 这条最关键 —— 仓库根目录有 resume.html、证件照等【个人材料】
+#      （它们被 .gitignore 忽略，但没被 .dockerignore 忽略）。
+#      构建上下文里的文件虽然不会自动进镜像（Dockerfile 只 COPY 指定的东西），
+#      但把身份证照、简历发到构建上下文里本身就是不必要的暴露，
+#      在多阶段/远程构建（如 BuildKit 远程 builder）下更明显。
+#      所以凡是"个人材料"，两个 ignore 文件都要写。
+# =====================================================================
+
+# ---------- 构建产物与依赖缓存 ----------
+target/
+!.mvn/wrapper/maven-wrapper.properties
+
+# ---------- 版本控制与 IDE ----------
+.git/
+.gitignore
+.idea/
+*.iml
+.vscode/
+
+# ---------- 文档（镜像里不需要） ----------
+README.md
+BACKEND_PLAN.md
+TECH_ROADMAP.md
+docs/
+
+# ---------- 个人材料（⚠️ 安全相关，见文件顶部说明） ----------
+resume.html
+photo_small.jpg
+FB33CB8D10A0D8B5530592F153E4CA1B.jpg
+_preview*
+
+# ---------- 本地配置与凭据（绝不能进镜像） ----------
+.env
+*.local.properties
+application-secret.properties
+
+# ---------- 本地依赖编排（生产用 docker-compose.prod.yaml） ----------
+docker-compose.yaml
+docker-compose.prod.yaml
+
+# ---------- 开发环境与工具配置 ----------
+.github/
+logs/
+*.log
+.DS_Store
+Thumbs.db

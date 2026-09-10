@@ -110,6 +110,17 @@ public class SecurityConfig {
                             "/auth/register"
                     ).permitAll();
 
+                    // 【健康检查端点必须放行】
+                    //   容器的健康检查（docker-compose.prod.yaml 里 backend 的 healthcheck）
+                    //   会去请求 /actuator/health，而它是不带 token 的 ——
+                    //   如果这里不放行，探针永远收到 401，容器会被判定为 unhealthy，
+                    //   然后 compose 就会一直重启它。这是个"配了健康检查反而导致服务起不来"的典型坑。
+                    //
+                    // 【放行它安全吗】安全。它默认只返回 {"status":"UP"}，
+                    //   不含数据库地址、连接串等细节（细节由
+                    //   management.endpoint.health.show-details=never 控制，见 application.properties）。
+                    auth.requestMatchers("/actuator/health").permitAll();
+
                     // 【接口文档的路径：只在文档开着的时候才放行】
                     //
                     // 这里是一个真实的安全缺口，是写 prod profile 测试时发现的：

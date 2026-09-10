@@ -68,6 +68,8 @@ public enum ResultCode {
 
     TAG_NOT_FOUND(404, "标签不存在"),
 
+    COMMENT_NOT_FOUND(404, "评论不存在"),
+
     /**
      * 标签名重复。
      * 【为什么和 USERNAME_EXISTS 分开而不是共用一个"已存在"】

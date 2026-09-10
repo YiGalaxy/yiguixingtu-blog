@@ -203,8 +203,16 @@ public class SecurityConfig {
                             "/article/stats",    // 首页那三个统计数字（文章数 / 浏览量 / 分类数）
                             "/article/*",        // 文章详情 /article/123
                             "/category/list",    // 分类列表
-                            "/tag/list"          // 标签列表（标签云，带每个标签下的已发布文章数）
+                            "/tag/list",         // 标签列表（标签云，带每个标签下的已发布文章数）
+                            "/comment/list"      // 评论列表（只返回【已通过】的评论，状态在 Service 里写死）
                     ).permitAll();
+
+                    // 【发评论单独放行，而且只放行 POST /comment】
+                    //   它是全站唯一一个"游客能往数据库写内容"的入口，
+                    //   所以这里刻意只写这一条路径（不用 /comment/**，
+                    //   避免以后往这个模块加了管理接口却被一起放行）。
+                    //   防刷靠的是接口限流 + 默认待审核，见 CommentController 的类注释。
+                    auth.requestMatchers(HttpMethod.POST, "/comment").permitAll();
 
                     // authenticated = 必须登录（带了合法 token）才能访问
                     // 其余所有请求都要登录

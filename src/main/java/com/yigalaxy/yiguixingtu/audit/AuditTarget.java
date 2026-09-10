@@ -21,5 +21,8 @@ public enum AuditTarget {
     USER,
 
     /** 标签 */
-    TAG
+    TAG,
+
+    /** 评论 */
+    COMMENT
 }

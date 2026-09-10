@@ -98,29 +98,55 @@
   任何标签写操作或文章写操作（含"给文章打标签"）都会推进版本号，一次 bump 让两边同时失效 ——
   所以"打上标签之后，标签云里的文章数会立刻 +1"
 
+**评论**
+- **游客就能评论**（不要求注册）：博客的评论区是读者说话的地方，
+  要求注册等于把绝大多数读者挡在门外，而本站并没有要运营的用户体系
+- **默认待审核，审核通过才对外可见**（`status`：0 待审核 / 1 已通过 / 2 已拒绝）——
+  这是防垃圾评论最主要的一道闸：提交成功不等于别人能看见。
+  前台的查询**写死 `status = 1`**（和文章前台写死 `status = 1` 同一个套路），
+  前端传 `?status=0` 也拿不到未审核的评论 —— 安全规则不能写成"默认值"
+- **三重防滥用**：① 默认待审核 ② 发表接口限流（20 次/分钟，**整站**配额）
+  ③ 昵称/内容长度上限 + **入库前 HTML 转义**（评论是全站唯一一个
+  "任何人都能往数据库写内容"的入口，转义做在入库这一层，
+  将来不管是前端、RSS 还是导出脚本渲染都不会执行到脚本）
+- **草稿文章不能评论**（草稿对外根本不存在，能对它评论说明调用方拿到了不该拿的 id）
+- **公开接口不返回 email 与 ip**：后台用的是另一个 VO（`AdminCommentVO`），
+  让"前台不可能拿到读者隐私"这件事由**类型**保证，而不是靠"记得别加那个字段"
+- 前台评论按时间**正序**（对话读起来自然），后台**倒序**（管理员关心最新的待审核）；
+  后台列表带上文章标题（一页评论只多一次 IN 查询，避免 N+1）
+- 评论用**逻辑删除**（和标签不同）：它没有任何唯一索引，
+  所以不会撞上"逻辑删除 + 唯一索引"那个坑，可以安心保留"删错了能恢复"的能力
+- 评论的**审核与删除**进操作审计（`UPDATE_COMMENT_STATUS` / `DELETE_COMMENT`），
+  但**发表评论本身不记** —— 评论是内容、数量会持续增长，
+  把每条公开评论都塞进审计表只会让真正要追溯的管理动作被淹没
+
 **基础设施**
 - 统一返回 `{code, message, data}`
 - 全局异常处理（业务异常 / 参数校验 / 认证失败 / 账号禁用 / 权限不足 / 兜底）
 - 分页与排序参数安全处理（见「接口安全约定」）
 - 自动生成 OpenAPI 接口文档
 - **接口限流（两层）**：应用层用 Resilience4j 注解式限流（登录 5 次/分钟、
-  前台列表 300 次/分钟），Nginx 那层按客户端 IP 限流；被限流返回 **429** ——
-  两层的分工与数值理由见「部署」章节
+  前台列表 300 次/分钟、发表评论 20 次/分钟），Nginx 那层按客户端 IP 限流；
+  被限流返回 **429** —— 两层的分工与数值理由见「部署」章节
 - **操作审计**：文章的增 / 改 / 发布下架 / 删除，用户的启用禁用 / 改角色 /
-  重置密码 / 删除，标签的增 / 改 / 删 —— 共 11 类写操作全部留痕（操作人、来源 IP、
-  traceId、改动内容快照）；**业务提交之后才异步落库**，回滚掉的操作不会被记下来 ——
-  见「操作审计」
+  重置密码 / 删除，标签的增 / 改 / 删，评论的审核 / 删除 —— 共 13 类管理动作
+  全部留痕（操作人、来源 IP、traceId、改动内容快照）；
+  **业务提交之后才异步落库**，回滚掉的操作不会被记下来 —— 见「操作审计」
 - **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   图片存服务器本地磁盘，并用**具名卷**持久化
-- 集成测试 **27 个类 238 个用例**，行覆盖率 **89.8%**
+- 集成测试 **28 个类 254 个用例**，行覆盖率 **90.2%**
 
 ### 🚧 规划中
 
-- 评论 / 留言与审核
 - 分类的后台增删改（目前只有只读列表接口）
+- **评论的楼中楼回复**（现在是一条条平铺的评论，没有父子关系）——
+  先把"能评论 + 能审核"这条主流程做扎实；回复要牵动前端渲染与分页语义，
+  等真有需求时加一列 `parent_id` 即可
+- **评论的敏感词过滤**（现在靠"默认待审核 + 人工看"）——
+  要自动化应当用成熟的敏感词库（DFA 前缀树不自己写），见路线图 C5
 - **审计记录的查询接口**：审计目前只负责"记下来"，还没有后台查询页面
 - 归档
 - 全文搜索（目前是 `LIKE '%关键词%'`，用不上索引；要快要上 ES）
@@ -203,6 +229,13 @@ com.yigalaxy.yiguixingtu
     ├── mapper/TagMapper                   # 含两个手写聚合查询（文章数 / 批量查标签）
     ├── mapper/ArticleTagMapper            # article_tag 关联表（纯关联，没有实体）
     └── dto/                               # TagForm / TagVO
+└── comment
+    ├── CommentController                  # 前台：看评论 + 发评论（**游客可用**，发表有限流）
+    ├── AdminCommentController             # 后台：审核 / 删除（ADMIN）
+    ├── service/CommentService(+Impl)      # 状态写死、HTML 转义、来源 IP
+    ├── entity/Comment                     # 三态：0待审核 1已通过 2已拒绝
+    ├── mapper/CommentMapper
+    └── dto/                               # CommentForm / CommentQuery / CommentVO / AdminCommentVO
 
 src/main/resources
 ├── application.properties
@@ -785,7 +818,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 ## 接口列表
 
-共 **25 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
+共 **30 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
 具体到角色见下方「接口 × 角色权限矩阵」。
 
 | # | 方法 | 路径 | 说明 | 是否需要登录 |
@@ -799,24 +832,29 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 7 | GET | `/article/stats` | 站点统计：文章数 / 总浏览量 / 分类数（首页那三个数字，**只算已发布**） | 否 |
 | 8 | GET | `/category/list` | 分类列表 | 否 |
 | 9 | GET | `/tag/list` | 标签列表（标签云，**每个标签带已发布文章数**，走 Redis 缓存） | 否 |
-| 10 | GET | `/user/page` | 用户分页查询 | 是（ADMIN） |
-| 11 | PUT | `/user/{id}/status` | 启用 / 禁用用户 | 是（ADMIN） |
-| 12 | PUT | `/user/{id}/role` | 修改用户角色 | 是（ADMIN） |
-| 13 | PUT | `/user/{id}/password` | 重置用户密码 | 是（ADMIN） |
-| 14 | DELETE | `/user/{id}` | 删除用户（逻辑删除） | 是（ADMIN） |
-| 15 | GET | `/admin/article/page` | 后台文章分页（含草稿，多条件筛选） | 是（ADMIN） |
-| 16 | GET | `/admin/article/{id}` | 后台文章详情（含正文） | 是（ADMIN） |
-| 17 | POST | `/admin/article` | 新增文章（可带 `tagIds` 打标签；**可选 `Idempotency-Key` 请求头防重复提交**） | 是（ADMIN） |
-| 18 | PUT | `/admin/article/{id}` | 编辑文章（`tagIds` 是**覆盖式**语义） | 是（ADMIN） |
-| 19 | PUT | `/admin/article/{id}/status` | 发布 / 下架文章 | 是（ADMIN） |
-| 20 | DELETE | `/admin/article/{id}` | 删除文章（逻辑删除） | 是（ADMIN） |
-| 21 | GET | `/admin/tag/list` | 标签列表（后台，**不走缓存**：刚建完就要看得见） | 是（ADMIN） |
-| 22 | POST | `/admin/tag` | 新建标签 | 是（ADMIN） |
-| 23 | PUT | `/admin/tag/{id}` | 编辑标签（改名 / 改排序） | 是（ADMIN） |
-| 24 | DELETE | `/admin/tag/{id}` | 删除标签（**物理删除**，同时解除文章关联） | 是（ADMIN） |
-| 25 | POST | `/upload` | 上传图片（封面图），返回可访问 URL | 是（ADMIN） |
+| 10 | GET | `/comment/list` | 某篇文章的评论（**只返回已通过的**，必须带 `articleId`） | 否 |
+| 11 | POST | `/comment` | 发表评论（**游客可用，默认待审核**；有限流：20 次/分钟） | 否 |
+| 12 | GET | `/user/page` | 用户分页查询 | 是（ADMIN） |
+| 13 | PUT | `/user/{id}/status` | 启用 / 禁用用户 | 是（ADMIN） |
+| 14 | PUT | `/user/{id}/role` | 修改用户角色 | 是（ADMIN） |
+| 15 | PUT | `/user/{id}/password` | 重置用户密码 | 是（ADMIN） |
+| 16 | DELETE | `/user/{id}` | 删除用户（逻辑删除） | 是（ADMIN） |
+| 17 | GET | `/admin/article/page` | 后台文章分页（含草稿，多条件筛选） | 是（ADMIN） |
+| 18 | GET | `/admin/article/{id}` | 后台文章详情（含正文） | 是（ADMIN） |
+| 19 | POST | `/admin/article` | 新增文章（可带 `tagIds` 打标签；**可选 `Idempotency-Key` 请求头防重复提交**） | 是（ADMIN） |
+| 20 | PUT | `/admin/article/{id}` | 编辑文章（`tagIds` 是**覆盖式**语义） | 是（ADMIN） |
+| 21 | PUT | `/admin/article/{id}/status` | 发布 / 下架文章 | 是（ADMIN） |
+| 22 | DELETE | `/admin/article/{id}` | 删除文章（逻辑删除） | 是（ADMIN） |
+| 23 | GET | `/admin/tag/list` | 标签列表（后台，**不走缓存**：刚建完就要看得见） | 是（ADMIN） |
+| 24 | POST | `/admin/tag` | 新建标签 | 是（ADMIN） |
+| 25 | PUT | `/admin/tag/{id}` | 编辑标签（改名 / 改排序） | 是（ADMIN） |
+| 26 | DELETE | `/admin/tag/{id}` | 删除标签（**物理删除**，同时解除文章关联） | 是（ADMIN） |
+| 27 | GET | `/admin/comment/page` | 评论分页（含待审核，**带邮箱与 IP**） | 是（ADMIN） |
+| 28 | PUT | `/admin/comment/{id}/status` | 审核评论（1 通过 / 2 拒绝） | 是（ADMIN） |
+| 29 | DELETE | `/admin/comment/{id}` | 删除评论（逻辑删除） | 是（ADMIN） |
+| 30 | POST | `/upload` | 上传图片（封面图），返回可访问 URL | 是（ADMIN） |
 
-**共 25 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
+**共 30 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
 用本地磁盘存储时，上传的图片通过 `GET /uploads/**` 公开读取（无需登录）。
 
 ## 接口 × 角色权限矩阵
@@ -832,11 +870,14 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `GET /article/{id}`（草稿） | ❌ 404 | ❌ 404 | ❌ 404（走后台接口） |
 | `GET /category/list` | ✅ | ✅ | ✅ |
 | `GET /tag/list` | ✅ | ✅ | ✅ |
+| `GET /comment/list`（已通过） | ✅ | ✅ | ✅ |
+| `POST /comment`（**游客可发**，默认待审核） | ✅ | ✅ | ✅ |
 | `POST /auth/logout` | ✅ | ✅ | ✅ |
 | `GET /auth/me` | ❌ 401 | ✅ | ✅ |
 | `/user/**`（全部 5 个） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/article/**`（全部 6 个） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/tag/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
+| `/admin/comment/**`（全部 3 个） | ❌ 401 | ❌ 403 | ✅ |
 | `POST /upload` | ❌ 401 | ❌ 403 | ✅ |
 | `GET /uploads/**`（本地存储的图片） | ✅ | ✅ | ✅ |
 
@@ -1167,6 +1208,7 @@ verify(spyArticleMapper, times(1)).selectById(articleId);   // 12 个线程 -> �
 | 文章 | 新建 / 编辑 / 发布下架 / 删除 | `CREATE_ARTICLE`、`UPDATE_ARTICLE`、`UPDATE_ARTICLE_STATUS`、`DELETE_ARTICLE` |
 | 用户 | 启用禁用 / 改角色 / 重置密码 / 删除 | `UPDATE_USER_STATUS`、`UPDATE_USER_ROLE`、`RESET_USER_PASSWORD`、`DELETE_USER` |
 | 标签 | 新建 / 编辑 / 删除 | `CREATE_TAG`、`UPDATE_TAG`、`DELETE_TAG` |
+| 评论 | 审核（通过 / 拒绝）/ 删除 | `UPDATE_COMMENT_STATUS`、`DELETE_COMMENT` |
 
 ### 每条记录有哪些字段，为什么
 
@@ -1208,6 +1250,7 @@ operation_log 表（异步完成，请求早就返回了）
 | 为什么这张表**没有逻辑删除** | 项目里唯一没有 `deleted` 的业务表 | 审计的价值就是"发生过的事不能被抹掉"。给它加逻辑删除等于给了"把痕迹藏起来"的操作空间；真要清理历史数据，应该是按时间归档这种明确的运维动作 |
 | 为什么 `username` 不直接查 `user` 表 | 存快照 | 用户删除后用户名会被改写、行也被标记删除，关联查已经查不出人；审计记录必须**自己带着**当时的信息 |
 | 现在有查询接口吗 | **没有** | 目前只写入，还没有后台查询页面 —— 这一点也写在「规划中」里，不做成"看起来有、其实没做完" |
+| 为什么**发表评论不记审计** | 只记"审核 / 删除"这类管理动作 | 评论本身就是内容、数量会持续增长。把每条公开评论都塞进审计表，只会让真正要追溯的管理动作被淹没；评论的记录就在 `comment` 表里，需要时按 ID 查即可 |
 
 ### ⚠️ 写这类测试时踩到的坑（记下来免得再踩）
 
@@ -1248,6 +1291,7 @@ operation_log 表（异步完成，请求早就返回了）
 | `operation_log` | 操作审计（谁 / 何时 / 对什么 / 做了什么） | `idx_user_time(user_id, create_time)`、`idx_create_time(create_time)` | Flyway `V4__create_operation_log.sql` |
 | `tag` | 文章标签（**没有 `deleted`：物理删除**） | `uk_name` 唯一、`idx_sort` | Flyway `V5__create_tag_tables.sql` |
 | `article_tag` | 文章-标签关联（多对多） | 联合主键 `(article_id, tag_id)`、`idx_tag(tag_id)` | Flyway `V5__create_tag_tables.sql` |
+| `comment` | 文章评论（含审核状态） | `idx_article_status(article_id, status, create_time)`、`idx_status_create(status, create_time)` | Flyway `V6__create_comment_table.sql` |
 | `flyway_schema_history` | Flyway 自己的迁移记录表 | —— | Flyway 自动创建 |
 
 > `article` 上四个索引看着多，其实每个都有明确的归属，缺了会有可量化的退化：
@@ -1269,6 +1313,10 @@ operation_log 表（异步完成，请求早就返回了）
 > 标签不值得付那个代价（名字会被污染成 `技术#deleted#7`），所以选择真删；
 > **删除这件事仍然有痕迹**：审计表里有一条 `DELETE_TAG`。
 > 完整推导写在 `V5__create_tag_tables.sql` 的注释里。
+>
+> `comment` 则**又回到逻辑删除**了 —— 判断标准只有一条：**这张表上有没有唯一索引**。
+> 评论没有任何唯一索引（同一个人发两条一模一样的话是合法的），
+> 所以"逻辑删除 + 唯一索引"那个坑不存在，可以安心保留"删错了能恢复"的能力。
 
 ## 性能
 
@@ -2009,10 +2057,10 @@ mvn test
 
 | 维度 | 覆盖率 |
 |------|:---:|
-| 行覆盖 | **89.8%**（1,211 / 1,349） |
-| 方法覆盖 | **97.3%**（255 / 262） |
-| 指令覆盖 | **89.9%**（5,226 / 5,811） |
-| 分支覆盖 | 68.0%（304 / 447） |
+| 行覆盖 | **90.2%**（1,353 / 1,500） |
+| 方法覆盖 | **97.2%**（280 / 288） |
+| 指令覆盖 | **90.4%**（5,910 / 6,540） |
+| 分支覆盖 | 68.3%（345 / 505） |
 
 > 分支覆盖率明显低于行覆盖率，是因为大量的**参数校验分支、异常兜底分支、
 > 空值判断分支**不会被每个用例都走到——这是正常的，不必为了刷数字硬凑用例。
@@ -2026,7 +2074,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 238 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 254 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -2038,10 +2086,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 238 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 254 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**27 个测试类，238 个用例，全部通过：**
+**28 个测试类，254 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -2069,9 +2117,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `TagTest` | 14 | 标签：前台标签云（带已发布文章数、草稿不计）、后台增删改、**物理删除**（原生 SQL 数物理行）、删标签连带清关联、名字查重与首尾空格、权限、缓存命中与失效 |
 | `ArticleTagTest` | 12 | 文章打标签与按标签筛选：覆盖式语义（换标签旧的不留）、**校验先于写入**（失败不动原有标签）、去重、草稿不泄漏、标签不存在返回空页、列表带标签、删文章清关联、打标签后标签云计数立刻 +1 |
-| `OperationLogTest` | 12 | 操作审计：写操作都留痕（含标签的增删改）、回滚与失败不记账、审计行不含明文密码 |
+| `CommentTest` | 15 | 评论：游客可发但**默认待审核**、传 `status=0` 也拿不到待审核内容、审核通过才可见、草稿不能评论、XSS 转义、公开响应体不含邮箱与 IP、后台带邮箱/IP/文章标题、审核参数校验、逻辑删除（原生 SQL 验物理行）、权限、限流 429、正序与分页 |
+| `OperationLogTest` | 13 | 操作审计：管理动作都留痕（含标签增删改、评论审核删除）、发表评论**不**记、回滚与失败不记账、审计行不含明文密码 |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **238** | |
+| **合计** | **254** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

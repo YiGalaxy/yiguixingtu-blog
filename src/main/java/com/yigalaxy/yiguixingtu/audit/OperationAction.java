@@ -49,7 +49,13 @@ public enum OperationAction {
     UPDATE_TAG("编辑标签"),
 
     /** 删除标签 */
-    DELETE_TAG("删除标签");
+    DELETE_TAG("删除标签"),
+
+    /** 审核评论（通过 / 拒绝） */
+    UPDATE_COMMENT_STATUS("审核评论"),
+
+    /** 删除评论 */
+    DELETE_COMMENT("删除评论");
 
     /** 中文说明，便于直接展示与排查（不用在前端再维护一份翻译） */
     private final String description;

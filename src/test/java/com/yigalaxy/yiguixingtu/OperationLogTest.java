@@ -174,6 +174,8 @@ class OperationLogTest extends AbstractIntegrationTest {
         jdbcTemplate.update("DELETE FROM article_tag WHERE tag_id IN (SELECT id FROM tag WHERE name LIKE ?)",
                 "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM tag WHERE name LIKE ?", "%" + mark + "%");
+        // 评论同理：本类是 NOT_SUPPORTED，评论是真的提交进库的
+        jdbcTemplate.update("DELETE FROM comment WHERE nickname LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM user WHERE username LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM category WHERE name LIKE ?", "%" + mark + "%");
     }
@@ -477,6 +479,60 @@ class OperationLogTest extends AbstractIntegrationTest {
         // 删除这件事本身并没有失去痕迹。
         assertTrue(deleteLog.getDetail().contains(secondName),
                 "删除记录里必须保留标签名快照，实际=" + deleteLog.getDetail());
+    }
+
+    @Test
+    @DisplayName("⑬ 评论的「审核」与「删除」都会留痕，但【发表评论本身不记】")
+    void commentModeration_shouldBeAudited() throws Exception {
+        // 本类里的 insertArticle 返回的是实体（其它用例要拿标题做断言），这里取 id
+        Article auditArticle = insertArticle(mark + "_评论审计", 1);
+        Long articleId = auditArticle.getId();
+
+        // ---- 发表评论（游客身份，不需要 token）----
+        String nickname = mark + "-读者";
+        String created = mockMvc.perform(post("/comment")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"articleId\":" + articleId + ",\"nickname\":\"" + nickname
+                                + "\",\"content\":\"这条评论只用来验审计\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andReturn().getResponse().getContentAsString();
+        Long commentId = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(created).get("data").get("id").asLong();
+
+        // 【发表评论本身不写审计】这是刻意的：评论是内容，数量会持续增长，
+        //   把每条公开评论都塞进审计表只会让真正要追溯的"管理动作"被淹没。
+        //   评论的记录就在 comment 表里 —— 下面两条管理动作才需要留痕。
+        assertEquals(0, countLogs("CREATE_COMMENT", commentId),
+                "发表评论不该写审计（评论本身就是内容，不是管理动作）");
+
+        // ---- 审核通过 ----
+        mockMvc.perform(put("/admin/comment/{id}/status", commentId)
+                        .header("Authorization", "Bearer " + adminToken)
+                        .param("status", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog approveLog = awaitLog("UPDATE_COMMENT_STATUS", commentId);
+        assertNotNull(approveLog, "审核评论应当留下审计");
+        assertEquals(admin.getUsername(), approveLog.getUsername(), "要记下是谁审核的");
+        // detail 里要能看出"从什么状态改成什么"：
+        // 只记结果值的话，事后分不清这是"通过了一条待审核"还是"把已通过的又拒了"
+        assertTrue(approveLog.getDetail().contains("待审核") && approveLog.getDetail().contains("已通过"),
+                "detail 里应当有状态变化，实际=" + approveLog.getDetail());
+
+        // ---- 删除 ----
+        mockMvc.perform(delete("/admin/comment/{id}", commentId)
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog deleteLog = awaitLog("DELETE_COMMENT", commentId);
+        assertNotNull(deleteLog, "删除评论应当留下审计");
+        // 评论被逻辑删除后按 id 已经查不到内容，而"删掉的是一句什么话"
+        // 恰恰是事后最需要回答的问题（用户来问"我的评论怎么没了"）
+        assertTrue(deleteLog.getDetail().contains(nickname),
+                "删除记录里应当有内容快照（昵称），实际=" + deleteLog.getDetail());
     }
 
     // ================================================================

@@ -2021,16 +2021,43 @@ compose 里的独立项目名 `yiguixingtu-prod` 保证了它和本地开发容�
 
 | 演练项 | 实测结果 |
 |--------|---------|
-| 空库启动 → Flyway | `Successfully applied 4 migrations`（V1 init → V2 排序索引 → V3 覆盖索引 → V4 审计表），表 `user / category / article / operation_log` 全部建好 |
+| 四个容器 | mysql / redis / backend / frontend 全部 `healthy`（frontend 是 Nuxt SSR 容器） |
+| 空库启动 → Flyway | `Successfully applied 6 migrations`（V1 init → V2 排序索引 → V3 覆盖索引 → V4 审计表 → V5 标签表 → V6 评论表），7 张表全部建好 |
 | 管理员引导 | 用 `.env` 里的引导账号能直接登录（`role=ADMIN`） |
-| 健康检查 | `backend` 等 mysql/redis `healthy` 才启动，随后自身也变 `healthy`（`depends_on: service_healthy` 真的生效） |
-| 端口暴露面 | `docker compose ps` 只有 `127.0.0.1:8092->8082`；**mysql 与 redis 一个端口都没映射** |
-| 操作审计（M4.2） | 建文章 + 发布后 `operation_log` 出现两条记录，`action` / `target_id` / `trace_id` 齐全 |
-| 应用层限流 | 连续 6 次登录 → `200,200,200,200,429,429`（配额 5 次/分钟，返回**真 HTTP 429**） |
+| 端口暴露面 | 只有 `127.0.0.1:8092->8082`（后端）与 `127.0.0.1:3010->3000`（前端）；**mysql 与 redis 一个端口都没映射** |
+| prod profile | `/actuator/health` 返回 UP；`/v3/api-docs` 返回 401（**Swagger 确实关掉了**） |
+| 内容链路 | 建分类 + 标签 + 文章（带 `tagIds`）→ `?tagId=` 筛选 total=1、详情带 1 个标签、归档 1 个月、RSS 1 条且**含正文** |
+| 评论链路 | 游客发评论 → `status=0` 且**带 createTime** → 前台 total=0（看不到）→ 接口通过 → 前台 total=1 |
+| **前端 SSR（容器间互访）** | 首页 HTML 28KB，**含刚发的文章标题**与 canonical；文章页 82KB **含那条评论**；标签是真实内链 `<a href="/?tagId=1">`（可被爬虫跟随） |
+| sitemap / robots | `/sitemap.xml` 200 且含 `/article/1`；`/robots.txt` 200 且 `Sitemap:` 用的是配置的域名（守 `PUBLIC_SITE_URL`） |
+| 操作审计 | 上面那些管理动作在 `operation_log` 里逐条留痕（CREATE_CATEGORY / CREATE_TAG / CREATE_ARTICLE / UPDATE_COMMENT_STATUS） |
 | 上传落卷 | 上传的封面写进 `/app/uploads/cover/2026/09/…png`，`GET` 返回 200；**`--force-recreate` 重建容器后文件还在、还能访问**（守"具名卷有没有真的挂上"） |
+| 应用层限流 | 连续 6 次登录 → `200,200,200,200,429,429`（配额 5 次/分钟，返回**真 HTTP 429**） |
 
 > 演练完 `docker compose down -v` 把演练用的容器与卷全部删掉，
 > 开发环境（8082 / 3310 / 6380）不受任何影响。
+
+#### ⚠️ 镜像构建会下载 Maven 依赖 —— 国内网络务必注意
+
+`Dockerfile` 的构建阶段要跑 `mvn dependency:go-offline` + `mvn package`，
+也就是**在构建镜像时把整个依赖树拉一遍**。实测（本机、国内网络）：
+直连 Maven Central 时，`dependency:go-offline` 跑了 **25 分钟还没结束**
+（`-q` 把下载日志吞了，看起来就像卡死）；换成阿里云镜像后整个构建 **7.8 分钟**。
+
+所以 Dockerfile 里已经默认写入了阿里云公共镜像（`maven.aliyun.com/repository/public`）。
+想换掉或关掉它：
+
+```bash
+# 换成别的镜像
+docker build --build-arg MAVEN_MIRROR_URL=https://你的镜像/repository/public -t yiguixingtu-backend .
+
+# 关掉 mirror（回到直连 Maven Central）
+docker compose -f docker-compose.prod.yaml build --build-arg MAVEN_MIRROR_URL=
+```
+
+> 另一条路是**在本机构建好镜像再传到服务器**（`docker save` + `docker load`，
+> 或者推到阿里云 ACR）—— 服务器上就不用再下载依赖了。
+> 本项目 README 的部署章节默认走"服务器上构建"，所以把镜像配好更省事。
 
 ### 5. 备份与恢复
 

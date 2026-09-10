@@ -28,6 +28,32 @@ FROM maven:3.9-eclipse-temurin-17 AS builder
 
 WORKDIR /build
 
+# 【默认走阿里云 Maven 镜像 —— 这不是"优化"，是能否构建成功的问题】
+#   ⚠️ 实测（本机，国内网络）：直接连 Maven Central 时，`dependency:go-offline`
+#   这一步跑了 25 分钟还没结束（在容器里，没有任何进度输出，看起来像卡死）。
+#   而这个构建在【用户部署的阿里云 ECS 上也要跑一次】—— 也就是说，
+#   如果不管它，第一次 `docker compose up -d --build` 可能要等很久甚至超时失败，
+#   而失败信息只会是一句"构建失败"，看不出是网络慢。
+#
+#   做法：写一个最小的 settings.xml，把中央仓库指到阿里云公共代理。
+#   想换别的镜像 / 想关掉它：构建时传 --build-arg MAVEN_MIRROR_URL=...
+#   （传空值表示不加 mirror 节点，回到直连 Maven Central）。
+#
+#   【为什么不是"换个网络"】镜像构建发生在服务器上，
+#   那是我们控制不了的环境；把仓库地址写进构建产物才是可复现的。
+ARG MAVEN_MIRROR_URL=https://maven.aliyun.com/repository/public
+RUN mkdir -p /root/.m2 && printf '%s\n' \
+      '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">' \
+      '  <mirrors>' \
+      '    <mirror>' \
+      '      <id>build-mirror</id>' \
+      '      <name>build-time mirror</name>' \
+      "      <url>${MAVEN_MIRROR_URL}</url>" \
+      '      <mirrorOf>central</mirrorOf>' \
+      '    </mirror>' \
+      '  </mirrors>' \
+      '</settings>' > /root/.m2/settings.xml
+
 # 【为什么先只拷 pom.xml、单独下载依赖，再拷源码】
 #   Docker 构建是分层的，某一层的输入没变就直接用缓存。
 #   如果一上来就 `COPY . .`，那么【改任何一行代码】都会让

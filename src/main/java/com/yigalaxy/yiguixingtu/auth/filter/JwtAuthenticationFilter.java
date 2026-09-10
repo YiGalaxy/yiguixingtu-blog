@@ -1,6 +1,7 @@
 package com.yigalaxy.yiguixingtu.auth.filter;
 
 import com.yigalaxy.yiguixingtu.auth.LoginUser;
+import com.yigalaxy.yiguixingtu.auth.cache.TokenBlacklist;
 import com.yigalaxy.yiguixingtu.auth.cache.UserAuthCache;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.user.entity.User;
@@ -48,11 +49,16 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     /** 用户认证信息缓存：先查它，命中就不用查库了 */
     private final UserAuthCache userAuthCache;
 
-    /** 构造方法：Spring 创建这个过滤器时，把 JwtUtil、UserMapper、UserAuthCache 一起传进来。 */
-    public JwtAuthenticationFilter(JwtUtil jwtUtil, UserMapper userMapper, UserAuthCache userAuthCache) {
+    /** 已登出 token 的黑名单：用来让"退出登录"真的即时生效（见第 3.5 步） */
+    private final TokenBlacklist tokenBlacklist;
+
+    /** 构造方法：Spring 创建这个过滤器时，把依赖一起传进来。 */
+    public JwtAuthenticationFilter(JwtUtil jwtUtil, UserMapper userMapper,
+                                   UserAuthCache userAuthCache, TokenBlacklist tokenBlacklist) {
         this.jwtUtil = jwtUtil;
         this.userMapper = userMapper;
         this.userAuthCache = userAuthCache;
+        this.tokenBlacklist = tokenBlacklist;
 
 
     }
@@ -94,6 +100,26 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
             // ============ 第3步：从 token 里取出用户 ID ============
             Long userId = ((Number) claims.get("userId")).longValue();
+
+            // ============ 第3.5步：这个 token 是否已被登出拉黑 ============
+            // 【为什么只查 UserAuthCache 不够】
+            //   上面那套机制解决的是"用户的身份/权限变了"（被禁用、被删除、被降级），
+            //   它管不了"用户主动退出登录"。因为退出时用户本身没有任何变化 ——
+            //   账号还在、角色还在、状态还是正常的，只是这个 token 不该再被认。
+            //   所以要把登出过的 token 单独拉黑，这里查一次。
+            //
+            // 【代价】每个带 token 的请求多一次 Redis 查询（hasKey）。
+            //   这是"能撤销 token"必须付的代价 —— 无状态的 JWT 本身做不到撤销。
+            //   要省这一次查询就只能改用"有状态 session"，那是另一个方向的取舍。
+            if (tokenBlacklist.contains(claims.getId())) {
+                log.warn("token 已登出（在黑名单中），拒绝本次请求, userId={}, jti={}",
+                        userId, claims.getId());
+                // 不设置认证信息 → 后续 anyRequest().authenticated() 会返回 401。
+                // 注意这里【不抛异常、也不直接写响应】：
+                // 让 Security 的异常处理入口统一产出 401 的 JSON，格式才和别处一致
+                filterChain.doFilter(request, response);
+                return;
+            }
 
             // ============ 第4步【核心修复】：拿到这个人的"当前"状态 ============
             // 【为什么必须校验？】token 一旦签发就无法撤销，光看 token 看不出：

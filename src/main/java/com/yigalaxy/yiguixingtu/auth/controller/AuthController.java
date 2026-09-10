@@ -1,6 +1,7 @@
 package com.yigalaxy.yiguixingtu.auth.controller;
 
 import com.yigalaxy.yiguixingtu.auth.LoginUser;
+import com.yigalaxy.yiguixingtu.auth.cache.TokenBlacklist;
 import com.yigalaxy.yiguixingtu.auth.dto.LoginRequest;
 import com.yigalaxy.yiguixingtu.auth.dto.LoginVO;
 import com.yigalaxy.yiguixingtu.auth.dto.RegisterRequest;
@@ -20,8 +21,11 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.time.Duration;
 
 @Slf4j
 @Tag(name = "认证", description = "登录/登出/当前用户等认证接口")
@@ -33,12 +37,16 @@ public class AuthController {
     private final JwtUtil jwtUtil;
     private final UserMapper userMapper;
     private final UserService userService;
+    private final TokenBlacklist tokenBlacklist;
 
-    public AuthController(AuthenticationManager authenticationManager, JwtUtil jwtUtil, UserMapper userMapper, UserService userService) {
+    public AuthController(AuthenticationManager authenticationManager, JwtUtil jwtUtil,
+                          UserMapper userMapper, UserService userService,
+                          TokenBlacklist tokenBlacklist) {
         this.authenticationManager = authenticationManager;
         this.jwtUtil = jwtUtil;
         this.userMapper = userMapper;
         this.userService = userService;
+        this.tokenBlacklist = tokenBlacklist;
     }
 
     /**
@@ -77,12 +85,52 @@ public class AuthController {
     }
 
     /**
-     * 退出登录（JWT 无状态，前端删掉 token 即可）
+     * 退出登录。
+     *
+     * 【这里到底做了什么】
+     *   把当前这个 token 的 jti 记进 Redis 黑名单，之后带它的请求一律 401。
+     *   在此之前这个接口是空的（只打了一行日志）—— 也就是"退出登录"其实
+     *   只是个假动作：前端删掉本地 token，但那个 token 依然能用到自然过期。
+     *   要是它已经被人截获，或者浏览器历史里还留着，就还能用 24 小时。
+     *
+     * 【为什么从请求头里再取一次 token，而不是从 SecurityContext 拿】
+     *   SecurityContext 里放的是"用户是谁"（LoginUser），它是过滤器解析 token 之后
+     *   组装出来的，里面没有原始 token 字符串，也就拿不到 jti。
+     *   而拉黑需要 jti，所以这里直接从请求头取一次。
+     *
+     * 【为什么只拉黑"这一个" token 而不是这个人的全部】
+     *   用户可能手机和电脑同时登着，在手机上点退出不该把电脑也踢下线。
+     *   要踢掉某人的全部 token 是另一种需求（管理员禁用账号），
+     *   那套机制在 UserAuthCache 里。见 TokenBlacklist 的类注释。
      */
     @Operation(summary = "退出登录")
     @PostMapping("/logout")
-    public Result<?> logout() {
-        log.info("退出登录");
+    public Result<?> logout(
+            @RequestHeader(value = "Authorization", required = false) String authorization) {
+
+        if (authorization == null || !authorization.startsWith("Bearer ")) {
+            // 走到这里说明没带 token。但 /auth/logout 在 SecurityConfig 里要求登录，
+            // 所以正常情况下轮不到这个分支 —— 留着是为了防御性编程：
+            // 万一将来有人把它加进 permitAll，这里也不会 NPE
+            log.warn("退出登录时没有拿到 token");
+            return Result.success();
+        }
+
+        String token = authorization.substring(7);
+        try {
+            String jti = jwtUtil.getJti(token);
+            long remainingMillis = jwtUtil.getRemainingValidityMillis(token);
+
+            // 按"剩余有效期"设置 TTL：token 自然过期的时刻，这条黑名单记录也一起消失，
+            // 不需要任何定时清理任务
+            tokenBlacklist.add(jti, Duration.ofMillis(remainingMillis));
+            log.info("退出登录成功, token 已作废");
+        } catch (Exception e) {
+            // token 解析失败（伪造的、格式错的）：那它本来就用不了，
+            // 没必要让登出接口报错。用户点退出就是想退出，让他退成功
+            log.warn("退出登录时解析 token 失败（token 本身可能就是无效的）: {}", e.getMessage());
+        }
+
         return Result.success();
     }
 

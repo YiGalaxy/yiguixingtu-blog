@@ -11,6 +11,7 @@ import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.UUID;
 import java.util.Map;
 
 /**
@@ -71,14 +72,56 @@ public class JwtUtil {
         String token = Jwts.builder()
                 .claims(claims)          // 把自定义数据（userId、role）放进去
                 .subject(username)       // 把用户名作为"主题"放进去（标准字段）
+                // id(...) 写的是 JWT 标准字段 jti（JWT ID）—— 每个 token 唯一的一个编号。
+                //
+                // 【为什么需要它】JWT 是无状态的，签出去就撤销不了。
+                // 要实现"点了退出登录，这个 token 立刻失效"，就必须能【指名道姓地】
+                // 说"作废这一个 token"，而不是"作废这个人的所有 token"。
+                // jti 就是这个"身份证号"：退出时把它记进 Redis 黑名单，
+                // 之后带着这个 jti 的请求一律拒绝（见 TokenBlacklist）。
+                //
+                // 用 UUID 保证唯一；同一秒签发多次也不会撞号。
+                .id(UUID.randomUUID().toString())
                 .issuedAt(now)           // 签发时间
                 .expiration(expiration)  // 过期时间
                 .signWith(secretKey)     // 用密钥签名（最后一段 signature）
                 .compact();              // 组装成最终的 JWT 字符串
 
         // 5. 打日志
+        // 【注意】不把 token 本身打进日志：日志会被收集、转发、长期保存，
+        // token 写进日志等于泄漏了一把能直接用的钥匙
         log.info("生成token成功, userId={}, username={}, role={}", userId, username, role);
         return token;
+    }
+
+    /**
+     * 取出 token 的 jti（唯一编号），用于登出时把它拉黑。
+     *
+     * @param token JWT 字符串
+     * @return jti；老 token（本次改动之前签发的、没有 jti）返回 null
+     */
+    public String getJti(String token) {
+        return parseToken(token).getId();
+    }
+
+    /**
+     * 算出 token 还剩多久过期（毫秒）。
+     *
+     * 【为什么要这个值】黑名单里那条记录只需要活到"这个 token 本来会过期的时刻"——
+     * 再往后 token 自己就过期了，留着记录纯属浪费内存。
+     * 所以登出时按"剩余有效期"设置 Redis 的 TTL，让它自动清理。
+     *
+     * @return 剩余毫秒数；已过期或解析失败返回 0
+     */
+    public long getRemainingValidityMillis(String token) {
+        try {
+            Date expiration = parseToken(token).getExpiration();
+            long remaining = expiration.getTime() - System.currentTimeMillis();
+            return Math.max(remaining, 0L);
+        } catch (Exception e) {
+            // 解析不了就当作"没有剩余价值"，调用方拿到 0 不会去写黑名单
+            return 0L;
+        }
     }
 
     /**

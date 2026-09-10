@@ -37,8 +37,11 @@
 #   REDIS_PASSWORD=一个强密码
 #   JWT_SECRET=至少32字节的随机串
 #   CORS_ALLOWED_ORIGINS=https://你的域名
+#   PUBLIC_API_BASE=https://你的域名/api   # 浏览器访问后端的地址
 #   BOOTSTRAP_ADMIN_USERNAME=你的管理员账号
 #   BOOTSTRAP_ADMIN_PASSWORD=一个强密码
+#   可选：FRONTEND_DIR（前端仓库路径，默认 ../yiguixingtu-web）
+#         BACKEND_PORT / FRONTEND_PORT（默认 8082 / 3000）
 # =====================================================================
 
 # 独立项目名：与本地开发的 docker-compose.yaml 彻底分开（原因见上）
@@ -153,6 +156,50 @@ services:
       retries: 5
       # 启动宽限期给足：Spring 启动 + Flyway 建表 + 管理员引导都要时间
       start_period: 60s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # 前端（Nuxt 4 SSR）
+  #
+  # 【为什么前端也放进这个文件，而不是单独一个 compose】
+  #   前后端是两个仓库、两个镜像，但上线时它们必须"一起起来、在同一个内网里"，
+  #   否则前端容器连不到 backend。
+  #   放在同一个 compose 里最省事：一次 up 起全栈，网络由 compose 自动建好，
+  #   前端用服务名 backend 就能访问后端，不需要手写网络配置。
+  #   （代价：这个文件假设两个仓库是【同级目录】，见下面 context 里的默认值）
+  # -------------------------------------------------------------------
+  frontend:
+    build:
+      # 前端仓库的位置。默认按"两个仓库同级"来算（例如
+      #   /srv/yiguixingtu 与 /srv/yiguixingtu-web），
+      # 不符合时在 .env 里写 FRONTEND_DIR=/你的/实际/路径
+      context: ${FRONTEND_DIR:-../yiguixingtu-web}
+      dockerfile: Dockerfile
+    container_name: yiguixingtu-prod-frontend
+    depends_on:
+      # 等后端 healthy 再启动：前端 SSR 渲染首页时可能就要去后端拿数据，
+      # 后端没就绪的话首屏会渲染出错误页
+      backend:
+        condition: service_healthy
+    environment:
+      # 浏览器用的地址：【必须是对外可访问的地址】。
+      # 如果 Nginx 把后端反代在 /api/ 下，这里就填 https://你的域名/api
+      NUXT_PUBLIC_API_BASE: ${PUBLIC_API_BASE:?必须在 .env 里设置 PUBLIC_API_BASE（浏览器访问后端的地址）}
+      # 服务端渲染用的地址：直连内网的 backend 容器，不走公网/域名。
+      # 这正是当初把 apiBase 拆成"服务端 / 浏览器"两份的用处 ——
+      # SSR 少绕一圈 DNS + Nginx，也避免了"域名还没配好时 SSR 直接失败"。
+      NUXT_API_BASE_SERVER: http://backend:8082
+    ports:
+      # 前端也要对外（Nginx 反代到它）
+      - "${FRONTEND_PORT:-3000}:3000"
+    healthcheck:
+      # 镜像里是 alpine + node，没有 curl，所以直接用 node 自带的 fetch 探活。
+      # 打首页并检查 HTTP 是否 2xx/3xx —— 只要 SSR 服务活着就会返回
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
 volumes:

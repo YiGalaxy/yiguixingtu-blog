@@ -641,19 +641,28 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 ```
                       ┌──────────────────────── 一台 ECS ────────────────────────┐
    浏览器 ──https──▶  │  Nginx（宿主机的 80/443）                                │
-                      │    ├─ /            → 前端（Nuxt，容器 3000）             │
-                      │    └─ /api/        → 后端（Spring Boot，容器 8082）      │
+                      │    ├─ /      → 前端（Nuxt 容器 3000）                    │
+                      │    └─ /api/  → 后端（Spring Boot 容器 8082）             │
                       │                                                          │
                       │  docker compose 内网（外网连不到）                        │
-                      │    backend ──▶ mysql:3306                                │
-                      │           └──▶ redis:6379                                │
+                      │    frontend ──▶ backend:8082                             │
+                      │                 backend ──▶ mysql:3306                   │
+                      │                         └──▶ redis:6379                  │
                       └──────────────────────────────────────────────────────────┘
                                     封面图 ──▶ 阿里云 OSS（不走 ECS 磁盘）
 ```
 
-**三个容器都由 `docker-compose.prod.yaml` 管理**，和本地开发的 `docker-compose.yaml`
+**四个容器都由 `docker-compose.prod.yaml` 管理**，和本地开发的 `docker-compose.yaml`
 是两个文件 —— 生产环境**不把 MySQL / Redis 的端口映射到宿主机**，
 它们只在 compose 内网里可达（这是防拖库最基本的一条）。
+
+> **前端也在这个 compose 里**（`frontend` 服务会去构建前端仓库的镜像）。
+> 默认假设两个仓库是**同级目录**（如 `/srv/yiguixingtu` 与 `/srv/yiguixingtu-web`）；
+> 不是的话在 `.env` 里写 `FRONTEND_DIR=/你的/实际/路径`。
+>
+> 这么做是为了"一次 `up` 起全栈"：前后端在同一个 compose 网络里，
+> 前端用服务名 `backend` 就能访问后端，不用手写网络配置。
+> 代价是上线时两个仓库要放在一起 —— 对一个单机博客来说这个取舍是划算的。
 
 ### 1. 准备环境变量
 
@@ -675,10 +684,19 @@ JWT_SECRET=用上面命令生成一串填这里
 # ---- 跨域：填前端域名，否则浏览器会跨域失败 ----
 CORS_ALLOWED_ORIGINS=https://你的域名
 
+# ---- 前端容器用的后端地址（浏览器访问的那个） ----
+# 如果 Nginx 把后端反代在 /api/ 下，这里就填 https://你的域名/api
+PUBLIC_API_BASE=https://你的域名/api
+
 # ---- 第一个管理员（库里没有管理员时自动创建，详见上文） ----
 BOOTSTRAP_ADMIN_USERNAME=你的管理员账号
 BOOTSTRAP_ADMIN_PASSWORD=一个强密码
 BOOTSTRAP_ADMIN_NICKNAME=站长
+
+# ---- 可选 ----（都有默认值，不填也行）
+# FRONTEND_DIR=../yiguixingtu-web   # 前端仓库路径
+# BACKEND_PORT=8082
+# FRONTEND_PORT=3000
 ```
 
 > **`.env` 绝对不要提交进仓库**（已在 `.gitignore` 与 `.dockerignore` 里）。

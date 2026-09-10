@@ -3,18 +3,19 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-198%20passing-success)
-![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
+![Tests](https://img.shields.io/badge/tests-285%20passing-success)
+![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **198 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **285 个集成测试全部通过**（覆盖行 90.5%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
-**yiguixingtu** 是一个个人博客系统的后端服务，已实现 **认证与用户管理**、**文章管理**、**分类** 三个模块，
-采用 **JWT 无状态认证**，**MySQL** 存储数据、**Redis** 缓存认证信息，接口文档由 **springdoc** 自动生成。
+**yiguixingtu** 是一个个人博客系统的后端服务，已实现 **认证与用户管理**、**文章管理**、
+**分类**、**标签**、**评论与审核**、**操作审计** 等模块，
+采用 **JWT 无状态认证**，**MySQL** 存储数据、**Redis** 缓存认证信息与文章缓存，接口文档由 **springdoc** 自动生成。
 
 前端为独立仓库 `yiguixingtu-web`（Nuxt 4 + Vue 3 + Element Plus），通过 HTTP 调用本服务。
 
@@ -310,7 +311,7 @@ docs
 Dockerfile                          # 后端镜像（多阶段构建，非 root 运行）
 .dockerignore                       # 构建上下文排除清单（含个人材料，见文件内说明）
 docker-compose.yaml                 # 本地开发：只有 mysql + redis
-docker-compose.prod.yaml            # 生产：backend + mysql + redis 三容器（详见「部署」章节）
+docker-compose.prod.yaml            # 生产：backend + frontend + mysql + redis 四容器（详见「部署」章节）
 ```
 
 ## 快速开始

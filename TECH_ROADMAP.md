@@ -1031,6 +1031,48 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 
 ### M2 · 缓存纵深（2 天，4 个提交）
 
+> ### ⚠️ 2.1 已暂停：两个未查清的现象（2026-09-10 记录，避免重复踩）
+>
+> 2.1 的代码**写完并跑起来过**（`RedisConfig` + `@Cacheable` + 版本号失效 + 12 个用例），
+> 但用例存在**偶发失败**，按"不绿不提交"没有提交，改动暂存在 `git stash` 里。
+> 下面两条是已经查实/待查清的结论，下一次继续时从这里开始，不要从零重来：
+>
+> **① 已查实：`@CacheEvict(allEntries = true)` 不能用 —— Spring 的 `RedisCache.clear()` 是异步的**
+>    · 用一个"只碰缓存、不碰数据库"的探针实测（同一线程内顺序打印）：
+>      | 操作 | 立刻查 Redis | 500ms 后再查 |
+>      |---|---|---|
+>      | `cache.put(k, v)` | 已写入 | —— |
+>      | `cache.clear()` | **还在！** | 已删除 |
+>      | `cache.evict(k)` | 已删除 | —— |
+>    · 也就是说 `clear()` 返回时删除还没完成，后台线程继续删。
+>      业务表现是"发布文章后刷新前台，有时看得到有时看不到"，测试则是随机红
+>    · **显式指定 `BatchStrategies.keys()` 也不能把它变同步**（试过），
+>      说明这是该 API 的语义而不是配置问题
+>    · 因此 2.1 改成**版本号方案**：Redis 里存 `article:page:version`，
+>      缓存 key 形如 `article:page:v1:{版本号}:{分页条件}`，
+>      写操作只做一次 `INCR`（原子、同步）——版本一变旧 key 再也拼不出来，
+>      等于瞬间全部失效，且一条数据都不用删。写入代价也从 O(缓存条数) 降到 O(1)
+>
+> **② 待查清：缓存写入偶发"不落地"**
+>    · 现象 A：**空结果（total=0 的分页）完全没有被写进 Redis**——
+>      TRACE 日志已打印 `Creating cache entry`，但紧接着 `keys "*"` 是空的
+>    · 现象 B：非空结果的用例**大部分通过，但每次失败的用例不一样**；
+>      例如"造 8 条缓存"的用例偶尔只数到 7 条
+>    · 现象 C：单独跑某条用例时它通过，跟其他用例一起跑就不一定
+>    · 已排除：缓存管理器确为 `RedisCacheManager`、key 前缀与预期一致
+>      （`article:page:v1:...`）、`put` 本身是同步的、Docker 环境正常
+>    · 下一次的排查建议：启动一个真实的 Redis 容器并在测试期间跑
+>      `redis-cli MONITOR`，把**命令流**抓出来对照 —— 现在缺的就是"到底有没有发出 SET"
+>      这个直接证据；也可以先做一个最小复现（不依赖 Spring，直接 `RedisCache.put` 多次）
+>
+> **③ 顺带记录：这一版把"防缓存穿透"降级为待办**
+>   原本计划"空结果也缓存一个短 TTL"来防穿透，因为现象 A 没能验证，
+>   按"没验证过的行为不进提交"先不做。**当前版本没有防穿透**，这是已知缺口。
+>
+> 另外记一条环境事实：这次排查期间 Docker Desktop 自己退出了，
+> 导致测试报 `Could not find a valid Docker environment`（表现为
+> `ExceptionInInitializerError` 而不是"连不上容器"）。遇到这个报错先看 Docker 是否在跑。
+
 | # | 提交标题 | 内容 | 测试要求 |
 |---|---|---|---|
 | **2.1** | `新增RedisConfig与文章列表缓存，处理缓存穿透与雪崩` | `config/RedisConfig.java`（Jackson + **`JavaTimeModule`**）、`@EnableCaching`、`pagePublished` 加 `@Cacheable`（key 带 `article:v1:` 版本前缀）、空值缓存防穿透、TTL 随机防雪崩 | 新增 `ArticleCacheTest`：第二次请求不再打库、查不存在 id 不反复回源、TTL 有随机性、**`@AfterEach` 清 key**（`@Transactional` 管不了 Redis） |

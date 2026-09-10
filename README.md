@@ -23,6 +23,7 @@
 | 构建 | Maven |
 | ORM | MyBatis-Plus 3.5.17（含 `mybatis-plus-jsqlparser` 分页/条件构造） |
 | 数据库 | MySQL 8 |
+| 数据库迁移 | Flyway 12（`spring-boot-flyway` + `flyway-core` + `flyway-mysql`） |
 | 缓存 | Redis 7（当前用于缓存认证信息，见「认证与鉴权」） |
 | 安全 | Spring Security 7 + JWT（jjwt 0.12.6）+ BCrypt |
 | 参数校验 | Spring Validation（`spring-boot-starter-validation`） |
@@ -58,6 +59,7 @@
 - 全局异常处理（业务异常 / 参数校验 / 认证失败 / 账号禁用 / 权限不足 / 兜底）
 - 分页与排序参数安全处理（见「接口安全约定」）
 - 自动生成 OpenAPI 接口文档
+- **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
 - 集成测试 8 个类 **76 个用例**
 
 ### 🚧 规划中
@@ -69,7 +71,8 @@
 - 文章列表 / 详情缓存、浏览量异步落库
 - 站点统计接口
 - 归档
-- Docker 化部署与 CI
+- 容器化部署（Dockerfile）与 CI
+- 管理员初始化引导（空库目前无法产生管理员，见「怎么得到第一个管理员账号」）
 
 > 详细的开发计划、技术选型取舍与分阶段提交清单见仓库根目录 `TECH_ROADMAP.md`。
 
@@ -115,6 +118,14 @@ com.yigalaxy.yiguixingtu
     ├── entity/Category
     ├── mapper/CategoryMapper
     └── dto/CategoryVO
+
+src/main/resources
+├── application.properties
+└── db/migration
+    └── V1__init.sql                # Flyway 迁移脚本：user / category / article 建表
+
+docs/demo-data
+└── demo_users.sql                  # 本地演示数据（100 个用户），切勿在生产执行
 ```
 
 ## 快速开始
@@ -136,60 +147,42 @@ docker compose up -d
 - MySQL：`localhost:3310`（库 `yiguixingtu`，用户 `root/root`）
 - Redis：`localhost:6380`
 
-### 3. 初始化表结构
+### 3. 初始化表结构（Flyway 自动完成）
 
-> 目前还没有引入数据库迁移工具（Flyway 在计划中），首次启动前需手工建表。
-> 下面三张表是**当前代码实际使用的表结构**，与数据库完全一致。
+**不需要手工建表，也不需要执行任何 SQL 脚本。**
 
-```sql
--- ============ 用户表 ============
-CREATE TABLE `user` (
-  `id`          bigint       NOT NULL AUTO_INCREMENT COMMENT '主键',
-  `username`    varchar(64)  NOT NULL COMMENT '登录账号',
-  `password`    varchar(100) NOT NULL COMMENT '密码(BCrypt哈希)',
-  `nickname`    varchar(64)  DEFAULT NULL COMMENT '昵称',
-  `role`        varchar(20)  NOT NULL DEFAULT 'GUEST' COMMENT '角色：ADMIN/GUEST',
-  `status`      tinyint      NOT NULL DEFAULT '1' COMMENT '状态：1正常 0禁用',
-  `create_time` datetime     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-  `update_time` datetime     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-  `deleted`     tinyint      NOT NULL DEFAULT '0' COMMENT '逻辑删除',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_username` (`username`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户表';
+应用启动时由 **Flyway** 自动执行 `src/main/resources/db/migration/V1__init.sql`，
+建好 `user` / `category` / `article` 三张表，并把执行记录写进 `flyway_schema_history` 表。
+**空库直接启动就能用。**
 
--- ============ 文章分类表 ============
-CREATE TABLE `category` (
-  `id`          bigint       NOT NULL AUTO_INCREMENT COMMENT '分类ID',
-  `name`        varchar(50)  NOT NULL COMMENT '分类名称',
-  `description` varchar(255) DEFAULT NULL COMMENT '分类描述',
-  `sort`        int          NOT NULL DEFAULT '0' COMMENT '排序值，越小越靠前',
-  `create_time` datetime     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-  `update_time` datetime     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-  `deleted`     tinyint      NOT NULL DEFAULT '0' COMMENT '逻辑删除：0未删 1已删',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_name` (`name`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文章分类表';
+表结构的定义**只有一份**（就是那个 SQL 文件），开发库、测试库、生产库共用它——
+这也是引入 Flyway 的原因：以前 DDL 散在文档和聊天记录里，换台机器就要照抄一遍，
+抄漏一个索引也没人会发现。
 
--- ============ 文章表 ============
-CREATE TABLE `article` (
-  `id`          bigint       NOT NULL AUTO_INCREMENT COMMENT '文章ID',
-  `title`       varchar(200) NOT NULL COMMENT '标题',
-  `summary`     varchar(500) DEFAULT NULL COMMENT '摘要（列表页展示）',
-  `content`     longtext     COMMENT '正文（Markdown 源码）',
-  `cover`       varchar(255) DEFAULT NULL COMMENT '封面图URL',
-  `category_id` bigint       DEFAULT NULL COMMENT '分类ID',
-  `status`      tinyint      NOT NULL DEFAULT '0' COMMENT '状态：0草稿 1已发布',
-  `view_count`  int          NOT NULL DEFAULT '0' COMMENT '浏览量',
-  `is_top`      tinyint      NOT NULL DEFAULT '0' COMMENT '是否置顶：0否 1是',
-  `author_id`   bigint       DEFAULT NULL COMMENT '作者用户ID',
-  `create_time` datetime     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-  `update_time` datetime     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-  `deleted`     tinyint      NOT NULL DEFAULT '0' COMMENT '逻辑删除：0未删 1已删',
-  PRIMARY KEY (`id`),
-  KEY `idx_status_create` (`status`, `create_time`),
-  KEY `idx_category` (`category_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文章表';
 ```
+src/main/resources/db/migration/
+└── V1__init.sql          # user / category / article 三张表
+```
+
+命名规则是 `V{版本}__{描述}.sql`（**两个下划线**）。Flyway 靠文件名排序，
+执行过的版本记在 `flyway_schema_history` 里，不会重复执行。
+
+> ⚠️ **已经执行过的迁移脚本不要再改。** Flyway 会比对校验和，
+> 改动已应用的 `V1__init.sql` 会让下次启动直接报错。
+> 改表结构的正确做法是**新增** `V2__xxx.sql`，已上线的迁移脚本是历史。
+
+**关于 `baseline-on-migrate`（一个容易被误解的配置）**
+
+本地的库是先手工建好表、Flyway 才接进来的，属于"已存在的非空库"。
+不做处理的话，Flyway 会去执行 `V1__init.sql` 并因为"表已存在"直接失败。
+所以配置了 `baseline-on-migrate=true`，两种库状态的行为是：
+
+| 库的状态 | Flyway 的行为 |
+|---|---|
+| **空库**（新部署、Testcontainers 容器） | 正常执行 `V1__init.sql`：建表 + 写历史记录 |
+| **已有表的库**（本地开发库） | 打一个"基线 = 版本 1"的标记，**不执行 V1**，当作它已经应用过 |
+
+两种情形共用同一份配置，不需要分环境改。
 
 **两个建表细节，说明一下为什么这么设计：**
 
@@ -198,6 +191,10 @@ CREATE TABLE `article` (
    前台列表的查询条件是 `status = 1 ORDER BY create_time DESC`，
    字段顺序不能反——`status` 在前才能先用等值条件把范围缩小，
    再用 `create_time` 有序取出，避免 `ORDER BY` 触发额外排序。
+
+> **为什么没有给 `title` 建索引？** 搜索用的是 `LIKE '%关键词%'`，前置通配符会让 B+ 树索引完全失效，
+> 真要解决得靠全文索引或 Elasticsearch。加一个用不上的索引只会拖慢写入，
+> 还容易在 `EXPLAIN` 里造成"已经优化过"的错觉。
 
 #### 可选：导入演示数据
 
@@ -283,6 +280,23 @@ docker exec -it yiguixingtu-redis redis-cli DEL auth:user:<上一步查到的 id
 | Redis | `localhost:6380` |
 | 分页插件 | MyBatis-Plus `PaginationInnerInterceptor`（已注册） |
 | SQL 日志 | `mybatis-plus.configuration.log-impl=StdOutImpl`（开发期打印 SQL） |
+
+#### 数据库迁移（Flyway）
+
+```properties
+spring.flyway.enabled=true
+spring.flyway.locations=classpath:db/migration
+spring.flyway.baseline-on-migrate=true
+spring.flyway.baseline-version=1
+```
+
+`baseline-on-migrate` 的作用见上面「初始化表结构」一节：让"空库自动建表"和
+"已有的库不重复建表"这两件事用同一份配置解决。
+
+> 💡 **一个容易踩的坑**：Spring Boot 4 把自动配置按技术拆成了独立模块，
+> 所以除了 `flyway-core` 和 `flyway-mysql`，**必须再加 `spring-boot-flyway`**。
+> 少了它编译和启动都不报错，但 Flyway 会**一声不响地不执行**
+> （`flyway_schema_history` 表根本不出现）——这种"静默失效"最难查。
 
 #### 🔑 JWT 密钥配置（重要）
 
@@ -457,11 +471,15 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 ## 数据库表
 
-| 表 | 说明 | 关键索引 |
-|----|------|---------|
-| `user` | 用户 | `uk_username` 唯一 |
-| `category` | 文章分类 | `uk_name` 唯一 |
-| `article` | 文章（含草稿与浏览量） | `idx_status_create(status, create_time)`、`idx_category` |
+| 表 | 说明 | 关键索引 | 建表者 |
+|----|------|---------|--------|
+| `user` | 用户 | `uk_username` 唯一 | Flyway `V1__init.sql` |
+| `category` | 文章分类 | `uk_name` 唯一 | Flyway `V1__init.sql` |
+| `article` | 文章（含草稿与浏览量） | `idx_status_create(status, create_time)`、`idx_category` | Flyway `V1__init.sql` |
+| `flyway_schema_history` | Flyway 自己的迁移记录表 | —— | Flyway 自动创建 |
+
+> 表结构**不要手动改**。需要改表就新增一个迁移脚本（`V2__xxx.sql`），
+> 让开发库、测试库、生产库走同一条路径。
 
 ## 测试
 

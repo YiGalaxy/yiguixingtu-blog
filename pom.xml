@@ -67,6 +67,31 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- ==================== 数据库版本化迁移（Flyway） ==================== -->
+        <!--
+          【⚠️ 这里要三个依赖，少一个都不行 —— 踩过坑，记录下来】
+          ① spring-boot-flyway：Spring Boot 的 Flyway 自动配置。
+             Spring Boot 4 把自动配置按技术拆成了独立模块（spring-boot-jdbc、
+             spring-boot-data-redis 同理），它不再包含在 spring-boot-autoconfigure 里。
+             只加 ② ③ 的话，编译和启动都不报错，但 Flyway 就是【一声不响地不执行】——
+             flyway_schema_history 表根本不会出现，最难查的就是这种"静默失效"。
+          ② flyway-core：Flyway 引擎本身。
+          ③ flyway-mysql：Flyway 10 起把各数据库方言拆成了独立模块，
+             核心包不含 MySQL 支持，少了它会报 "Unsupported Database: MySQL"。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+        </dependency>
+
         <!-- ==================== 缓存（Redis） ==================== -->
         <!-- Spring Boot Redis 依赖 -->
         <dependency>

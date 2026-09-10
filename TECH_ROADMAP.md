@@ -159,9 +159,9 @@
 | 3 | **Spring 事件 + `@TransactionalEventListener(AFTER_COMMIT)` + `@Async`** | `event/OpLogEvent`、`listener/OpLogListener`；线程池走 `spring.task.execution.*` 配置 | 操作审计用 **Spring 原生事件机制**，**不自研 `@Aspect`**；`AFTER_COMMIT` 天然解决"业务回滚了日志却留下"的老问题 | 4.2 | 事件驱动、异步解耦 | M4 后 |
 | 4 | **`@Scheduled`** | `task/ViewCountSyncTask` | 详情接口每次都 `UPDATE view_count`，读接口带写操作 | 2.3 | 定时任务 + 批量落库 | M2 后 |
 | 5 | **Spring Cache + `RedisConfig`** | `config/RedisConfig`、`@Cacheable` / `@CacheEvict` | 现在**连 `RedisConfig` 都不存在**，`@EnableCaching` 没开，Redis 只有一处手写调用 | 2.1 · 2.2 | 缓存三件套、缓存一致性 | M2 后 |
-| 6 | **Testcontainers** | `AbstractIntegrationTest` | 76 个用例强连本机 3310/6380，没起容器全红，**CI 跑不了** | 1.1 | 容器化集成测试 | M1 后 |
-| 7 | **GitHub Actions + JaCoCo** | `.github/workflows/ci.yml` | 有测试却没有 CI，覆盖率也没数字；之后接 CD 到 ECS（B6） | 1.2 · B6 | CI/CD、代码覆盖率 | M1 后 |
-| 8 | **Flyway** | `db/migration/V1__init.sql` | 表是手工建的，DDL 散在 md 里，换台机器就要照抄 SQL | 1.3 | Schema 版本化 | M1 后 |
+| 6 | **Flyway** | `db/migration/V1__init.sql` | 表是手工建的，DDL 散在 md 里，换台机器就要照抄 SQL；**也是 Testcontainers 的前置**（容器起来是空库，没迁移就没表） | 1.1 | Schema 版本化 | M1 后 |
+| 7 | **Testcontainers** | `AbstractIntegrationTest` | 76 个用例强连本机 3310/6380，没起容器全红，**CI 跑不了** | 1.2 | 容器化集成测试 | M1 后 |
+| 8 | **GitHub Actions + JaCoCo** | `.github/workflows/ci.yml` | 有测试却没有 CI，覆盖率也没数字；之后接 CD 到 ECS（B6） | 1.3 · B6 | CI/CD、代码覆盖率 | M1 后 |
 | 9 | **阿里云 OSS SDK** | `upload` 模块 | 封面图目前只能填外链 URL，没有上传能力 | 3.2 | 对象存储、RAM 最小权限、签名 URL | M3 后 |
 | 10 | **Dockerfile 多阶段 + 三容器 compose** | `Dockerfile`、`docker-compose.yaml` | compose 现在只有 mysql/redis，没有 backend、没有 healthcheck/restart | 3.3 | 容器化部署 | M3 后 |
 | 11 | **Micrometer Tracing（Brave）+ logback 结构化日志** | 依赖 `micrometer-tracing-bridge-brave` + `logback-spring.xml` | 全项目**没有任何日志配置**；**traceId 不自研 Filter**，由 Spring Boot 官方链路追踪自动注入，日志 pattern 直接取用 | 5.1 | 链路追踪、可观测性 | M5 后 |
@@ -188,7 +188,7 @@
 | **项目经历 · 技术栈框** | 加 `Testcontainers`、`Flyway`、`GitHub Actions`、`Resilience4j`、`Redisson`、`阿里云 ECS / OSS` | 都是"项目里真有一处配置/代码能指出来"的 |
 | **技能栏 · 后端开发** | 加 `Spring AOP`、`Resilience4j` | `Spring AOP` 指 `@Transactional` / `@PreAuthorize` 这些**现成的**切面；`Resilience4j` 对应 4.1 的限流与熔断降级 |
 | **技能栏 · 数据库与缓存** | `Redis` 从"缓存（Hash + TTL、主动失效）"升级为 **"缓存穿透 / 击穿 / 雪崩"**，并加 `Redisson 分布式锁` | 对应 2.1 / 2.2 / 5.4 |
-| **技能栏 · 工程化与测试** | 加 `Testcontainers`、`Flyway`、`GitHub Actions + JaCoCo`、`Micrometer Tracing` | 对应 1.1 / 1.2 / 1.3 / 5.1 |
+| **技能栏 · 工程化与测试** | 加 `Flyway`、`Testcontainers`、`GitHub Actions + JaCoCo`、`Micrometer Tracing` | 对应 1.1 / 1.2 / 1.3 / 5.1 |
 | **技能栏 · MySQL** | 加"索引优化" | 对应 5.3（D1） |
 | **了解行** | `Redis 高并发` **移出**（已升级为掌握级）；保留 `Spring Cloud`，加 `线程池`、`RabbitMQ`，**加 `Sentinel`** | 知识声明；`Sentinel` 写上去的作用是**给"为什么不用它"留个话头**（见 §20）；每一项都要先答得上 §1.4 的三问 |
 
@@ -213,10 +213,11 @@
 
 ### 1.3 推荐顺序 —— 先让"已经做好的东西"被看见，再加新东西
 
-1. **G（半天）**：README / BACKEND_PLAN 与代码对齐。
+1. **M0 = G（半天）**：README / BACKEND_PLAN 与代码对齐。
    现状是"**代码写得比文档好**"——权限三态、草稿隔离、逻辑删除的唯一索引处理、旧 token 即时撤销，这些在 README 里一个字都没有。**这是全项目性价比最高的一步。**
-2. **B1 + B2（1 天）**：Testcontainers + CI，让 76 个用例在任何机器和 GitHub Actions 上都能跑。
+2. **M1 = B3 + B1 + B2（1 天）**：Flyway → Testcontainers → CI，让 76 个用例在任何机器和 GitHub Actions 上都能跑。
    这一步不改业务代码，风险最低，却把"我最强的资产"从"只能在我电脑上演示"变成"点开仓库就能验证"。**建议排在缓存之前。**
+   （Flyway 必须在 Testcontainers 前面：容器起来是空库，没有迁移就没有表。）
 3. **A1 + A2（2 天）**：缓存纵深（三件套 + 浏览量计数），做完技能栏才升级得诚实。
 4. **E1（半天）**：多环境配置，是 B4 / B5 的前置。
 5. **B5（1 天）**：阿里云 ECS 上线，让徽章里那四个字「已上线」变成真的。
@@ -880,7 +881,7 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 - ❌ 标题里塞 200 字 —— 长内容应该放正文分节
 - ❌ 正文只写"改了什么"不写"为什么" —— 这个仓库的标准比这高
 
-**完整示例（M1.1 那次提交，可直接照这个格式写）**
+**完整示例（M1.2 那次提交，可直接照这个格式写）**
 
 ```
 新增Testcontainers容器化测试环境，移除对本地MySQL与Redis的依赖
@@ -1011,14 +1012,21 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 
 ### M1 · 让已有资产可验证（1 天，3 个提交）
 
+> ⚠️ **执行顺序相对初版做了调整：Flyway 提到 Testcontainers 前面。**
+> 原因很实在：Testcontainers 起的是一个**全新的空库**，里面一张表都没有。
+> 如果先做 Testcontainers，76 个用例会因为"表不存在"全红；
+> 要么给测试单独写一份建表脚本（**表结构就有了两份定义，迟早不一致**），
+> 要么先让 Flyway 把建表这件事变成"启动时自动完成"——**开发库、测试库、生产库共用同一份 `V1__init.sql`**。
+> 所以顺序是 **1.1 Flyway → 1.2 Testcontainers → 1.3 CI**。
+
 | # | 提交标题 | 内容 | 测试要求 |
 |---|---|---|---|
-| **1.1** | `新增Testcontainers容器化测试环境，移除对本地MySQL与Redis的依赖` | `application-test.properties`、`AbstractIntegrationTest` 基类（static 容器 + `@DynamicPropertySource`）、8 个测试类继承 | **`docker compose down` 之后 76 个用例仍全绿**（这就是验收） |
-| **1.2** | `新增GitHub Actions持续集成与JaCoCo覆盖率报告` | `.github/workflows/ci.yml`（JDK **17**，与 `pom.xml` 的 `java.version=17` 一致）、JaCoCo 插件、surefire 报告上传、README 徽章 | CI 上跑通；本地 `mvn -B verify` 能产出覆盖率报告 |
-| **1.3** | `新增Flyway数据库版本化迁移，统一表结构初始化方式` | `src/main/resources/db/migration/V1__init.sql`（user/category/article 现有结构）、`baseline-on-migrate=true`；README 删掉手工建表 SQL | 空库启动自动建表；现有 76 用例仍全绿 |
+| **1.1** | `新增Flyway数据库版本化迁移，统一表结构初始化方式` | `src/main/resources/db/migration/V1__init.sql`（user/category/article 现有结构，**照数据库实录**）、`baseline-on-migrate=true`；README 删掉手工建表 SQL | 空库启动自动建表；现有 76 用例仍全绿 |
+| **1.2** | `新增Testcontainers容器化测试环境，移除对本地MySQL与Redis的依赖` | `AbstractIntegrationTest` 基类（**单例容器** + `@DynamicPropertySource`，不用 `@Testcontainers` 的按类启停）、8 个测试类继承 | **`docker compose down` 之后 76 个用例仍全绿**（这就是验收） |
+| **1.3** | `新增GitHub Actions持续集成与JaCoCo覆盖率报告` | `.github/workflows/ci.yml`（JDK **17**，与 `pom.xml` 的 `java.version=17` 一致）、JaCoCo 插件、surefire 报告上传、README 徽章 | CI 上跑通；本地 `mvn -B verify` 能产出覆盖率报告 |
 
 > **README 同步（3 个提交各过一遍 R5 清单）**
-> 1.1 → 「测试」节补容器化说明（不再需要先 `docker compose up -d`）、「环境要求」补 Docker；1.2 → 顶部加 CI 徽章 + 新增构建/覆盖率说明；1.3 → **删掉手工建表 SQL**，改成"启动时 Flyway 自动迁移"，配置表补 Flyway 项。
+> 1.1 → **删掉手工建表 SQL**，改成"启动时 Flyway 自动迁移"，配置表补 Flyway 项；1.2 → 「测试」节补容器化说明（不再需要先 `docker compose up -d`）、「环境要求」补 Docker；1.3 → 顶部加 CI 徽章 + 新增构建/覆盖率说明。
 
 ### M2 · 缓存纵深（2 天，4 个提交）
 
@@ -1291,9 +1299,9 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 | 后端提交 | 前端提交 | 联调验收动作（真实起 8082 + 3000） |
 |---|---|---|
 | **0.1** 文档对齐 | **web-0.1 ~ w0.3** 仓库抢救 | 前端 `npm run dev` 能起；首页 / 详情 / 后台三个页面都能打开并拉到数据 |
-| **1.1** Testcontainers | —— | 不涉及前端 |
-| **1.2** CI + JaCoCo | **w1.2** 前端 CI | 两个仓库的 Actions 都是绿的 |
-| **1.3** Flyway | —— | 用一个**全新空库**启动后端 → 前端首页仍能正常拉到文章（说明建表迁移没问题） |
+| **1.1** Flyway | —— | 用一个**全新空库**启动后端 → 前端首页仍能正常拉到文章（说明建表迁移没问题） |
+| **1.2** Testcontainers | —— | 不涉及前端 |
+| **1.3** CI + JaCoCo | **w1.2** 前端 CI | 两个仓库的 Actions 都是绿的 |
 | **2.1** 列表缓存 | **w2.1** 分类筛选 + URL 同步 | 点分类 → 列表过滤正确；刷新页面筛选状态还在；搜索 → 清除 → 恢复正常 |
 | **2.2** 详情缓存 | （w2.1 已覆盖） | 后台改标题 → 前台刷新详情**立刻**是新标题（不必等 TTL 到期） |
 | **2.3** 浏览量计数 | **w2.2** 统计接口 | 前台刷详情 → 数字 +1；后台 / 概览的数字与 DB 最终值一致 |

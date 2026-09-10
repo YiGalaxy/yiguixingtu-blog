@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
+import com.yigalaxy.yiguixingtu.article.cache.ArticleViewCounter;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
 import com.yigalaxy.yiguixingtu.category.entity.Category;
@@ -35,9 +36,15 @@ public class ArticleServiceImpl implements ArticleService {
     private final ArticleMapper articleMapper;
     private final CategoryMapper categoryMapper;
 
-    public ArticleServiceImpl(ArticleMapper articleMapper, CategoryMapper categoryMapper) {
+    /** 浏览量计数器：详情页只写它（Redis），落库交给 ViewCountSyncTask */
+    private final ArticleViewCounter viewCounter;
+
+    public ArticleServiceImpl(ArticleMapper articleMapper,
+                              CategoryMapper categoryMapper,
+                              ArticleViewCounter viewCounter) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
+        this.viewCounter = viewCounter;
     }
 
     // =================================================================
@@ -111,8 +118,28 @@ public class ArticleServiceImpl implements ArticleService {
             throw new BusinessException(ResultCode.ARTICLE_NOT_FOUND);
         }
 
-        increaseViewCount(id);
-        return toVO(article, getCategoryName(article.getCategoryId()));
+        // 【浏览量：只记 Redis，不写库】
+        //   原来这里是一句 UPDATE article SET view_count = view_count + 1，
+        //   也就是"详情页是读接口，却在每次请求里写一次库"。
+        //   后果是热门文章被频繁打开时，这条 UPDATE 成为最热的写语句，
+        //   而且并发访问同一篇会在同一行上排队等锁 —— 看文章被写操作拖慢。
+        //
+        //   现在只做一次 Redis INCR（内存操作、无行锁），
+        //   由 ViewCountSyncTask 每 5 分钟批量落库。
+        //
+        // 【注意顺序：先 INCR 再读增量】
+        //   这样返回的数字是"包含本次访问"的，用户刷新能看到自己这一下被算进去了。
+        //   （原来是先读快照再加一，所以第一次访问显示的是 0 —— 见 ArticlePublicTest
+        //    里那条用例，它跟着这次改动一起改了断言。）
+        viewCounter.increment(id);
+
+        // 返回给前端的浏览量 = 库里的快照 + Redis 里还没落库的增量。
+        // 只返回库里的值的话，用户会看到"我刷新了但数字不动"——
+        // 因为最新的计数还没到落库时间。
+        ArticleVO vo = toVO(article, getCategoryName(article.getCategoryId()));
+        long dbCount = article.getViewCount() == null ? 0L : article.getViewCount();
+        vo.setViewCount((int) (dbCount + viewCounter.pending(id)));
+        return vo;
     }
 
     @Override
@@ -217,21 +244,13 @@ public class ArticleServiceImpl implements ArticleService {
     //  私有工具方法
     // =================================================================
 
-    /**
-     * 浏览量 +1。
-     *
-     * 【为什么用 SQL 自增，而不是"查出来 → 加一 → 写回去"？】
-     * 后者在并发下会丢计数：
-     *   请求A 读到 100，请求B 也读到 100，
-     *   A 写回 101，B 也写回 101 —— 两次访问只增加了 1。
-     * 交给数据库执行 view_count = view_count + 1，
-     * 这个"读-改-写"是原子的，不会丢。
-     */
-    private void increaseViewCount(Long id) {
-        articleMapper.update(null, new LambdaUpdateWrapper<Article>()
-                .setSql("view_count = view_count + 1")
-                .eq(Article::getId, id));
-    }
+    // 【这里原来有一个 increaseViewCount(private)，已经删掉】
+    //   它每次访问详情都会执行一条 UPDATE ... SET view_count = view_count + 1。
+    //   那个 SQL 本身是对的（用数据库自增而不是"读出来加一写回去"，并发不丢计数），
+    //   问题在于"这个写操作出现在了一个读接口里"。
+    //   现在改成 ArticleViewCounter.increment()（只写 Redis，内存操作无行锁），
+    //   由 ViewCountSyncTask 每 5 分钟批量落库 —— 写库的原子性由那边的
+    //   setSql("view_count = view_count + ?") 保证，思路是一样的。
 
     /**
      * 校验分类是否存在（不传分类则跳过）

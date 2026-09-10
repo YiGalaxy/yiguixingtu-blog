@@ -241,22 +241,28 @@ class ArticlePublicTest extends AbstractIntegrationTest {
     }
 
     @Test
-    @DisplayName("⑩ 浏览量：每访问一次详情，库里 view_count 真的 +1")
+    @DisplayName("⑩ 浏览量：详情只记 Redis 不写库，但返回的数字包含本次访问")
     void detail_shouldIncreaseViewCount() throws Exception {
         Article a = insertArticle("浏览量文章", 1);
 
-        // 第一次访问
+        // 第一次访问：库里的快照是 0，加上"本次这一次" → 返回 1
         mockMvc.perform(get("/article/{id}", a.getId()))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.viewCount").value(0));
-
-        // 第二次访问（返回的是本次读取时的快照，比上一次 +1）
-        mockMvc.perform(get("/article/{id}", a.getId()))
                 .andExpect(jsonPath("$.data.viewCount").value(1));
 
-        // 直接查库：两次访问，库里应该是 2
-        assertEquals(2, articleMapper.selectById(a.getId()).getViewCount(),
-                "访问两次，库里的 view_count 应该正好是 2（用 SQL 自增才不会并发丢计数）");
+        // 第二次：库仍是 0，Redis 里累计 2 → 返回 2
+        mockMvc.perform(get("/article/{id}", a.getId()))
+                .andExpect(jsonPath("$.data.viewCount").value(2));
+
+        // 【这条断言跟着改动改了，说明为什么】
+        //   原来这里断言的是"库里 view_count == 2"，因为详情接口每次都 UPDATE 数据库。
+        //   现在详情接口【不再写库】了（这正是 §0.2 第 3 项那个缺口：
+        //   读接口里带写操作、并发时还要在同一行上等锁），
+        //   改成只做一次 Redis INCR，由 ViewCountSyncTask 每 5 分钟批量落库。
+        //   所以库里此刻应该【还是 0】—— 增量还在 Redis 里等着同步。
+        //   想看"落库之后库里是多少"，见 ArticleViewCountTest 里那几条用例。
+        assertEquals(0, articleMapper.selectById(a.getId()).getViewCount(),
+                "访问详情不该再写数据库；增量此时还在 Redis 里等着定时落库");
     }
 
     // ================================================================

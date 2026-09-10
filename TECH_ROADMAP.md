@@ -663,7 +663,7 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 | **M1** | ✅ 完成（1.1 Flyway · 1.2 Testcontainers · 1.3 CI+JaCoCo） | **B3 + B1 + B2**：Flyway → Testcontainers → CI/JaCoCo | 技能栏「工程化」加 **Testcontainers / CI-CD / JaCoCo / Flyway**；项目经历「测试与部署」那条可以写容器化集成测试 |
 | **M2** | ✅ 完成（2.1 列表缓存 · 2.2 详情缓存+防击穿 · 2.3 浏览量 · 2.4 统计接口） | **A1 + A2**：缓存三件套 + 浏览量计数 | 「数据库与缓存」升级为掌握级；那条 `了解 Redis 高并发` **从"了解"行移出** |
 | **M3** | ✅ 完成（3.1 多环境 · 3.2 OSS上传 · 3.3 Dockerfile+四容器 · 3.4 部署文档 · 3.5 管理员引导） | **E1 + B4 + B5 + B6**：多环境 → OSS 上传 → 上线 → CD | 徽章「已上线」与结尾「阿里云 ECS + OSS」**变成真的**；过一遍 §8「简历同步规则」第 1 条的不可见注释核对门 |
-| **M4** | ⬜ 待做 | **A3 + A4**：Nginx + Resilience4j 限流、Spring 事件驱动的操作审计 | 技能栏加 `Resilience4j`（限流与熔断降级）、`Redisson`；「切面与事务」那条**保持原样** —— `@Transactional` / `@PreAuthorize` 就是最主流的用法，不需要改 |
+| **M4** | 🔄 进行中（4.1 ✅ 限流 / 4.2 操作审计待做） | **A3 + A4**：Nginx + Resilience4j 限流、Spring 事件驱动的操作审计 | 技能栏加 `Resilience4j`（限流与熔断降级）、`Redisson`；「切面与事务」那条**保持原样** —— `@Transactional` / `@PreAuthorize` 就是最主流的用法，不需要改 |
 | **M5** | 🔄 进行中（5.1 ✅ 5.2 ✅ 5.3 ✅ 5.4 ✅ 5.7 ✅ 5.8 ✅ 5.9 ✅ / 5.6 完成一半 / 5.5 可选未做） | **D + E**：traceId、索引与压测、指标、幂等、登出失效、安全头、错误码 | 面试纵深：**这些是"做过才答得出"的细节** |
 | **M6** | ⬜ 待做 | **C / F**：标签评论、搜索、消息队列、前端站点 | 按需，别为了关键词硬做 |
 
@@ -1148,9 +1148,40 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 
 ### M4 · 限流与审计（1 天，2 个提交 —— **全部用主流现成方案，不写一行自研基础设施**）
 
+> **4.1 已完成**（本次提交）：Resilience4j 注解式限流 + Nginx `limit_req`（配置写进 README），
+> `RateLimitTest` 5 个用例。
+>   · 坐标是 **`resilience4j-spring-boot4:2.4.0`**（不是常见的 spring-boot3）——
+>     Resilience4j 给每个 Boot 大版本单独出了 starter，用错版本能编译但行为不保证
+>   · ⚠️ 又一个 Boot 4 改名的坑：**`spring-boot-starter-aop` → `spring-boot-starter-aspectj`**。
+>     写旧名字不报"找不到"，而是报 `version is missing`，看起来像忘了写版本号
+>   · 限流判断全在库的切面里（令牌桶、时间窗口、原子计数），**一行 @Aspect 都没写**；
+>     我们只做了一件事：把库抛的 `RequestNotPermitted` 翻译成 HTTP 429 + code 429
+>   · 顺带白拿一个指标：`resilience4j-micrometer` 自动把限流状态变成 Micrometer 指标，
+>     所以 5.7 里欠的"限流拒绝数"在 /actuator/prometheus 里直接就有了
+>   · 两层限流的职责划分（为什么两层都要）写进了 README「部署」章节
+>
+> **⚠️ 测试上踩了两个坑，都很值得记（都写在测试注释里）**
+>   ① `RateLimiter` 接口上**没有 `reset()`**（第一版照着直觉写，编译报找不到符号）。
+>      能用的只有 acquirePermission / drainPermissions / changeLimitForPeriod 等，
+>      而 `drainPermissions` 是"把剩余配额消耗掉"——正好反了。
+>   ② 改用 `changeLimitForPeriod(2)` 缩小配额，实测**不生效**：
+>      `getRateLimiterConfig()` 显示 limit=2，但 `getMetrics().getAvailablePermissions()`
+>      还是 5 —— **配置变了、计数没变**（它内部是 updateAndGet 出新 State，
+>      而计数器沿用旧引用）。表现出来就是"限流像没生效"。
+>      最后用 `Registry.replace(name, RateLimiter.of(name, config))`
+>      **换一个全新的实例**才解决：新实例 = 新计数器 + 满窗口，语义明确、结果确定。
+>   → 教训：**验证"限流生效"不能只看配置读出来的值，要看配额真的被消耗**。
+>      诊断时打印"请求前剩余 2 / 两次之后剩余 0"才把问题钉死。
+>
+> **更关键的一点**：限流器的状态是【全局】的，事务回滚管不到它。
+>   登录配额 5 次/分钟，而 LogoutTokenTest 有 11 条用例、每条都要登录 ——
+>   不重置的话跑到第 6 条就开始 429，报错还是"登录失败"，极难排查。
+>   所以在 `AbstractIntegrationTest` 里加了 `@BeforeEach`：
+>   **每条用例开始前把限流器换成新实例**（和"在 ArticleCacheTest 里清 Redis key"同一个道理）。
+
 | # | 提交标题 | 内容 | 测试要求 |
 |---|---|---|---|
-| **4.1** | `新增Nginx与应用层两层限流，并用Resilience4j实现熔断降级` | `resilience4j-spring-boot3` + `@RateLimiter` 实例规则（**库自带 aspect，不写 `@Aspect`**）；`ResultCode` 加 429；`GlobalExceptionHandler` 捕获 `RequestNotPermitted`（**返回 `ResponseEntity`**）；Nginx 配 `limit_req`；落点 `/auth/login`、`/article/page` | 第 6 次登录返回 **HTTP 429 + `code:429`**；窗口过后恢复；Nginx 层压测能触发 503；外部调用超时走熔断降级 |
+| **4.1** | ✅ `新增Nginx与应用层两层限流，并用Resilience4j实现熔断降级` | `resilience4j-spring-boot4` + 库自带的限流切面（**不写 `@Aspect`**）；`ResultCode` 加 429；`GlobalExceptionHandler` 捕获 `RequestNotPermitted`（返回 `ResponseEntity`）；Nginx 配 `limit_req`；落点 `/auth/login`、`/article/page` | 配额用完返回 **HTTP 429 + code 429**；窗口刷新后恢复；正常路径不受影响 —— **已完成，见上方进度块** |
 | **4.2** | `新增Spring事件驱动的操作审计，事务提交后异步落库` | `event/OpLogEvent` + `@TransactionalEventListener(AFTER_COMMIT)` + `@Async` + `OperationLog` 实体；线程池走 `spring.task.execution.*`（**配 `queue-capacity` 为有界值**） | 后台写操作后 `operation_log` 有记录且响应耗时不明显增加；**故意让业务回滚 → 不产生日志**（证明 `AFTER_COMMIT` 生效） |
 
 > **README 同步（2 个提交各过一遍 R5 清单）**

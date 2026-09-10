@@ -179,6 +179,54 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
+        <!-- ==================== 限流与熔断降级（Resilience4j） ==================== -->
+        <!--
+          【用途】给接口加"应用层限流"：某个接口被刷得太狠时直接拒绝多余请求，
+          保护后面的数据库和 Redis 不被打穿。
+
+          【⚠️ 坐标为什么是 spring-boot4 而不是常见的 spring-boot3】
+          Resilience4j 为每个 Spring Boot 大版本单独出了一个 starter
+          （spring-boot2 / spring-boot3 / spring-boot4），因为自动配置要分别适配。
+          本项目是 Boot 4.1.1，**必须用 spring-boot4 这个**：
+          它的 POM 依赖的是 spring-core 7.x + spring-boot-autoconfigure 4.x，正好对上；
+          写成 spring-boot3 会拿 Boot 3 时代的适配层跑 Boot 4，属于能编译但行为不保证。
+
+          【它带来了什么】
+            · @RateLimiter / @CircuitBreaker / @Retry / @Bulkhead 这些注解
+              以及它们的 AOP 切面 —— **都是库自带的，不需要自己写 @Aspect**
+            · resilience4j-micrometer：限流/熔断的状态会自动变成 Micrometer 指标，
+              于是在 /actuator/prometheus 里能直接看到"被限流拒绝了多少次"，
+              不用自己埋点
+        -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot4</artifactId>
+            <version>2.4.0</version>
+        </dependency>
+
+        <!--
+          【为什么显式加 AOP starter，而不是指望传递依赖】
+          Resilience4j 的注解靠 AspectJ 切面生效，需要两个前提：
+            ① aspectjweaver 在 classpath 上
+            ② Spring 开启 AOP 自动代理（Boot 的 AopAutoConfiguration 会开，
+               但它本身就以"classpath 上有 aspectjweaver"为前提）
+          当前这点确实满足（aspectjweaver 通过 micrometer-tracing 传进来了），
+          但那是【别人家的传递依赖】—— 哪天链路追踪换了实现，限流就会悄悄失效，
+          而且失效得毫无征兆：注解还在，就是不生效。
+          显式声明之后，这条依赖变成我们自己的责任，不会再被别人的改动带走。
+
+          ⚠️【注意坐标在 Boot 4 里改名了】
+            以前叫 spring-boot-starter-aop，Boot 4 改成了 spring-boot-starter-aspectj。
+            写旧名字不会报"找不到"，而是报 'dependencies.dependency.version' ...
+            is missing（因为新版 BOM 里已经不管那个 artifact 的版本了），
+            看起来像"忘了写 version"，其实是用错了坐标 —— 又一次和 Boot 4 的
+            模块调整打交道（前面 Flyway、micrometer-tracing、resilience4j 都遇到过）。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aspectj</artifactId>
+        </dependency>
+
         <!-- ==================== 指标暴露（Prometheus） ==================== -->
         <!--
           【用途】把应用内部的状态暴露成 Prometheus 能抓的格式（/actuator/prometheus）。

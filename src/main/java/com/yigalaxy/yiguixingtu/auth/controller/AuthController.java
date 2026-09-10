@@ -8,6 +8,7 @@ import com.yigalaxy.yiguixingtu.auth.dto.RegisterRequest;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.common.Result;
 import com.yigalaxy.yiguixingtu.common.metrics.BusinessMetrics;
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
 import com.yigalaxy.yiguixingtu.user.entity.User;
 import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
 import com.yigalaxy.yiguixingtu.user.service.UserService;
@@ -54,8 +55,21 @@ public class AuthController {
 
     /**
      * 用户登录：校验用户名密码，成功后签发 token
+     *
+     * 【限流：5 次 / 分钟（配置在 application.properties，那里写了为什么是这个数）】
+     *   登录是唯一一个"可以被反复尝试、且猜对了就有收益"的公开接口 ——
+     *   暴力破解的入口。加一个很小的全局配额之后，脚本爆破就失去意义了。
+     *
+     *   ⚠️ 这里的配额是【整站】的，不是"每个 IP 5 次"：
+     *   Resilience4j 的 RateLimiter 是进程级计数器，它不知道请求来自谁。
+     *   按 IP 的细粒度限制由 Nginx 的 limit_req 负责（见 README 部署章节），
+     *   两层互补 —— 理由写在配置文件的注释里。
+     *
+     *   注解由 Resilience4j 自带的切面处理，配额用完时它抛 RequestNotPermitted，
+     *   再由 GlobalExceptionHandler 翻译成 HTTP 429。**不需要写任何 @Aspect。**
      */
-    @Operation(summary = "用户登录")
+    @Operation(summary = "用户登录（有限流）")
+    @RateLimiter(name = "loginRateLimiter")
     @PostMapping("/login")
     public Result<LoginVO> login(@Valid @RequestBody LoginRequest request) {
         // 认证（失败会自动抛异常，由全局异常处理器统一转成 Result）

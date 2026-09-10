@@ -6,6 +6,7 @@ import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
 import com.yigalaxy.yiguixingtu.article.service.ArticleService;
 import com.yigalaxy.yiguixingtu.common.Result;
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
@@ -35,7 +36,20 @@ public class ArticleController {
         this.articleService = articleService;
     }
 
-    @Operation(summary = "已发布文章分页")
+    /**
+     * 前台文章分页列表。
+     *
+     * 【限流：300 次 / 分钟（配置在 application.properties）】
+     *   它是全站最热的读接口、又是公开的：首页、分类页、搜索都打它。
+     *   缓存命中时成本很低，所以额度给得宽松；但再宽松也要有上限 ——
+     *   万一缓存被穿透（有人拿随机关键词刷），请求会全落到数据库上，
+     *   这一层就是防止"缓存失效 + 高频访问"把数据库打死的那道闸。
+     *
+     *   和登录接口一样，这是【整站】配额而不是按 IP 的配额，
+     *   按 IP 那层在 Nginx（见 README 部署章节的 limit_req 配置）。
+     */
+    @Operation(summary = "已发布文章分页（有限流）")
+    @RateLimiter(name = "articlePageRateLimiter")
     @GetMapping("/page")
     public Result<IPage<ArticleVO>> page(ArticleQuery query) {
         return Result.success(articleService.pagePublished(query));

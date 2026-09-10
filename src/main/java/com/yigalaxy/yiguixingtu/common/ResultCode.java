@@ -47,6 +47,17 @@ public enum ResultCode {
      */
     DUPLICATE_SUBMIT(429, "请求正在处理中，请勿重复提交"),
 
+    /**
+     * 被限流了（应用层的 Resilience4j 或 Nginx 拦下了多余请求）。
+     *
+     * 【为什么和 DUPLICATE_SUBMIT 共用 429，但文案不同】
+     *   429 在 HTTP 里的语义就是"请求太多了"，这两个场景都符合：
+     *     · DUPLICATE_SUBMIT —— 同一个提交动作来得太密（幂等键还在处理中）
+     *     · TOO_MANY_REQUESTS —— 这个接口整体被刷得太狠
+     *   状态码相同、message 分开，前端可以分别提示"请勿重复提交"和"稍后再试"。
+     */
+    TOO_MANY_REQUESTS(429, "请求过于频繁，请稍后再试"),
+
     USERNAME_EXISTS(400,"账号已存在"),
 
     USER_NOT_FOUND(404,"用户不存在"),

@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-193%20passing-success)
+![Tests](https://img.shields.io/badge/tests-198%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **193 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **198 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -37,6 +37,7 @@
 | 参数校验 | Spring Validation（`spring-boot-starter-validation`） |
 | 接口文档 | springdoc-openapi 3.0.0（OpenAPI / Swagger UI） |
 | 运维监控 | Spring Boot Actuator + Micrometer（Prometheus registry），见「可观测」 |
+| 限流 | Resilience4j 2.4.0（`resilience4j-spring-boot4`）—— 注解式限流，**不写自研切面**；与 Nginx `limit_req` 组成两层，见「部署」章节 |
 | 链路追踪 | Micrometer Tracing + Brave（traceId 进日志 + 响应头 `X-Trace-Id`），见「可观测」 |
 | 对象存储 | 阿里云 OSS SDK 3.18.1（生产用；本地默认存磁盘） |
 | 工具库 | Lombok |
@@ -82,7 +83,7 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
-- 集成测试 23 个类 **193 个用例**，行覆盖率 **86%**
+- 集成测试 24 个类 **198 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
 
@@ -176,6 +177,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── ArticleAdminTest                # 后台文章管理
 ├── ArticlePublicTest               # 前台公开接口（草稿隔离）
 ├── ArticleCacheTest                # 列表缓存：命中/失效/TTL/防穿透
+├── RateLimitTest                   # 接口限流（配额用完 -> 429）
 ├── ArticleDetailCacheTest          # 详情缓存与防击穿
 ├── ArticleStatsTest                # 站点统计接口（只算已发布）
 ├── ArticleViewCountTest            # 浏览量：Redis 计数 + 定时批量落库
@@ -681,10 +683,10 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | # | 方法 | 路径 | 说明 | 是否需要登录 |
 |---|------|------|------|:---:|
 | 1 | POST | `/auth/register` | 用户注册 | 否 |
-| 2 | POST | `/auth/login` | 登录（返回 token） | 否 |
+| 2 | POST | `/auth/login` | 登录（返回 token，**有限流**：5 次/分钟） | 否 |
 | 3 | POST | `/auth/logout` | 退出登录（把当前 token 拉黑，幂等） | 否 |
 | 4 | GET | `/auth/me` | 获取当前登录用户 | 是 |
-| 5 | GET | `/article/page` | 前台文章分页列表（仅已发布，**走 Redis 缓存**） | 否 |
+| 5 | GET | `/article/page` | 前台文章分页列表（仅已发布，**走 Redis 缓存 + 限流**） | 否 |
 | 6 | GET | `/article/{id}` | 前台文章详情（仅已发布） | 否 |
 | 7 | GET | `/article/stats` | 站点统计：文章数 / 总浏览量 / 分类数（首页那三个数字，**只算已发布**） | 否 |
 | 8 | GET | `/category/list` | 分类列表 | 否 |
@@ -1530,11 +1532,24 @@ MySQL 用 `mysqladmin ping`、Redis 用 `redis-cli ping`。
 
 **重启 Docker 服务后会自动恢复**：三个服务都配了 `restart: unless-stopped`。
 
-### 3. Nginx 反向代理
+### 3. Nginx 反向代理（含第一层限流）
 
 在宿主机配一个站点，把前端和后端分别代理出去：
 
 ```nginx
+# ============ 限流：按客户端 IP 记一个令牌桶 ============
+# 【为什么放在 http 块里】limit_req_zone 只能定义在 http 层，
+# 它是一个"共享内存区"，所有 server/location 共用同一份计数。
+#
+# 【$binary_remote_addr 是什么】客户端的二进制形式 IP（4 字节，比字符串省空间）。
+# 【zone=api:10m】开一块 10MB 的共享内存存计数，能装大约 16 万个 IP。
+# 【rate=20r/s】每个 IP 每秒 20 个请求 —— 正常用户远远用不到，
+#               但足以把脚本刷接口挡在门外。
+limit_req_zone $binary_remote_addr zone=api:10m rate=20r/s;
+
+# 登录接口单独一个更严的桶：5 次/分钟（和后面应用层的配额对齐）
+limit_req_zone $binary_remote_addr zone=login:10m rate=5r/m;
+
 server {
     listen 443 ssl;
     server_name 你的域名;
@@ -1544,22 +1559,59 @@ server {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        # ⚠️ 这一行必须有：后端将来做限流要按真实 IP 统计，
-        #    没有它所有请求的来源都会是 Nginx 的地址
+        # ⚠️ 这一行必须有：后端做与 IP 相关的判断（以及日志）要靠它，
+        #    没有它所有请求的来源都会是 Nginx 自己的地址
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # 后端（Spring Boot 容器）
+    # 前端请求后台接口时走的路径（供前端容器使用，不对外）
     location /api/ {
         proxy_pass http://127.0.0.1:8082/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+
+        # ---- 第一层限流：按 IP ----
+        # burst=40   允许突发 40 个请求先排队（不多于这个数就不立刻拒）
+        # nodelay    排队的请求【立刻】处理，而不是按 rate 一个一个放 ——
+        #            不加它的话，突发流量会被强行拉慢，正常用户也会感觉卡
+        limit_req zone=api burst=40 nodelay;
+        # 被限流时返回 429（Nginx 默认是 503，那是"服务不可用"的语义，
+        # 跟"你请求太多了"是两回事；而应用层也用 429，两层保持一致）
+        limit_req_status 429;
+    }
+
+    # 登录接口：更严的桶（防暴力破解）
+    location = /api/auth/login {
+        proxy_pass http://127.0.0.1:8082/auth/login;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        limit_req zone=login burst=3 nodelay;
+        limit_req_status 429;
     }
 }
 ```
+
+> **为什么限流要做两层（Nginx + 应用层）**
+>
+> | | Nginx 的 `limit_req` | 应用层的 Resilience4j |
+> |---|---|---|
+> | 按什么限 | **按客户端 IP** | **按接口的全局配额** |
+> | 挡住的是谁 | 单个 IP 的疯狂刷接口 | 所有来源加起来把某个接口刷爆 |
+> | 保护的是谁 | 后端进程本身 | **后面的数据库和 Redis** |
+>
+> 两层各自都有挡不住的情况，所以都要有：
+> Nginx 挡不住"几千个代理 IP 每个只请求几次"（每个 IP 都没超限，但总量能把数据库打满），
+> 应用层挡不住"某个 IP 独吞了全部配额"（它只认总数，不知道是谁在用）。
+>
+> ⚠️ 还有一点必须说清楚：**应用层的配额是整站的，不是按人的**
+> （Resilience4j 的 RateLimiter 是进程级计数器）。按 IP 的细粒度限制只在 Nginx 这层。
+> 两层的具体数值与理由见 `application.properties` 里「接口限流」那一段。
 
 > **如果走 `/api/` 前缀**，前端要相应地把 `NUXT_PUBLIC_API_BASE`
 > 设成 `https://你的域名/api`；后端的 `CORS_ALLOWED_ORIGINS` 填 `https://你的域名`。
@@ -1666,7 +1718,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 193 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 198 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1678,10 +1730,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 193 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 198 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**23 个测试类，193 个用例，全部通过：**
+**24 个测试类，198 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -1708,7 +1760,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ProfileProdConfigTest` | 3 | prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量 |
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **193** | |
+| **合计** | **198** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

@@ -10,6 +10,7 @@ import org.springframework.security.authentication.DisabledException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
+import io.github.resilience4j.ratelimiter.RequestNotPermitted;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -138,5 +139,33 @@ public class GlobalExceptionHandler {
         return ResponseEntity
                 .status(HttpStatus.METHOD_NOT_ALLOWED)
                 .body(Result.error(ResultCode.METHOD_NOT_ALLOWED));
+    }
+
+    /**
+     * 【新增】被应用层限流拦下（Resilience4j 的 @RateLimiter 拒绝了这次请求）
+     *
+     * 【这个异常是谁抛的】
+     *   不是我们抛的，是 Resilience4j 自带的切面抛的：
+     *   {@code @RateLimiter} 在配额用完时抛 {@link RequestNotPermitted}。
+     *   也就是说"要不要拒"完全由库负责，我们只负责把它翻译成对前端友好的响应。
+     *   —— 这正是"用主流现成方案"的意思：限流算法（令牌桶）、时间窗口、
+     *      并发下的原子计数都在库里，我们一行都不用自己写。
+     *
+     * 【为什么返回真实的 HTTP 429，而不是继续用 200 + body.code】
+     *   和 404 / 405 是同一个判断标准 —— 看这个错误"是谁的问题"：
+     *     · "请求太频繁"属于【请求本身有问题】，不是业务语义的一部分
+     *     · 而且这个状态码最大的受众不是我们的前端，而是【上游基础设施】：
+     *       Nginx、CDN、监控告警、以及调用方自己的重试策略，它们都只看状态码。
+     *       返回 429 它们才能识别出"该退避了 / 该告警了"；
+     *       报 200 的话，一次限流事件在全站监控里看起来就是"成功"。
+     *   业务错误（密码错、参数错）仍然保持 200 + body.code，理由见 README
+     *   「统一返回与错误处理」—— 两者是分区处理，不是漏改。
+     */
+    @ExceptionHandler(RequestNotPermitted.class)
+    public ResponseEntity<Result<?>> handleRateLimited(RequestNotPermitted e) {
+        log.warn("请求被限流: {}", e.getMessage());
+        return ResponseEntity
+                .status(HttpStatus.TOO_MANY_REQUESTS)                  // HTTP 429
+                .body(Result.error(ResultCode.TOO_MANY_REQUESTS));     // {"code":429,...}
     }
 }

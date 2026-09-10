@@ -1,5 +1,9 @@
 package com.yigalaxy.yiguixingtu;
 
+import io.github.resilience4j.ratelimiter.RateLimiter;
+import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -47,6 +51,62 @@ import org.testcontainers.mysql.MySQLContainer;
 @AutoConfigureMockMvc
 @Transactional
 public abstract class AbstractIntegrationTest {
+
+    /**
+     * 限流器注册表，用来在每条用例开始前把配额清零。
+     *
+     * 【为什么这件事必须做 —— 限流器的状态是"全局"的，和数据库不一样】
+     *   `@Transactional` 能让每个用例对【数据库】的改动自动回滚，
+     *   但拿限流器毫无办法：Resilience4j 的 RateLimiter 是装在
+     *   Spring 容器里的一个进程级计数器，测试类之间还会共用同一个
+     *   ApplicationContext —— 也就是共用同一批计数器。
+     *
+     *   后果很具体：登录接口的配额是 5 次/分钟（防暴力破解，见配置），
+     *   而 LogoutTokenTest 有 11 条用例、每条都要登录一次。
+     *   不重置的话，跑到第 6 条就会开始收到 429，
+     *   而且报错信息是"登录失败了"，看起来像认证坏了 —— 极难排查。
+     *
+     * 【为什么放在基类而不是各个测试类里】
+     *   每个继承它的测试类都会自动获得这个行为，不用记得手动加。
+     *   这和"在 ArticleCacheTest 里 @BeforeEach 清 Redis key"是同一个思路：
+     *   **测试外部状态（Redis、限流器）都要自己负责清理，
+     *     因为事务回滚管不到它们。**
+     */
+    @Autowired
+    private RateLimiterRegistry rateLimiterRegistry;
+
+    /**
+     * 把每个限流器换成一个全新的、窗口满血的实例。
+     *
+     * 【⚠️ 为什么不是 limiter.reset()】
+     *   Resilience4j 2.4.0 的 {@code RateLimiter} 接口上【没有 reset() 方法】
+     *   （第一版就是照着直觉写了 reset()，编译直接报找不到符号）。
+     *   接口上能用的只有 acquirePermission / reservePermission /
+     *   drainPermissions / changeLimitForPeriod / changeTimeoutDuration，
+     *   其中 drainPermissions 是"把剩余配额全部消耗掉"——正好是反过来的操作。
+     *
+     * 【⚠️ 为什么也不是 changeLimitForPeriod】
+     *   第二版改用 changeLimitForPeriod（把配额重设成同一个值）想刷新窗口，
+     *   实测【不可靠】：改完之后 {@code getRateLimiterConfig()} 显示 limit=2，
+     *   但 {@code getMetrics().getAvailablePermissions()} 还是 5 ——
+     *   配置变了、计数没变。它内部是 updateAndGet 出一个新 State，
+     *   而配额计数器沿用旧引用，所以"改配额"并不等于"重新开窗"。
+     *
+     * 【最终做法：直接换一个新的 RateLimiter 实例】
+     *   {@code Registry.replace(name, entry)} 把注册表里的那个换掉，
+     *   新实例的计数器是全新的、窗口是满的 —— 语义明确、结果确定。
+     *   切面每次调用都从注册表按名字取，所以换掉之后立刻生效。
+     */
+    @BeforeEach
+    void resetRateLimiters() {
+        rateLimiterRegistry.getAllRateLimiters().forEach(this::refill);
+    }
+
+    /** 用同名同配置的全新实例替换掉注册表里的那个 */
+    private void refill(RateLimiter limiter) {
+        rateLimiterRegistry.replace(limiter.getName(),
+                RateLimiter.of(limiter.getName(), limiter.getRateLimiterConfig()));
+    }
 
     /**
      * MySQL 容器。

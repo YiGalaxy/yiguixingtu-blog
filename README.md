@@ -1841,6 +1841,56 @@ MySQL 用 `mysqladmin ping`、Redis 用 `redis-cli ping`。
 
 ### 3. Nginx 反向代理（含第一层限流）
 
+#### 3.0 先把 HTTPS 证书拿到手（否则 Nginx 根本起不来）
+
+⚠️ **这一步不能跳。** 下面的配置里有 `listen 443 ssl;`，而 Nginx 对 ssl 端口
+**强制要求**配 `ssl_certificate` —— 证书文件不存在或不配，`nginx -t` 会直接报错
+（`no "ssl_certificate" is defined for the "listen ... ssl" directive`），
+站点一个请求都收不到。这是第一次部署最常见的卡点。
+
+两种拿证书的方式，选一种：
+
+**方式 A：Let's Encrypt + certbot（推荐，免费且自动续期）**
+
+```bash
+# 1) 先让 80 端口能访问（certbot 的 HTTP-01 校验要打 http://你的域名/.well-known/...）
+#    所以这一步要在 Nginx 有一个最简单的 80 站点之后做 ——
+#    最省事的做法：先只配 80（不带 ssl）跑起来，再执行下面这条
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d 你的域名 -d www.你的域名
+#    certbot 会自动改写 Nginx 配置（补上 ssl_certificate / ssl_certificate_key
+#    与 80 → 443 的跳转），并注册一个 systemd timer 自动续期
+sudo certbot renew --dry-run     # 演练一次续期，确认它真的能续
+```
+
+**方式 B：阿里云免费证书（不依赖外部 ACME 服务）**
+
+1. 阿里云控制台 → 数字证书管理服务 → 申请免费证书（DV，一年期）
+2. 签发后下载 **Nginx 格式**的压缩包，得到 `xxx.pem` 与 `xxx.key`
+3. 传到服务器并放好权限：
+
+```bash
+sudo mkdir -p /etc/nginx/ssl
+sudo cp xxx.pem /etc/nginx/ssl/fullchain.pem
+sudo cp xxx.key /etc/nginx/ssl/privkey.pem
+sudo chmod 600 /etc/nginx/ssl/privkey.pem     # 私钥只给 root 读
+```
+
+然后在上面的 `server` 块里补两行（方式 A 的话 certbot 已经替你写好了）：
+
+```nginx
+    ssl_certificate     /etc/nginx/ssl/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+```
+
+> ⚠️ **域名要指向这台服务器（A 记录）**，而且**大陆节点的 ECS 必须先完成 ICP 备案**，
+> 否则 80/443 会被拦掉、证书校验也过不了。
+> 另外阿里云的免费证书是**一年期、到期要手动换**，别忘了设个日历提醒
+> （方式 A 的 certbot 是自动续期，省掉这件事）。
+
+#### 3.1 站点配置
+
 在宿主机配一个站点，把前端和后端分别代理出去：
 
 ```nginx
@@ -1860,6 +1910,11 @@ limit_req_zone $binary_remote_addr zone=login:10m rate=5r/m;
 server {
     listen 443 ssl;
     server_name 你的域名;
+
+    # 证书（见上面 3.0；用 certbot 的话这两行它已经自动写好了）
+    ssl_certificate     /etc/nginx/ssl/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
 
     # 前端（Nuxt 容器）
     #
@@ -2011,6 +2066,9 @@ scp yiguixingtu-web/static-media/* root@服务器IP:/var/www/media/
 | 14 | **SEO 三件套都对** | `curl -s https://你的域名/ \| grep canonical` 应当是**你的真实域名**；`curl -I https://你的域名/sitemap.xml` 返回 200 且 `Content-Type` 是 XML；`curl -s https://你的域名/robots.txt` 里的 `Sitemap:` 也是你的域名；`curl -s https://你的域名/feed.xml \| head -c 200` 能拿到 RSS（守 `PUBLIC_SITE_URL` 有没有填对 —— 填错不会报错，只会让搜索引擎/订阅器指向别的域名） |
 | 15 | **首页 HTML 里有文章** | `curl -s https://你的域名/ \| grep -o '<h3[^>]*>[^<]*'` 应当能看到文章标题 —— 首页是 SSR 的，源码里就该有内容；如果只有 `<div id="__nuxt"></div>`，说明 SSR 没生效（那是纯客户端渲染的表现） |
 | 16 | **评论链路是通的** | 打开一篇文章发一条评论 → 前端提示"等待审核"、前台列表里**看不到** → 后台点通过 → 前台刷新能看到（守"待审核状态写死在前台查询里"这条规则真的生效） |
+| 17 | **HTTPS 真的生效、且会自动续期** | `curl -I https://你的域名` 返回 200 且证书有效（浏览器地址栏是小锁不是"不安全"）；方式 A 的话再跑一次 `sudo certbot renew --dry-run`。⚠️ 用阿里云免费证书的话它是**一年期、不自动续**，记得设置到期提醒 |
+| 18 | **http 会跳到 https** | `curl -I http://你的域名` 应当是 **301** 到 https（没有这条跳转的话，用户用 http 打开会看到一个空白页或证书错误） |
+| 19 | **`nginx -t` 通过、改完 reload 过** | `sudo nginx -t && sudo systemctl reload nginx` —— 配置写了但没 reload 是最常见的一种"明明改了却没生效" |
 
 #### 这份清单在本机演练过一遍（不是纸面清单）
 

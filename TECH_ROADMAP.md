@@ -1883,10 +1883,18 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 >   · Element Plus 的 `el-link :underline="false"` 是废弃写法，每次跑测试都刷
 >     `ElementPlusError`（会淹掉真报错）→ 改成 `underline="never"`
 >
-> **剩余**：**没有了** —— web-0 ~ web-7 全部完成。
-> 唯一还挂着的是"分类管理"当初想放在 w7.4 里顺手做，它已经在 w6.1d（`ecc276d`）里单独做完了。
-> 下一步只有两件：① 我自己把前端三件套（`lint` / `test` / `build`）与产物体积**再独立跑一遍**，
-> 把终值写回这一章；② 跑四容器全栈验收演练（`target/prod-fullstack.ps1` + `fullstack-verify.ps1`）。
+> **剩余**：**没有了** —— web-0 ~ web-7 全部完成，两件收尾事也都做完了：
+> ① 我在前端仓库空闲时**独立跑过**三件套与产物体积：`eslint .` 0 问题、
+> `Test Files 26 passed (26)` / `Tests 470 passed (470)`、`npm run build` 成功，
+> `.output/public/_nuxt` 下 JS **2 487 246** 字节 / CSS **299 404** 字节、
+> 后台那份 `admin.*.css` **151 757** 字节 —— 与提交信息里的自报值**逐字节一致**；
+> ② 四容器生产形态验收演练**全绿**（完整日志 `target/acceptance-final.log`，714 行）：
+> 空库 6 个迁移、四容器 healthy、引导管理员登录、内容与评论链路、归档页 2/2 条内链、
+> sitemap/robots/feed（feed 能被严格 XML 解析）、**按需引入的样式按路由分页命中且反向为 0**、
+> 上传封面 `--force-recreate` 后 200 且字节一致、限流 `200×5 → 429×3`、审计 8 行、日志落卷、
+> 演练后 `yiguixingtu-prod` 的容器与卷剩 0 个、dev 环境未受影响。
+> （其中"标签内链"这条**验收脚本自己先查错了页面**：首页把标签渲染成 `<button class="tagp">`、
+> 按设计没有 `href`，可爬内链在文章详情页 —— 已修正脚本并把这个坑写进 README）
 
 | # | 提交标题 | 内容 | 测试要求 |
 |---|---|---|---|

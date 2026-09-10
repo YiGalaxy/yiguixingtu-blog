@@ -1797,7 +1797,7 @@ JWT_SECRET=用上面命令生成一串填这里
 # ---- 跨域：填前端域名，否则浏览器会跨域失败 ----
 CORS_ALLOWED_ORIGINS=https://你的域名
 
-# ---- 前端容器用的后端地址（浏览器访问的那个） ----
+# ---- 后端接口的对外地址（**浏览器**访问的那个，不是容器用的） ----
 # 如果 Nginx 把后端反代在 /api/ 下，这里就填 https://你的域名/api
 PUBLIC_API_BASE=https://你的域名/api
 
@@ -1944,7 +1944,10 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # 前端请求后台接口时走的路径（供前端容器使用，不对外）
+    # 浏览器请求后端接口时走的路径（PUBLIC_API_BASE = https://你的域名/api，所以它是【对外】的）
+    #   ⚠️ 别把这里和"前端容器怎么访问后端"搞混：容器走的是 compose 网络里的服务名
+    #      （NUXT_API_BASE_SERVER=http://backend:8082，见 nuxt.config 与 compose），
+    #      完全不过 Nginx。这个 location 服务的是**浏览器**（含 SSR 期间由浏览器发起的那些请求）。
     location /api/ {
         proxy_pass http://127.0.0.1:8082/;
         proxy_set_header Host $host;

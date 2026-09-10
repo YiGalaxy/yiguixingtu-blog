@@ -145,10 +145,19 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── UserAdminTest                   # 用户管理（含 token 即时失效）
 ├── ArticleAdminTest                # 后台文章管理
 ├── ArticlePublicTest               # 前台公开接口（草稿隔离）
+├── PaginationLimitTest             # 分页全局上限（从 Mapper 层验证插件兜底）
+├── ProfileDevConfigTest            # dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单
+├── ProfileProdConfigTest           # prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量
+├── AdminBootstrapInitTest          # 管理员初始化引导（空库也能进后台）
 └── YiguixingtuApplicationTests     # 冒烟
 
 docs/demo-data
 └── demo_users.sql                  # 本地演示数据（100 个用户），切勿在生产执行
+
+Dockerfile                          # 后端镜像（多阶段构建，非 root 运行）
+.dockerignore                       # 构建上下文排除清单（含个人材料，见文件内说明）
+docker-compose.yaml                 # 本地开发：只有 mysql + redis
+docker-compose.prod.yaml            # 生产：backend + mysql + redis 三容器（详见「部署」章节）
 ```
 
 ## 快速开始
@@ -624,6 +633,171 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 > 表结构**不要手动改**。需要改表就新增一个迁移脚本（`V2__xxx.sql`），
 > 让开发库、测试库、生产库走同一条路径。
+
+## 部署（Docker Compose + 阿里云 ECS）
+
+### 部署形态
+
+```
+                      ┌──────────────────────── 一台 ECS ────────────────────────┐
+   浏览器 ──https──▶  │  Nginx（宿主机的 80/443）                                │
+                      │    ├─ /            → 前端（Nuxt，容器 3000）             │
+                      │    └─ /api/        → 后端（Spring Boot，容器 8082）      │
+                      │                                                          │
+                      │  docker compose 内网（外网连不到）                        │
+                      │    backend ──▶ mysql:3306                                │
+                      │           └──▶ redis:6379                                │
+                      └──────────────────────────────────────────────────────────┘
+                                    封面图 ──▶ 阿里云 OSS（不走 ECS 磁盘）
+```
+
+**三个容器都由 `docker-compose.prod.yaml` 管理**，和本地开发的 `docker-compose.yaml`
+是两个文件 —— 生产环境**不把 MySQL / Redis 的端口映射到宿主机**，
+它们只在 compose 内网里可达（这是防拖库最基本的一条）。
+
+### 1. 准备环境变量
+
+在服务器上（`docker-compose.prod.yaml` 同目录）创建 `.env`：
+
+```properties
+# ---- 数据库 ----
+MYSQL_ROOT_PASSWORD=换成一个强密码
+DB_PASSWORD=换成另一个强密码
+
+# ---- Redis ----
+REDIS_PASSWORD=再换一个强密码
+
+# ---- JWT ----
+# ⚠️ 必须换掉仓库里的默认值，长度至少 32 字节。生成方法：
+#   openssl rand -base64 48
+JWT_SECRET=用上面命令生成一串填这里
+
+# ---- 跨域：填前端域名，否则浏览器会跨域失败 ----
+CORS_ALLOWED_ORIGINS=https://你的域名
+
+# ---- 第一个管理员（库里没有管理员时自动创建，详见上文） ----
+BOOTSTRAP_ADMIN_USERNAME=你的管理员账号
+BOOTSTRAP_ADMIN_PASSWORD=一个强密码
+BOOTSTRAP_ADMIN_NICKNAME=站长
+```
+
+> **`.env` 绝对不要提交进仓库**（已在 `.gitignore` 与 `.dockerignore` 里）。
+>
+> **这份配置刻意用了 `${VAR:?必须设置}` 这种写法**：少配任何一个，
+> `docker compose up` 会直接报错并告诉你缺哪个，而不是悄悄用一个默认值跑起来。
+> 想确认自己配齐了没有，可以先跑一句 `docker compose -f docker-compose.prod.yaml config --quiet`。
+
+### 2. 启动
+
+```bash
+# 第一次（要构建后端镜像，会花几分钟）
+docker compose -f docker-compose.prod.yaml up -d --build
+
+# 看状态：三个都应该是 healthy
+docker compose -f docker-compose.prod.yaml ps
+
+# 跟一下后端日志，确认这几件事都发生了：
+#   ① Flyway 建表（空库会打印 Successfully applied 1 migration）
+#   ② 管理员引导（会打印 已创建初始管理员账号 [xxx]）
+docker compose -f docker-compose.prod.yaml logs -f backend
+```
+
+**容器 `healthy` 是靠健康检查判断的**，不是"进程还在"：
+后端探针每 15 秒请求一次 `/actuator/health`；
+MySQL 用 `mysqladmin ping`、Redis 用 `redis-cli ping`。
+`backend` 通过 `depends_on: condition: service_healthy` 等另外两个**真的能用**了才启动 ——
+否则 MySQL 还在初始化数据目录时应用就去连库，Flyway 会直接报错退出。
+
+**重启 Docker 服务后会自动恢复**：三个服务都配了 `restart: unless-stopped`。
+
+### 3. Nginx 反向代理
+
+在宿主机配一个站点，把前端和后端分别代理出去：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name 你的域名;
+
+    # 前端（Nuxt 容器）
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # ⚠️ 这一行必须有：后端将来做限流要按真实 IP 统计，
+        #    没有它所有请求的来源都会是 Nginx 的地址
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 后端（Spring Boot 容器）
+    location /api/ {
+        proxy_pass http://127.0.0.1:8082/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+> **如果走 `/api/` 前缀**，前端要相应地把 `NUXT_PUBLIC_API_BASE`
+> 设成 `https://你的域名/api`；后端的 `CORS_ALLOWED_ORIGINS` 填 `https://你的域名`。
+> 两者必须对得上，否则就是跨域失败。
+
+### 4. 上线前的核对清单
+
+| # | 检查项 | 怎么确认 |
+|---|---|---|
+| 1 | `JWT_SECRET` 已换成随机值 | `.env` 里不是仓库里那串默认值 |
+| 2 | `CORS_ALLOWED_ORIGINS` 是真实域名 | 浏览器打开站点，F12 里没有跨域报错 |
+| 3 | Swagger 关掉了 | 访问 `https://你的域名/api/v3/api-docs` 应当 **401** |
+| 4 | MySQL / Redis 端口没有对外暴露 | 在服务器外 `telnet 服务器IP 3306` 应当连不上 |
+| 5 | 管理员能登录后台 | 打开 `/admin`，用引导账号登录 |
+| 6 | 换掉引导管理员的初始密码 | 后台 → 用户管理 → 重置密码 |
+| 7 | 数据库每天自动备份 | 见下面「备份与恢复」 |
+
+### 5. 备份与恢复
+
+```bash
+# —— 备份（建议加进 crontab 每天跑一次）——
+docker exec yiguixingtu-mysql sh -c \
+  'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --databases yiguixingtu' \
+  > backup_$(date +%F).sql
+
+# —— 恢复 ——
+docker exec -i yiguixingtu-mysql sh -c \
+  'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD"' < backup_2026-09-10.sql
+```
+
+两个参数值得说明：
+- `--single-transaction`：备份期间不锁表（InnoDB），站点不用停机
+- 恢复前**先停掉后端**，避免写入和恢复互相打架：
+  `docker compose -f docker-compose.prod.yaml stop backend`
+
+> **备份要验证过才算备份**。建议演练一次：拷一份库出来、导进一个新库、
+> 启动应用确认文章都在。没验证过的备份，真出事时大概率用不了。
+
+### 6. 升级流程
+
+```bash
+git pull
+docker compose -f docker-compose.prod.yaml up -d --build
+docker compose -f docker-compose.prod.yaml ps   # 等 healthy
+```
+
+**表结构变更走 Flyway**：新增的 `V2__xxx.sql` 会在容器启动时自动执行，
+不需要手工上服务器改表。这也是当初把建表从"手工 SQL"换成 Flyway 的回报。
+
+### 7. 出问题时的排查顺序
+
+| 现象 | 先看这里 |
+|---|---|
+| 容器一直 `unhealthy` | `logs backend`。最常见是环境变量没配齐，或连不上 `mysql`（注意**地址要用服务名 `mysql`，不是 `localhost`**） |
+| 前端报跨域 | `CORS_ALLOWED_ORIGINS` 是否等于前端实际访问的域名（协议、端口都要一致） |
+| 打不开后台 / 登不进去 | 日志里有没有"已创建初始管理员账号"。没有的话说明 `BOOTSTRAP_ADMIN_*` 没配，库里可能没有管理员 |
+| 接口 401 | token 过期（默认 1 天），重新登录即可 |
+| 改了配置不生效 | 环境变量改完要 `docker compose -f docker-compose.prod.yaml up -d` 让容器重建 |
 
 ## 构建与测试
 

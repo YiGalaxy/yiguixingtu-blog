@@ -2062,7 +2062,7 @@ scp yiguixingtu-web/static-media/* root@服务器IP:/var/www/media/
 | 10 | **上传的图片在容器重建后还在** | 后台上传一张封面 → `docker compose -f docker-compose.prod.yaml up -d --force-recreate backend` → 再打开那篇文章，图片应当还能显示（守"上传目录有没有真的挂到卷上"） |
 | 11 | 图片地址是外网可访问的 | 右键封面图「复制图片地址」，在无痕窗口打开应当能看到图（守 `UPLOAD_BASE_URL` 填的是浏览器能访问到的地址） |
 | 12 | **背景视频/音乐能播** | `curl -I https://你的域名/media/bg-music.mp3` 应当返回 **200**（守"前端仓库 `static-media/` 里的文件真的传到了 `/var/www/media/`"——它们不在构建产物里，忘了传就只有 404） |
-| 13 | **审计表真的在记** | 后台改一下某篇文章 → `docker exec yiguixingtu-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" yiguixingtu -e "SELECT * FROM operation_log ORDER BY id DESC LIMIT 3"` 应当能看到那条记录，且 `ip` 是真实访问者地址（不是 `127.0.0.1`） |
+| 13 | **审计表真的在记** | 后台改一下某篇文章，然后在服务器上执行：`docker exec yiguixingtu-prod-mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" yiguixingtu -e "SELECT * FROM operation_log ORDER BY id DESC LIMIT 3"'` —— 应当能看到那条记录，且 `ip` 是**真实访问者地址**（不是 `127.0.0.1`；是它就说明 Nginx 没把 `X-Forwarded-For` 传下去）<br>⚠️ 注意是 **`-prod-`** 那个容器名，而且密码要用 `sh -c` 从容器自己的环境变量取 —— 直接写 `-p"$MYSQL_ROOT_PASSWORD"` 的话，那个变量在宿主机 shell 里通常**并不存在**，会变成空密码并进入交互式提示 |
 | 14 | **SEO 三件套都对** | `curl -s https://你的域名/ \| grep canonical` 应当是**你的真实域名**；`curl -I https://你的域名/sitemap.xml` 返回 200 且 `Content-Type` 是 XML；`curl -s https://你的域名/robots.txt` 里的 `Sitemap:` 也是你的域名；`curl -s https://你的域名/feed.xml \| head -c 200` 能拿到 RSS（守 `PUBLIC_SITE_URL` 有没有填对 —— 填错不会报错，只会让搜索引擎/订阅器指向别的域名） |
 | 15 | **首页 HTML 里有文章** | `curl -s https://你的域名/ \| grep -o '<h3[^>]*>[^<]*'` 应当能看到文章标题 —— 首页是 SSR 的，源码里就该有内容；如果只有 `<div id="__nuxt"></div>`，说明 SSR 没生效（那是纯客户端渲染的表现） |
 | 16 | **评论链路是通的** | 打开一篇文章发一条评论 → 前端提示"等待审核"、前台列表里**看不到** → 后台点通过 → 前台刷新能看到（守"待审核状态写死在前台查询里"这条规则真的生效） |

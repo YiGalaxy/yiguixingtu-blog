@@ -143,6 +143,32 @@ public class SecurityConfig {
                     //   management.endpoint.health.show-details=never 控制，见 application.properties）。
                     auth.requestMatchers("/actuator/health").permitAll();
 
+                    // 【指标端点 /actuator/prometheus：也放行，但靠"网络位置"保护它】
+                    //
+                    // 为什么放行：抓取指标的是 Prometheus，它没有也不该有我们的 JWT。
+                    //   如果这个端点要求登录，实际结果只有两种：要么抓不到，
+                    //   要么为了能抓而给它配一个长期不过期的 token —— 那比放行更糟。
+                    //
+                    // 那放行它安全吗？取决于谁能访问到它。这里的护栏不在代码里，而在部署上：
+                    //   ① docker-compose.prod.yaml 里后端端口是【只绑到 127.0.0.1】的
+                    //      （"127.0.0.1:8082:8082"），公网根本连不到这个端口；
+                    //   ② Nginx 只反代 /api/ 前缀，没有 /actuator 的 location，
+                    //      所以从域名访问不到它。
+                    //   也就是：只有宿主机上和容器内网里能拿到它 ——
+                    //   而这正是 Prometheus 所在的位置。
+                    //
+                    // ⚠️ 所以这两件事必须【一起】改：谁要是把 compose 里的
+                    //    "127.0.0.1:" 前缀去掉、或者给 Nginx 加上 location /actuator/，
+                    //    这个端点就暴露到公网了（里面能看到接口路径、调用量、
+                    //    连接池占用、JVM 内存等内部信息）。
+                    //    MetricsEndpointTest 只断言"端点能用"，
+                    //    拦不住这种部署上的改动 —— 这一条靠 README 的核对清单兜底。
+                    //
+                    // 更严格的方案（不做，但要知道）：设置 management.server.port=8081，
+                    //   把管理端点挪到另一个端口，主端口上根本没有 /actuator。
+                    //   没采用的原因见 TECH_ROADMAP §9 M5 的 5.7 备注。
+                    auth.requestMatchers("/actuator/prometheus").permitAll();
+
                     // 【接口文档的路径：只在文档开着的时候才放行】
                     //
                     // 这里是一个真实的安全缺口，是写 prod profile 测试时发现的：

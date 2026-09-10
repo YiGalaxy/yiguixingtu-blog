@@ -7,6 +7,7 @@ import com.yigalaxy.yiguixingtu.auth.dto.LoginVO;
 import com.yigalaxy.yiguixingtu.auth.dto.RegisterRequest;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.common.Result;
+import com.yigalaxy.yiguixingtu.common.metrics.BusinessMetrics;
 import com.yigalaxy.yiguixingtu.user.entity.User;
 import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
 import com.yigalaxy.yiguixingtu.user.service.UserService;
@@ -38,15 +39,17 @@ public class AuthController {
     private final UserMapper userMapper;
     private final UserService userService;
     private final TokenBlacklist tokenBlacklist;
+    private final BusinessMetrics metrics;
 
     public AuthController(AuthenticationManager authenticationManager, JwtUtil jwtUtil,
                           UserMapper userMapper, UserService userService,
-                          TokenBlacklist tokenBlacklist) {
+                          TokenBlacklist tokenBlacklist, BusinessMetrics metrics) {
         this.authenticationManager = authenticationManager;
         this.jwtUtil = jwtUtil;
         this.userMapper = userMapper;
         this.userService = userService;
         this.tokenBlacklist = tokenBlacklist;
+        this.metrics = metrics;
     }
 
     /**
@@ -124,6 +127,15 @@ public class AuthController {
             // 按"剩余有效期"设置 TTL：token 自然过期的时刻，这条黑名单记录也一起消失，
             // 不需要任何定时清理任务
             tokenBlacklist.add(jti, Duration.ofMillis(remainingMillis));
+
+            // 【为什么统计放在 add 之后】
+            //   这段代码在 try 里面：拉黑失败会走 catch（token 无效），
+            //   而"token 无效"本来就没有任何东西被作废。
+            //   所以计数写在 add 成功之后，指标才等于"真的生效了的登出次数"。
+            //   放在前面的话，一个伪造 token 反复调登出也能把这个数字刷上去，
+            //   这个指标就失去了意义。
+            metrics.recordTokenRevoked();
+
             log.info("退出登录成功, token 已作废");
         } catch (Exception e) {
             // token 解析失败（伪造的、格式错的）：那它本来就用不了，

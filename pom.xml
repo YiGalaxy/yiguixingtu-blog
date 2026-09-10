@@ -179,6 +179,34 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
+        <!-- ==================== 指标暴露（Prometheus） ==================== -->
+        <!--
+          【用途】把应用内部的状态暴露成 Prometheus 能抓的格式（/actuator/prometheus）。
+          装上这个 registry 之后，下面这些指标是【自动】就有的，不用写一行代码：
+            · JVM 内存 / GC / 线程数
+            · HTTP 接口的请求量、耗时分布（http_server_requests_seconds）
+            · HikariCP 连接池的活跃/空闲连接数
+            · Redis 连接工厂、Tomcat 线程池
+          这就是"用现成的而不是自研"：想要接口耗时统计，
+          正确的做法是让框架把指标吐出来，而不是自己写个拦截器记时间戳。
+
+          【为什么 version 不写】版本由 spring-boot-starter-parent 统一管理
+          （当前 Boot 4.1.1 → micrometer 1.17.1）。
+          手写一个版本号反而会和 Boot 的其它 micrometer 组件对不上。
+
+          【⚠️ 又是 Boot 4 拆模块的教训，这里提前说清楚】
+          registry 只是"把数字变成 Prometheus 文本格式"的编码器。
+          真正"什么时候采集、采集哪些"的自动配置在
+          spring-boot-starter-micrometer-metrics 里（已由 actuator 带进来）。
+          两者少任何一个的表现都是【静默的】：编译通过、启动成功，
+          只是 /actuator/prometheus 这个端点是 404 ——
+          所以必须有测试去访问它，而不能只看"启动没报错"。
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
         <!-- ==================== 对象存储（阿里云 OSS） ==================== -->
         <!--
           【用途】把文章封面图传到 OSS，而不是存在 ECS 的本地磁盘上。

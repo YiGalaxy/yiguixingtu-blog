@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.yigalaxy.yiguixingtu.article.cache.ArticleViewCounter;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
+import com.yigalaxy.yiguixingtu.common.metrics.BusinessMetrics;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -12,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * =====================================================================
@@ -54,10 +57,13 @@ public class ViewCountSyncTask {
 
     private final ArticleViewCounter viewCounter;
     private final ArticleMapper articleMapper;
+    private final BusinessMetrics metrics;
 
-    public ViewCountSyncTask(ArticleViewCounter viewCounter, ArticleMapper articleMapper) {
+    public ViewCountSyncTask(ArticleViewCounter viewCounter, ArticleMapper articleMapper,
+                             BusinessMetrics metrics) {
         this.viewCounter = viewCounter;
         this.articleMapper = articleMapper;
+        this.metrics = metrics;
     }
 
     /**
@@ -69,6 +75,16 @@ public class ViewCountSyncTask {
      * 【为什么这个方法要 public 且不返回 void 之外的东西】
      *   测试里会直接调用它（而不是等 5 分钟）——
      *   定时任务本身由框架保证触发，但"同步逻辑对不对"应该能被确定性地验证。
+     *
+     * 【怎么统计这次同步】
+     *   用 {@code Timer.record(时长, 单位)} 手动记时，而不是把整段逻辑包成 lambda。
+     *   原因是这段逻辑要往外写两个局部变量（成功行数、失败列表），
+     *   包成 lambda 之后它们必须变成"有效 final"，只能拿数组或 AtomicInteger 去绕，
+     *   读起来会突然多出一层无关的容器。
+     *   这里用 try/finally 保证"哪怕中途抛异常也把耗时记下来"——
+     *   出问题的那一次耗时，恰恰是最需要看到的。
+     *   ⚠️ 计时范围是"写库"这一段，不含前面的 drainAll 和后面的记指标 ——
+     *   两件事混在一起会让这个数字失真。
      */
     @Scheduled(fixedDelayString = "${app.article.view-sync-interval-ms:300000}")
     @Transactional(rollbackFor = Exception.class)
@@ -89,19 +105,38 @@ public class ViewCountSyncTask {
         //   这和原来 increaseViewCount 里的做法保持同一个正确思路，
         //   只是现在从"每次访问一次"变成了"每 5 分钟一批"。
         int updated = 0;
+        long flushedViews = 0L;
         List<Long> failed = new ArrayList<>();
-        for (Map.Entry<Long, Long> entry : deltas.entrySet()) {
-            Long articleId = entry.getKey();
-            Long delta = entry.getValue();
-            try {
-                updated += articleMapper.update(null, new LambdaUpdateWrapper<Article>()
-                        .eq(Article::getId, articleId)
-                        .setSql("view_count = view_count + " + delta));
-            } catch (Exception e) {
-                failed.add(articleId);
-                log.warn("同步浏览量失败, articleId={}, delta={}: {}", articleId, delta, e.getMessage());
+        Timer timer = metrics.viewSyncTimer();
+        long startNanos = System.nanoTime();
+        try {
+            for (Map.Entry<Long, Long> entry : deltas.entrySet()) {
+                Long articleId = entry.getKey();
+                Long delta = entry.getValue();
+                try {
+                    int rows = articleMapper.update(null, new LambdaUpdateWrapper<Article>()
+                            .eq(Article::getId, articleId)
+                            .setSql("view_count = view_count + " + delta));
+                    updated += rows;
+                    // 【为什么只在 rows > 0 时才算"落库成功"】
+                    //   文章在这 5 分钟里被物理删掉了的话，这条 UPDATE 影响 0 行 ——
+                    //   它的增量其实没有进数据库，不该被算成"已落库"。
+                    //   指标是要拿来做判断的，宁可少算，也别让它虚高。
+                    if (rows > 0) {
+                        flushedViews += delta;
+                    }
+                } catch (Exception e) {
+                    failed.add(articleId);
+                    log.warn("同步浏览量失败, articleId={}, delta={}: {}", articleId, delta, e.getMessage());
+                }
             }
+        } finally {
+            timer.record(System.nanoTime() - startNanos, TimeUnit.NANOSECONDS);
         }
+
+        // 指标在写库之后记：先把数写进去，再对外声明"落了这么多"。
+        // 顺序反过来的话，如果写库抛异常，指标就已经先涨上去了 —— 数字对不上真实情况。
+        metrics.recordViewSync(deltas.size(), flushedViews);
 
         log.info("浏览量同步完成: 本次处理 {} 篇文章的增量, 影响 {} 行{}",
                 deltas.size(), updated,

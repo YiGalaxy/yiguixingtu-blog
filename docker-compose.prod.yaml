@@ -173,8 +173,20 @@ services:
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
       BOOTSTRAP_ADMIN_NICKNAME: ${BOOTSTRAP_ADMIN_NICKNAME:-站长}
     ports:
-      # 应用端口要对外（Nginx 要反代到它），所以这一个是要映射的
-      - "${BACKEND_PORT:-8082}:8082"
+      # 应用端口要给 Nginx 反代，所以这一行必须映射 —— 但【只绑到 127.0.0.1】。
+      #
+      # 【为什么前面要加 "127.0.0.1:"，不能只写 "8082:8082"】
+      #   不写前缀时，Docker 会把它绑到 0.0.0.0，也就是【公网也能直连这个端口】。
+      #   那意味着两件事：
+      #     ① 别人可以绕过 Nginx 直接打后端 —— 限流、访问日志、
+      #        HTTPS 全部失效（Nginx 那层根本没参与）；
+      #     ② /actuator/prometheus 这个指标端点也一起暴露到公网了
+      #        （它在 SecurityConfig 里是放行的，理由见那边的注释）。
+      #   而我们的 Nginx 就装在这台宿主机上，反代目标是 127.0.0.1:8082，
+      #   所以绑到回环地址对它毫无影响，只是把公网这条路堵掉。
+      #   还有一层保险：云服务器上只放行 443/22 的安全组，8082 本来就不开。
+      #   两层一起用，是因为"安全组没配错"这件事不该靠记性。
+      - "127.0.0.1:${BACKEND_PORT:-8082}:8082"
     healthcheck:
       # 打 actuator 的健康端点，判断"应用真的能干活了"，而不是只看端口开着。
       # -f 让 curl 在收到 4xx/5xx 时返回非 0，健康检查才会正确判定失败
@@ -218,8 +230,9 @@ services:
       # SSR 少绕一圈 DNS + Nginx，也避免了"域名还没配好时 SSR 直接失败"。
       NUXT_API_BASE_SERVER: http://backend:8082
     ports:
-      # 前端也要对外（Nginx 反代到它）
-      - "${FRONTEND_PORT:-3000}:3000"
+      # 前端同样只绑回环：对外只应该有 Nginx 的 443，不该有 3000。
+      # 理由和上面后端那段一样，这里不重复。
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
     healthcheck:
       # 镜像里是 alpine + node，没有 curl，所以直接用 node 自带的 fetch 探活。
       # 打首页并检查 HTTP 是否 2xx/3xx —— 只要 SSR 服务活着就会返回

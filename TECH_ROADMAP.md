@@ -664,7 +664,7 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 | **M2** | ⬜ 待做 | **A1 + A2**：缓存三件套 + 浏览量计数 | 「数据库与缓存」升级为掌握级；那条 `了解 Redis 高并发` **从"了解"行移出** |
 | **M3** | ✅ 完成（3.1 多环境 · 3.2 OSS上传 · 3.3 Dockerfile+四容器 · 3.4 部署文档 · 3.5 管理员引导） | **E1 + B4 + B5 + B6**：多环境 → OSS 上传 → 上线 → CD | 徽章「已上线」与结尾「阿里云 ECS + OSS」**变成真的**；过一遍 §8「简历同步规则」第 1 条的不可见注释核对门 |
 | **M4** | ⬜ 待做 | **A3 + A4**：Nginx + Resilience4j 限流、Spring 事件驱动的操作审计 | 技能栏加 `Resilience4j`（限流与熔断降级）、`Redisson`；「切面与事务」那条**保持原样** —— `@Transactional` / `@PreAuthorize` 就是最主流的用法，不需要改 |
-| **M5** | 🔄 进行中（5.2 ✅ 5.3 ✅ 5.9 ✅ / 5.1 卡住待查 / 其余待做） | **D + E 其余**：traceId、压测对比、幂等、指标暴露 | 面试纵深：**这些是"做过才答得出"的细节** |
+| **M5** | 🔄 进行中（5.2 ✅ 5.3 ✅ 5.7 ✅ 5.9 ✅ / 5.1 卡住待查 / 其余待做） | **D + E 其余**：traceId、压测对比、幂等、错误码统一 | 面试纵深：**这些是"做过才答得出"的细节** |
 | **M6** | ⬜ 待做 | **C / F**：标签评论、搜索、消息队列、前端站点 | 按需，别为了关键词硬做 |
 
 **顺序理由**：B1/B2 只是给测试和 CI 加壳、**不改业务代码**，风险最低，却立刻把 76 个用例从"只能自己跑"变成"任何人都能验证"，所以排在最前面；A 批改的是现有业务代码，收益最快但风险略高，紧随其后；E1/B5 负责把东西真正交付出去；D/E 其余是**在 A/B 建好的东西上加纵深**（traceId 的价值要靠 A4 的异步日志才体现）；C 需要新业务模块，放最后。
@@ -1123,9 +1123,36 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 
 ### M5 · 可观测与安全（2–3 天，9 个提交）
 
-> ### 🔄 进度：5.2 ✅（登出 token 失效）· 5.3 ✅（索引 + 慢查询日志）· 5.9 ✅（安全响应头 + Dependabot）· 5.1 ⏸ 卡住
+> ### 🔄 进度：5.2 ✅（登出 token 失效）· 5.3 ✅（索引 + 慢查询日志）· 5.7 ✅（Prometheus 指标）· 5.9 ✅（安全响应头 + Dependabot）· 5.1 ⏸ 卡住
 >
-> **5.3 已完成**（本次提交）：`V2__add_article_sort_index.sql` + 慢查询日志。
+> **5.7 已完成**（本次提交）：`micrometer-registry-prometheus` +
+> `/actuator/prometheus` + 5 个业务指标 + `MetricsEndpointTest`（8 个用例）。
+>
+> **⚠️ 它顺手给 5.1 带来了一条关键线索（这条比 5.7 本身更值钱）**
+>   指标跑通之后，"HTTP 请求根本不会创建 observation" 这个假设被推翻了 ——
+>   因为 `http_server_requests` 指标本来就来自同一条 Observation 管道
+>   （`ServerHttpObservationFilter` → `ObservationRegistry` → 各个 handler）。
+>   测试里断言它真的出现了，实测也确实出现了。
+>   也就是说：**observation 被创建了，只是 TracingObservationHandler
+>   没有被注册进去**（或者注册的是另一个 ObservationRegistry 实例）。
+>   下一步应该去查的是"registry 上到底挂了哪些 handler"，
+>   而不是继续查"为什么没创建 observation"。
+>
+> **5.7 里几个刻意的取舍**
+>   · 指标端点放行在同一个端口上，**没有**用 `management.server.port` 挪到 8081。
+>     挪端口确实是更严格的做法（主端口上根本没有 /actuator），
+>     没采用的具体原因：固定端口会和本机同时在跑的开发服务抢 8081，
+>     测试里要改成随机端口 + `@LocalManagementPort` 才不冲突，
+>     而收益只是"把护栏从部署挪到配置里"。
+>     最终选择"用网络位置保护它"：后端端口只绑 127.0.0.1（见下面的改动）
+>     + Nginx 只反代 /api/ + 云安全组不开 8082，三道一起用。
+>   · 顺带把 prod 的前后端端口都改成 `"127.0.0.1:xxxx:xxxx"`。
+>     原来写 `"8082:8082"` 会绑到 0.0.0.0，等于绕过 Nginx 直接对公网开了一个口，
+>     限流/访问日志/HTTPS 全都失效 —— 这一条本身就是个真实的安全问题。
+>   · "缓存命中率"这个指标**没做**：缓存（M2）还没落地，
+>     现在埋一条永远为 0 的指标比不埋更糟。等 M2 做完再补。
+>
+> **5.3 已完成**（上一个提交）：`V2__add_article_sort_index.sql` + 慢查询日志。
 > 实测（20 万行，见 `docs/perf/explain-article-list.sql`）：
 >   · 前台默认列表 **183ms → 0.11ms**，扫描行数 16 万 → 10，`Using filesort`
 >     变成 `Backward index scan`
@@ -1161,13 +1188,21 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 >       另外发现 `management.tracing.propagation.produce` 的**默认值只产出 W3C**
 >       （也就是 `traceparent`，不含 `X-B3-TraceId`）——
 >       想拿 B3 响应头必须显式把 produce 也设成含 B3
->     · 但既然**日志里连 traceId 都没有**，说明问题更靠前：
->       **HTTP 请求根本没有创建 span**，改传播格式的配置解决不了这个
->   下一步建议：
->     用 `--debug` 启动，看 condition evaluation report 里
->     tracing / observation 相关的自动配置到底为什么没生效
->     （上一次 Flyway 的静默失效就是靠"去查 flyway_schema_history 存不存在"发现的，
->      这次同理：先确认"span 到底有没有被创建"）
+>     · 但既然**日志里连 traceId 都没有**，说明问题不在"传播格式"上，
+>       改 produce 的配置解决不了
+>     · ⚠️ 而且 5.7 之后，"HTTP 请求没有创建 observation" 这个猜测也**被推翻了**：
+>       `http_server_requests` 指标和 traceId 走的是同一条 Observation 管道，
+>       而那条指标实测是有的（MetricsEndpointTest 里有断言）。
+>       → 所以真正没做成的只有最后一环：
+>       **TracingObservationHandler 没挂到 ObservationRegistry 上**
+>   下一步建议（比上次更具体）：
+>     写一个临时用例，把 `ObservationRegistry` 里的 handler 列表打出来
+>     （`observationRegistry.observationConfig().getObservationHandlers()`），
+>     看 `TracingObservationHandler` 到底在不在：
+>       · 不在 → 问题在自动配置（去查 `MicrometerTracingAutoConfiguration`
+>         的生效条件，仍然是 Boot 4 拆模块那一类问题）
+>       · 在   → 问题在"我们打日志时用的那个作用域"，而不是 handler 本身
+>     这样一刀就能把范围砍成两半，比继续试配置快得多
 >   改动暂存在 `git stash`（`stash@{0}`）
 >
 > **5.9 已完成**（提交 `002efad`）：四个安全响应头 + Dependabot。
@@ -1181,7 +1216,7 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 | **5.4** | `新增基于唯一索引与Redisson锁的接口幂等` | 数据库唯一索引兜底（**主力**）+ Redisson `RLock` 辅助（**不自研 `@Idempotent` 切面**） | 连续两次发布只产生一篇文章；唯一索引冲突时返回友好提示而不是 500 |
 | **5.5** | `新增登录验证码与失败次数锁定`（可选） | Redis 存验证码 + 失败计数 | 验证码错误被拒；失败 5 次后锁定 |
 | **5.6** | `统一异常响应的HTTP状态码`（**破坏性，需先确认**） | 5 个 handler 改返回 `ResponseEntity` | 全部异常用例同时断言 HTTP 状态码与 `body.code`；**前端需同步改** |
-| **5.7** | `新增Prometheus指标暴露与自定义业务指标` | `micrometer-registry-prometheus`、`/actuator/prometheus`、自定义 **缓存命中率**（2.x）与 **限流拒绝数**（4.1）；放行 `/actuator/health` 供容器探针使用 | 指标端点可访问且带自定义指标；health 探针返回 200；现有用例不受影响 |
+| **5.7** | ✅ `新增Prometheus指标暴露与自定义业务指标` | `micrometer-registry-prometheus`、`/actuator/prometheus`、自定义业务指标（**缓存命中率**等 M2 落地后再补，见进度块）；放行 `/actuator/health` 供容器探针使用 | 指标端点可访问且带自定义指标；health 探针返回 200；现有用例不受影响 —— **已完成，见上方进度块** |
 | **5.8** | `新增数据库连接池调优与压测对比数据` | HikariCP 显式参数（`maximum-pool-size` / `minimum-idle` / `connection-timeout` / `max-lifetime`）；用 `wrk` 对 `/article/page` 压测，记录**加缓存前 vs 后**的 QPS / 平均延迟 / P99 | 用例不受影响；README 有压测对比表；连接池参数有依据（不是抄数字） |
 | **5.9** | `新增安全响应头与生产凭据治理` | `X-Content-Type-Options` / `X-Frame-Options` / `Referrer-Policy` / HSTS；prod 专用低权限库账号（替换 `root/root`）、Redis 设 `requirepass`、开启 Dependabot | 响应头在集成测试里断言；用例全绿 |
 

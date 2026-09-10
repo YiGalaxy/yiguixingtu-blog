@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-138%20passing-success)
+![Tests](https://img.shields.io/badge/tests-146%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **138 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **146 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -32,11 +32,12 @@
 | ORM | MyBatis-Plus 3.5.17（含 `mybatis-plus-jsqlparser` 分页/条件构造） |
 | 数据库 | MySQL 8 |
 | 数据库迁移 | Flyway 12（`spring-boot-flyway` + `flyway-core` + `flyway-mysql`） |
-| 缓存 | Redis 7（当前用于缓存认证信息，见「认证与鉴权」） |
+| 缓存 | Redis 7（当前用于缓存认证信息、Token 黑名单、浏览量计数，见「认证与鉴权」） |
 | 安全 | Spring Security 7 + JWT（jjwt 0.12.6）+ BCrypt |
 | 参数校验 | Spring Validation（`spring-boot-starter-validation`） |
 | 接口文档 | springdoc-openapi 3.0.0（OpenAPI / Swagger UI） |
-| 运维监控 | Spring Boot Actuator |
+| 运维监控 | Spring Boot Actuator + Micrometer（Prometheus registry），见「可观测」 |
+| 对象存储 | 阿里云 OSS SDK 3.18.1（生产用；本地默认存磁盘） |
 | 工具库 | Lombok |
 | 测试 | JUnit 5 + MockMvc（`spring-boot-starter-webmvc-test`）+ **Testcontainers 2.0.5** |
 | 代码覆盖率 | JaCoCo 0.8.13 |
@@ -75,7 +76,7 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
-- 集成测试 17 个类 **138 个用例**，行覆盖率 **86%**
+- 集成测试 18 个类 **146 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
 
@@ -99,18 +100,24 @@ com.yigalaxy.yiguixingtu
 ├── common
 │   ├── Result                      # 统一返回包装 {code, message, data}
 │   ├── ResultCode                  # 结果码枚举
+│   ├── metrics/BusinessMetrics     # 自定义业务指标（浏览量落库 / 登录 / token 拉黑）
 │   └── exception
 │       ├── BusinessException       # 自定义业务异常
 │       └── GlobalExceptionHandler  # 全局异常处理器（6 类异常）
 ├── config
-│   ├── MybatisPlusConfig           # 分页插件
-│   └── SecurityConfig              # Spring Security 过滤链 + JWT + CORS + 401/403 JSON
+│   ├── MybatisPlusConfig           # 分页插件（全局上限 100 兜底）
+│   ├── SecurityConfig              # Spring Security 过滤链 + JWT + CORS + 401/403 JSON + 安全响应头
+│   ├── WebMvcConfig                # /uploads/** 映射到本地存储目录
+│   ├── SchedulingConfig            # @EnableScheduling（浏览量定时落库要用）
+│   └── AdminBootstrapRunner        # 空库启动时引导创建第一个管理员
 ├── auth
 │   ├── controller/AuthController   # 登录 / 注册 / 登出 / 当前用户
 │   ├── service/UserDetailsServiceImpl
-│   ├── util/JwtUtil                # JWT 签发与解析
-│   ├── filter/JwtAuthenticationFilter
+│   ├── util/JwtUtil                # JWT 签发与解析（含 jti，用于登出作废）
+│   ├── filter/JwtAuthenticationFilter   # 验签 + 查黑名单 + 查认证缓存
 │   ├── cache/UserAuthCache         # 用户认证信息 Redis 缓存 + token 即时撤销
+│   ├── cache/TokenBlacklist        # 按 jti 的 token 黑名单（登出用）
+│   ├── metrics/AuthenticationMetricsListener  # 监听认证事件统计登录成败
 │   ├── dto/                        # LoginRequest / RegisterRequest / LoginVO
 │   ├── JwtProperties               # JWT 配置绑定
 │   └── LoginUser                   # 认证用户包装（含 status/role）
@@ -126,7 +133,16 @@ com.yigalaxy.yiguixingtu
 │   ├── service/ArticleService(+Impl)
 │   ├── entity/Article
 │   ├── mapper/ArticleMapper
+│   ├── cache/ArticleViewCounter    # 浏览量 Redis 计数器（详情页只 INCR，不写库）
+│   ├── task/ViewCountSyncTask      # 定时把 Redis 增量批量落库
 │   └── dto/                        # ArticleForm / ArticleQuery / ArticleVO
+├── upload
+│   ├── controller/UploadController # POST /upload（ADMIN）
+│   ├── service/UploadService       # 类型白名单 + UUID 重命名 + 按日期分目录
+│   ├── storage/FileStorage         # 接口
+│   ├── storage/LocalFileStorage    # 本地磁盘（默认）
+│   ├── storage/OssFileStorage      # 阿里云 OSS（生产）
+│   └── UploadProperties            # 上传配置绑定
 └── category
     ├── controller/CategoryController      # 分类列表（公开）
     ├── service/CategoryService(+Impl)
@@ -154,6 +170,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── UploadAdminTest                 # 封面上传（类型/大小校验、权限）
 ├── LogoutTokenTest                 # 登出后旧 token 立即失效（jti 黑名单）
 ├── SecurityHeadersTest             # 四个安全响应头
+├── MetricsEndpointTest             # 指标端点与自定义业务指标
 ├── PaginationLimitTest             # 分页全局上限（从 Mapper 层验证插件兜底）
 ├── ProfileDevConfigTest            # dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单
 ├── ProfileProdConfigTest           # prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量
@@ -873,6 +890,124 @@ docker exec yiguixingtu-mysql cat /var/lib/mysql/slow.log
 > 只有本机 Windows 开发环境静默失效**——典型的"线上对、本地错"，而且一点声音都没有。
 > 换成命令行参数后，权限语义完全不参与，两个平台行为一致。
 
+## 可观测
+
+### 暴露了哪些端点
+
+| 端点 | 谁能访问 | 用途 |
+|------|---------|------|
+| `/actuator/health` | 所有人（匿名） | 容器健康检查、负载均衡探活。只返回 `{"status":"UP"}`，不带数据库/Redis 细节 |
+| `/actuator/prometheus` | 匿名可达，但**只绑在 127.0.0.1** | Prometheus 抓取指标 |
+
+**其余端点一律没开**（`beans` / `env` / `mappings` / `heapdump` …）。
+它们会把内部结构甚至内存内容吐出来，对一个公网服务来说没必要。
+
+`MetricsEndpointTest` 里有一条用例专门验证这件事 —— 而且它写得比看起来麻烦：
+
+> 📌 这条用例踩了两次有意思的坑，都记在测试代码注释里：
+> ① 匿名请求 `/actuator/env` 得到的是 **401** 而不是 404 ——
+> Spring Security 在**路由之前**就拦掉了，请求根本没走到"端点存不存在"那一步。
+> 401 同时对应"端点没开"和"端点开着只是要登录"两种完全不同的情况，断言它等于没测。
+> 改成带管理员 token 请求，才能走到派发这一步。
+>
+> ② 带上 token 之后，得到的也不是 404，而是 **HTTP 200 + `{"code":500}`** ——
+> 因为「统一返回」那条约定把所有异常都转成了 200 + body.code，
+> "找不到端点"抛出的 `NoResourceFoundException` 也落进了兜底处理器。
+> **所以在这个项目里，HTTP 状态码不能用来判断端点存不存在。**
+> 最终断言改成"响应体里没有 env/beans 的数据"—— 它跟错误码约定解耦，
+> 将来真把状态码统一了（路线图 5.6），这条用例也不用改。
+
+### 框架自带 vs 我们自己埋的指标
+
+装上 `micrometer-registry-prometheus` 之后，下面这些**不用写一行代码**就有：
+
+| 指标 | 看什么 |
+|------|--------|
+| `jvm_memory_used_bytes` / `jvm_gc_*` | JVM 内存与 GC —— 判断"是不是内存不够导致卡" |
+| `http_server_requests_seconds` | 每个接口的请求量与耗时分布（能算 P50/P99） |
+| `hikaricp_connections_*` | 数据库连接池的活跃/空闲连接 |
+| `tomcat_threads_*` | Web 容器线程池是否被占满 |
+
+但框架指标只知道"技术层面发生了什么"。它看不到业务上的异常，举个真实的例子：
+
+> 浏览量落库失败时 —— 详情页照样返回 200（`http_server_requests` 一切正常）、
+> JVM 正常、连接池正常。可 Redis 里的增量正在悄悄堆积，
+> 数据库里的浏览量和真实访问量越差越远。**技术指标全绿，业务已经出事了。**
+
+所以另外埋了 5 个业务指标（都在 `BusinessMetrics` 里集中定义）：
+
+| 指标 | 类型 | 含义 |
+|------|------|------|
+| `yiguixingtu_article_views_flushed_total` | Counter | 累计落库的浏览量增量（次） |
+| `yiguixingtu_article_views_synced_articles_total` | Counter | 累计落库涉及的文章数（篇） |
+| `yiguixingtu_article_views_pending` | Gauge | 最近一次同步时待落库的文章数 —— 持续不为 0 说明同步在堆积 |
+| `yiguixingtu_article_views_sync_seconds` | Timer | 一次批量落库的耗时 |
+| `yiguixingtu_auth_login_total` | Counter | 登录次数，标签 `result=success\|failure` |
+| `yiguixingtu_auth_token_revoked_total` | Counter | 被拉黑的 token 数（登出**真正生效**的次数） |
+
+> Micrometer 里的点号 `.` 在 Prometheus 输出里会变成下划线 `_`，
+> `..._total` 后缀是 Prometheus 给 Counter 加的，所以对上表时注意名字的这点差异。
+
+**三个刻意的设计决定：**
+
+1. **标签里绝不放会无限增长的值。**
+   登录指标只打了 `result` 和 `reason`（异常类名），
+   **没有**打用户名 —— 用户名做成标签的话，序列数量随用户数无限增长，
+   内存和 Prometheus 存储都会被拖垮（"标签基数爆炸"）；
+   而且用户名属于个人信息，监控系统不该收到它。用户名只进日志。
+   同理，HTTP 指标的 `uri` 标签由框架替换成 `/article/{id}` 这样的模板，
+   并且默认上限 100 个不同取值（`management.metrics.web.server.max-uri-tags`）。
+
+2. **"待落库数量"用内存里的数字，而不是去问 Redis。**
+   Gauge 的取值发生在 Prometheus 来抓的那一刻，最直白的实现是那时去 Redis 数一下 key 个数
+   ——但那要跑一条 `KEYS`，而 `KEYS` 会阻塞 Redis（它扫整个 keyspace）。
+   让监控采集去阻塞生产 Redis 是本末倒置。所以改成由定时任务在同步时把值记下来，
+   采集时只读一个内存数字。代价是它滞后一个同步周期，对"有没有在堆积"这个判断完全够用。
+
+3. **登录统计靠监听 Spring Security 自己的事件，而不是在登录接口里插桩。**
+   `AuthenticationSuccessEvent` / `AbstractAuthenticationFailureEvent` 是框架本来就发的，
+   监听它们比在 Controller 里写 try/catch 更不容易漏（写验证码登录、
+   或别处调用 `AuthenticationManager` 时那份统计依然有效）。
+   监听的是**抽象基类**而不是一个个具体事件 —— 将来 Spring 新增一种失败事件也不会漏统计。
+   ⚠️ 这条依赖"Boot 自动配置了 `AuthenticationEventPublisher`"，
+   而"应该会"不等于"真的会"，所以有用例真的登录失败一次、断言计数涨了。
+
+> **为什么没有"缓存命中率"这条**：它属于缓存那批工作（路线图 M2），
+> 而缓存目前是暂停状态（有一个复现不稳定的现象还没查清，见路线图）。
+> 指标要在功能落地之后再埋，否则就是一个永远为 0 的假指标 —— 那比没有更糟。
+
+### 谁来抓、怎么抓
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: yiguixingtu
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # 后台端口只绑在 127.0.0.1，所以 Prometheus 和它装在同一台机器上；
+      # 如果 Prometheus 是容器、和 backend 在同一个 compose 网络里，
+      # 这里可以写 http://backend:8082
+      - targets: ['127.0.0.1:8082']
+```
+
+验证抓得到：
+
+```bash
+curl -s http://127.0.0.1:8082/actuator/prometheus | head -20
+```
+
+> ⚠️ **`/actuator/prometheus` 是匿名可达的，它的安全护栏不在代码里，在部署上：**
+>
+> | 护栏 | 在哪 |
+> |------|------|
+> | 后端端口只绑 `127.0.0.1` | `docker-compose.prod.yaml` 里的 `"127.0.0.1:8082:8082"` |
+> | Nginx 只反代 `/api/` | README「Nginx 反向代理」那段的配置，没有 `/actuator` 的 location |
+> | 云服务器安全组不开 8082 | 阿里云控制台 |
+>
+> 为什么不用 JWT 保护它：抓取指标的是 Prometheus，它没有也不该有我们的 token。
+> 要求登录的实际结果只有两种 —— 要么抓不到，要么为了能抓配一个长期不过期的 token，
+> 那比放行更糟。所以选择"用网络位置限制"，并把这件事写进上线核对清单。
+
 ## 安全
 
 ### 安全响应头
@@ -1051,6 +1186,8 @@ server {
 | 5 | 管理员能登录后台 | 打开 `/admin`，用引导账号登录 |
 | 6 | 换掉引导管理员的初始密码 | 后台 → 用户管理 → 重置密码 |
 | 7 | 数据库每天自动备份 | 见下面「备份与恢复」 |
+| 8 | 后端/前端端口只绑回环，没有对公网开放 | 在服务器外 `telnet 服务器IP 8082` 与 `telnet 服务器IP 3000` 都应当连不上（`docker-compose.prod.yaml` 里已写成 `127.0.0.1:` 前缀） |
+| 9 | `/actuator/prometheus` 没有被公网看到 | 访问 `https://你的域名/api/actuator/prometheus` 应当拿不到指标（Nginx 只反代 `/api/`，正常情况打不到） |
 
 ### 5. 备份与恢复
 
@@ -1139,7 +1276,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 138 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 146 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1151,10 +1288,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 138 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 146 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**17 个测试类，138 个用例，全部通过：**
+**18 个测试类，146 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -1170,12 +1307,13 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `UploadAdminTest` | 10 | 封面上传：类型/大小白名单、UUID 重命名、非管理员 403 |
 | `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |
 | `SecurityHeadersTest` | 7 | 四个安全响应头，含 401 与上传响应两条易漏路径 |
+| `MetricsEndpointTest` | 8 | 指标端点：Prometheus 格式与内容、未开放的端点确实不可达、登录/登出/浏览量落库指标真的会涨 |
 | `PaginationLimitTest` | 2 | 分页全局上限（从 Mapper 层验证插件兜底，接口层测不到） |
 | `ProfileDevConfigTest` | 6 | dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单 |
 | `ProfileProdConfigTest` | 3 | prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量 |
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **138** | |
+| **合计** | **146** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

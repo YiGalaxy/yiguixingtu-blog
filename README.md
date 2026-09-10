@@ -1,7 +1,15 @@
 # yiguixingtu — 个人博客系统（后端）
 
+[![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
+![Java](https://img.shields.io/badge/Java-17-blue)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
+![Tests](https://img.shields.io/badge/tests-76%20passing-success)
+![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
+
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
+>
+> **76 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -31,6 +39,8 @@
 | 运维监控 | Spring Boot Actuator |
 | 工具库 | Lombok |
 | 测试 | JUnit 5 + MockMvc（`spring-boot-starter-webmvc-test`）+ **Testcontainers 2.0.5** |
+| 代码覆盖率 | JaCoCo 0.8.13 |
+| 持续集成 | GitHub Actions（`.github/workflows/ci.yml`） |
 
 ## 功能特性
 
@@ -61,7 +71,8 @@
 - 自动生成 OpenAPI 接口文档
 - **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
-- 集成测试 8 个类 **76 个用例**
+- **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
+- 集成测试 8 个类 **76 个用例**，行覆盖率 **86.2%**
 
 ### 🚧 规划中
 
@@ -505,15 +516,58 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 > 表结构**不要手动改**。需要改表就新增一个迁移脚本（`V2__xxx.sql`），
 > 让开发库、测试库、生产库走同一条路径。
 
-## 测试
+## 构建与测试
+
+### 跑测试
 
 ```bash
-# Maven
-mvn test
+# 仓库自带 wrapper（推荐，锁定 Maven 3.9.16）
+./mvnw -B test          # Linux / macOS
+.\mvnw.cmd -B test      # Windows
 
-# 仓库自带 wrapper
-./mvnw.cmd -B test
+# 或者用本地 Maven
+mvn test
 ```
+
+**只需要本机有 Docker，不需要事先启动 MySQL / Redis**（原因见下面「测试环境自带容器」）。
+
+### 构建 + 覆盖率报告
+
+```bash
+./mvnw -B verify
+```
+
+用 `verify` 而不是 `test`，因为覆盖率报告绑定在 `verify` 阶段。
+跑完在 `target/site/jacoco/index.html` 可以看到可视化报告。
+
+**当前覆盖率（`verify` 实测）：**
+
+| 维度 | 覆盖率 |
+|------|:---:|
+| 行覆盖 | **86.2%**（507 / 588） |
+| 方法覆盖 | **95.2%**（119 / 125） |
+| 指令覆盖 | **86.3%**（2,227 / 2,581） |
+| 分支覆盖 | 55.2%（111 / 201） |
+
+> 分支覆盖率明显低于行覆盖率，是因为大量的**参数校验分支、异常兜底分支、
+> 空值判断分支**不会被每个用例都走到——这是正常的，不必为了刷数字硬凑用例。
+> 真正该关心的是关键路径有没有被覆盖：认证、权限、草稿隔离、逻辑删除这几条都在 100% 附近。
+
+覆盖率**只统计本项目自己的代码**（JaCoCo 配了 `includes: com/yigalaxy/yiguixingtu/**`），
+不把依赖库算进去。
+
+### 持续集成（GitHub Actions）
+
+`.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
+
+1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
+2. `./mvnw -B verify` —— 构建 + 跑 76 个用例 + 出覆盖率
+3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
+
+**CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
+GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所在。
+
+### 测试环境自带容器
 
 > ✅ **测试不需要事先启动任何服务。** 测试启动时由 **Testcontainers**
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以

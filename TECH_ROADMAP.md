@@ -108,7 +108,7 @@
 | 13 | **空库里没有任何管理员账号，而且没有任何途径能造出一个** | 🔴 | `UserServiceImpl.java:53`（注册硬编码 `setRole("GUEST")`）vs `UserController.java:36`（改角色本身要求 ADMIN） | **鸡生蛋**：注册只产出 GUEST，而把某人提升为 ADMIN 又必须由 ADMIN 来操作。本地一直没暴露，是因为库里早就有 id=1 的管理员；换成全新数据库（比如部署到 ECS 那天、或者别人 clone 下来）会发现**后台根本进不去**。写演示数据文档时才发现 | **3.5** |
 | 4 | `updateStatus` / `remove` 没有 `@Transactional`，是"先 select 再 update"两步 | 🟡 | `ArticleServiceImpl.java:188`、`:206` | 窗口极小、不涉及跨表不变量，**危害很低**；问题主要是和同样两步的 `create`/`update` 风格不一致 | **E8** |
 | 8 | **没有任何日志配置**：无 `logback-spring.xml`，无文件、无滚动、无 traceId | 🟡 | `src/main/resources/` | 本地无所谓，线上排查时日志拼不起来 | **D2** |
-| 10 | **README 与代码不符**：端口写 8081（实际 8082）、MySQL 写 3307（实际 3310）、"文章/分类在规划中"（已完成）、接口表只列 4 个（实际 18） | 🟡 | `README.md:90,119,120,153,177-182` | 面试官点开仓库第一眼看的就是它 | **G** |
+| 10 | **README 与代码不符**：端口写 8081（实际 8082）、MySQL 写 3307（实际 3310）、"文章/分类在规划中"（已完成）、接口表只列 4 个（实际 18） | 🟡 → ✅ **已解决** | `README.md:90,119,120,153,177-182` | 面试官点开仓库第一眼看的就是它。**已由提交 0.1 修复**：端口、模块状态、18 个接口表、权限矩阵、建表方式、测试节全部重写对齐 | ~~G~~ **0.1** |
 | 12 | `docker-compose.yaml` 只有 mysql/redis：无 backend、无 healthcheck、无 restart | 🟡 | `docker-compose.yaml` | 服务器重启后服务不会自己起来 | **B5** · **B8** |
 | 5 | **HTTP 状态码与 body 里的 code 不一致**：除 `AccessDenied` 外，其余 handler 全返回 HTTP 200 | 🟠 | `GlobalExceptionHandler.java:25-60` vs `:79` | 这是**有意约定**（前端统一读 `body.code`），代码里 `:70-72` 也写明了为什么 `AccessDenied` 要特殊处理。改它是**破坏性改动**（前端全部错误分支要跟着改）——**要么现在成体系改，要么写进 README 当明示约定，别改一半** | **E8** |
 | 7 | 全项目只有一个 `application.properties`，没有 profile 拆分 | 🟠 | `src/main/resources/` | 本地开发完全够用；但 Swagger、SQL 日志、数据源、CORS 都只能"改文件再打包"，上线前必须补 | **E1** |
@@ -116,7 +116,7 @@
 | 2 | `/auth/me` 每次都查一次库，尽管过滤器刚从 Redis 拿到同一份用户（含 nickname） | 🔵 | `AuthController.java:100` vs `JwtAuthenticationFilter.java:113` | `/me` 是低频接口（前端一般启动时调一次），**不影响性能**；但这次查询确实是白花的，顺手去掉更干净 | **A1 附** |
 
 > **别被这张表误导**：13 项里真正会造成故障的只有 **5 个**（#1 登出、#3 写放大、#6 跨域、#9 测试不可移植、#13 空库无管理员），
-> 其中 **#9 已随提交 1.2 修复**；#4/#5 是"看着不专业"和"有意的约定"，#2 是优化项。
+> 其中 **#9、#10 已随 M0/M1 修复**；#4/#5 是"看着不专业"和"有意的约定"，#2 是优化项。
 > 这个项目当前的主要短板**不是"有 bug"，而是"代码里的好东西没有被交付出去"**（测试跑不起来、README 停在三个月前、没上线）。
 > 所以计划的排序原则是：**先补交付（B1/B2/G），再做纵深（A/D/E），最后才是新业务（C）**。
 
@@ -660,7 +660,7 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 | 里程碑 | 状态 | 内容 | 完成后能改简历的哪一句 |
 |---|---|---|---|
 | **M0** | ✅ 完成 | **G**：README / `BACKEND_PLAN.md` / 本文件与代码对齐 | 不改简历，但**面试官点开仓库看到的第一眼** |
-| **M1** | 🔄 进行中（1.1 ✅ 1.2 ✅ / 1.3 待做） | **B3 + B1 + B2**：Flyway → Testcontainers → CI/JaCoCo | 技能栏「工程化」加 **Testcontainers / CI-CD / JaCoCo / Flyway**；项目经历「测试与部署」那条可以写容器化集成测试 |
+| **M1** | ✅ 完成（1.1 Flyway · 1.2 Testcontainers · 1.3 CI+JaCoCo） | **B3 + B1 + B2**：Flyway → Testcontainers → CI/JaCoCo | 技能栏「工程化」加 **Testcontainers / CI-CD / JaCoCo / Flyway**；项目经历「测试与部署」那条可以写容器化集成测试 |
 | **M2** | ⬜ 待做 | **A1 + A2**：缓存三件套 + 浏览量计数 | 「数据库与缓存」升级为掌握级；那条 `了解 Redis 高并发` **从"了解"行移出** |
 | **M3** | ⬜ 待做 | **E1 + B4 + B5 + B6**：多环境 → OSS 上传 → 上线 → CD | 徽章「已上线」与结尾「阿里云 ECS + OSS」**变成真的**；过一遍 §8「简历同步规则」第 1 条的不可见注释核对门 |
 | **M4** | ⬜ 待做 | **A3 + A4**：Nginx + Resilience4j 限流、Spring 事件驱动的操作审计 | 技能栏加 `Resilience4j`（限流与熔断降级）、`Redisson`；「切面与事务」那条**保持原样** —— `@Transactional` / `@PreAuthorize` 就是最主流的用法，不需要改 |

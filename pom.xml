@@ -188,6 +188,53 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
+
+            <!--
+              ==================== 代码覆盖率（JaCoCo） ====================
+              【为什么手写版本号】Spring Boot 4.1.1 的父 POM 只管理了编译、打包、
+              failsafe 等插件，jacoco-maven-plugin 不在其中，不写版本会直接构建失败。
+              【为什么绑在 verify 而不是 test】覆盖率报告要在所有测试跑完之后才有数据，
+              绑在 test 阶段会拿到还没写完的 exec 文件；所以用 `mvn verify` 出报告。
+            -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.13</version>
+                <configuration>
+                    <!--
+                      【为什么只插桩本项目自己的包】
+                      ① 覆盖率报告本来就只该统计"我写的代码"，把依赖也算进去没有意义
+                      ② 不加这个的话，日志里会出现一大段很吓人的报错：
+                         java.lang.instrument.IllegalClassFormatException:
+                         Error while instrumenting net/sf/jsqlparser/parser/CCJSqlParserTokenManager
+                         ... MethodTooLargeException: Method too large
+                         原因：mybatis-plus-jsqlparser 里有个 ANTLR/JavaCC 自动生成的
+                         状态机方法，插桩后超过了 JVM 单方法 64KB 的字节码上限。
+                         它不会让构建失败（JVM 会忽略插桩失败的类），但会淹没 CI 日志，
+                         让人以为构建出了问题 —— 这才是真正要避免的
+                    -->
+                    <includes>
+                        <include>com/yigalaxy/yiguixingtu/**</include>
+                    </includes>
+                </configuration>
+                <executions>
+                    <!-- ① 在测试 JVM 上挂 JaCoCo agent，把执行数据写到 target/jacoco.exec -->
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <!-- ② 测试跑完后，把 exec 数据渲染成 HTML/XML 报告 -->
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 

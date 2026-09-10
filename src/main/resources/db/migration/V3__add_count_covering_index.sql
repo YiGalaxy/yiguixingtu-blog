@@ -1,0 +1,56 @@
+-- =====================================================================
+-- V3 · 给分页用的 COUNT 加一个覆盖索引
+--
+-- 【这个索引是压测压出来的，不是想出来的】
+--   V2 之后，前台列表的【数据查询】已经到了 0.09ms（走 idx_status_top_create
+--   反向扫描，取够 10 行就停）。但用 wrk 压测时发现接口只有 39 req/s、
+--   平均延迟 255ms —— 数据查询那么快，时间花到哪去了？
+--
+--   把一次分页请求拆开量，答案很清楚。MyBatis-Plus 的分页会发两条 SQL：
+--   一条 COUNT 求总数，一条查数据。在 10 万行（8 万已发布）上实测：
+--
+--     ① COUNT(*) WHERE deleted = 0 AND status = 1        →  74.1 ms   ← 瓶颈在这
+--     ② SELECT ... LIMIT 0,10（走 idx_status_top_create）→   0.09 ms
+--     ③ 分类名查询（每页一次）                            →   0.05 ms
+--
+--   也就是说：**分页的总开销里 99.8% 花在"数一共有多少条"上**，
+--   而那正是用户根本不在意、但分页组件必须要的那个 total。
+--
+-- 【为什么现有索引数不快】
+--   原有的 idx_status_create(status, create_time) 能定位到 status = 1 的
+--   8 万条，但里面【没有 deleted 这一列】。而每条 SQL 都被逻辑删除插件
+--   加上了 deleted = 0，于是这 8 万条每一条都要【回表】去确认一下。
+--   8 万次随机回表 = 74ms。EXPLAIN 里看得一清二楚：
+--
+--     -> Aggregate: count(0)
+--         -> Filter: (article.deleted = 0)          ← 这一步要回表
+--             -> Index lookup using idx_status_create (status=1)  (rows=80002)
+--
+-- 【加了什么、为什么是这个列顺序】
+--   加 idx_deleted_status(deleted, status)，让"数数"这件事完全在索引里完成：
+--
+--     -> Aggregate: count(0)
+--         -> Covering index lookup using idx_deleted_status (deleted=0, status=1)
+--
+--   Covering（覆盖索引）= 查询要用的列全在索引里，不需要回表。
+--   实测 74.1ms → 21.4ms（3.5 倍），而且完全不影响数据查询（仍是 0.09ms）。
+--
+--   为什么 deleted 放在【前面】而不是 (status, deleted)：
+--     两种顺序的 COUNT 一样快（实测 21.7ms vs 21.4ms，没有差别），
+--     但 (deleted, status) 能多服务一类查询 —— 后台列表在不筛状态时发的是
+--     COUNT(*) WHERE deleted = 0，它同样能用这个索引做覆盖扫描；
+--     而 (status, deleted) 因为最左前缀是 status，对"只按 deleted 数"用不上。
+--     既然一样快，就选能多管一种查询的那个顺序。
+--
+-- 【为什么仍然不用缓存/估算总数】
+--   21ms 离"快"还有距离，因为 COUNT 天然是 O(已发布文章数) 的。
+--   真正把它降到 0 的办法是缓存总数或不做精确总数 ——
+--   那属于缓存那批工作（M2），要处理"文章增删改后总数失效"的一致性，
+--   不是一个索引能解决的。这里先把 O(n) 的常数项压下去，
+--   并且把这条链路的真实瓶颈记在 README 的「性能」章节里。
+-- =====================================================================
+
+ALTER TABLE `article`
+    ADD INDEX `idx_deleted_status` (`deleted`, `status`),
+    ALGORITHM = INPLACE,
+    LOCK = NONE;

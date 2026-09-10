@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-151%20passing-success)
+![Tests](https://img.shields.io/badge/tests-153%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **151 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **153 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -77,7 +77,7 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
-- 集成测试 19 个类 **151 个用例**，行覆盖率 **86%**
+- 集成测试 19 个类 **153 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
 
@@ -156,8 +156,9 @@ src/main/resources
 ├── application.properties
 ├── logback-spring.xml            # 日志：按天滚动 + 保留 15 天 + traceId 槽位
 └── db/migration
-    ├── V1__init.sql                # Flyway 迁移脚本：user / category / article 建表
-    └── V2__add_article_sort_index.sql  # 列表排序用的复合索引（附实测依据）
+    ├── V1__init.sql                     # user / category / article 建表
+    ├── V2__add_article_sort_index.sql   # 列表排序的复合索引（附实测依据）
+    └── V3__add_count_covering_index.sql # 分页 COUNT 的覆盖索引（压测压出来的）
 
 src/test/java/com/yigalaxy/yiguixingtu
 ├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
@@ -169,7 +170,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── ArticleAdminTest                # 后台文章管理
 ├── ArticlePublicTest               # 前台公开接口（草稿隔离）
 ├── ArticleViewCountTest            # 浏览量：Redis 计数 + 定时批量落库
-├── ArticleIndexTest                # 索引契约：迁移已执行 + 列顺序 + 对真实查询可用
+├── ArticleIndexTest                # 索引契约：迁移已执行 + 列顺序 + 对真实查询可用（含分页 COUNT 的覆盖索引）
 ├── UploadAdminTest                 # 封面上传（类型/大小校验、权限）
 ├── LogoutTokenTest                 # 登出后旧 token 立即失效（jti 黑名单）
 ├── SecurityHeadersTest             # 四个安全响应头
@@ -498,6 +499,22 @@ management.tracing.propagation.type=b3
 > （这在 servlet 过滤器里读 `tracer.currentSpan()` 是几十年来最标准的做法，
 > 见该类的注释）。`propagation.type` 真正管的是"收到上游 B3 头时继续那条 trace"。
 
+#### 数据库连接池（HikariCP）
+
+```properties
+spring.datasource.hikari.maximum-pool-size=${DB_POOL_SIZE:10}
+spring.datasource.hikari.minimum-idle=${DB_POOL_SIZE:10}
+spring.datasource.hikari.connection-timeout=3000
+spring.datasource.hikari.max-lifetime=1800000
+```
+
+| 参数 | 值 | 为什么是这个值 |
+|------|----|---------------|
+| `maximum-pool-size` | 10（可用 `DB_POOL_SIZE` 覆盖） | HikariCP 官方公式 `连接数 ≈ 核数 × 2 + 磁盘数`，2~4 核的 ECS 算下来是 5~9，取 10 偏宽松。本机 32 核实测 20 更好（见「性能」章节的压测表），所以做成可配置而不是写死 |
+| `minimum-idle` | 与 maximum 相同 | 让连接一直是热的。若小于 maximum，空闲连接会被回收、来请求时再新建，而建一条 MySQL 连接要握手 + 认证（毫秒级）。博客流量是"一阵一阵"的，频繁建连比多留几个空闲连接代价大 |
+| `connection-timeout` | 3000 ms | Hikari 默认 30 秒 —— 数据库出问题时请求要挂 30 秒才报错（用户早关页面了），这期间还一直占着 Tomcat 工作线程。实测 P99 才 135ms，3 秒足够覆盖正常排队，超过就是不正常，应当立刻失败 |
+| `max-lifetime` | 1800000 ms（30 分钟） | MySQL 的 `wait_timeout` 默认 8 小时，超时会被服务端单方面关连接。池里的连接若活得比它久，就会拿到一条"其实已经死了"的连接，报出 `Communications link failure` 这种与真实原因无关的错。30 分钟 ≪ 8 小时；**将来调小 MySQL 的 `wait_timeout`，这个值必须跟着调小** |
+
 #### 文件上传与对象存储
 
 ```properties
@@ -787,13 +804,15 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 |----|------|---------|--------|
 | `user` | 用户 | `uk_username` 唯一 | Flyway `V1__init.sql` |
 | `category` | 文章分类 | `uk_name` 唯一 | Flyway `V1__init.sql` |
-| `article` | 文章（含草稿与浏览量） | `idx_status_top_create(status, is_top, create_time)`、`idx_status_create(status, create_time)`、`idx_category(category_id)` | Flyway `V1` + `V2` |
+| `article` | 文章（含草稿与浏览量） | `idx_status_top_create(status, is_top, create_time)`、`idx_status_create(status, create_time)`、`idx_deleted_status(deleted, status)`、`idx_category(category_id)` | Flyway `V1` + `V2` + `V3` |
 | `flyway_schema_history` | Flyway 自己的迁移记录表 | —— | Flyway 自动创建 |
 
-> `article` 上为什么是两个"看起来很像"的复合索引、它们各自服务哪条 SQL，
-> 见「性能」章节——**它们是两条不同排序路径的支撑，谁也不能替谁**。
+> `article` 上四个索引看着多，其实每个都有明确的归属，缺了会有可量化的退化：
+> `idx_status_top_create` 管"取 10 行数据"、`idx_deleted_status` 管"数一共有多少条"、
+> `idx_status_create` 管"按发布时间排序"、`idx_category` 管"按分类筛"。
+> 哪一条是谁的、为什么不能互相替代，见「性能」章节（那里有逐条的实测数字）。
 >
-> 表结构**不要手动改**。需要改表就新增一个迁移脚本（`V3__xxx.sql`），
+> 表结构**不要手动改**。需要改表就新增一个迁移脚本（`V4__xxx.sql`），
 > 让开发库、测试库、生产库走同一条路径。
 
 ## 性能
@@ -863,14 +882,107 @@ LIMIT 0, 10;
 
 **索引有了，怎么保证它不会被人悄悄删掉**
 
-`ArticleIndexTest` 把"索引应当长什么样"钉成了 5 条断言：
-V2 迁移确实执行成功（防"迁移文件写了但没生效"——这个项目真的踩过）、
-列顺序正确、老索引还在、两条查询的 `possible_keys` 里都能看到对应索引。
+`ArticleIndexTest` 把"索引应当长什么样"钉成了几条断言：
+V2 / V3 迁移确实执行成功（防"迁移文件写了但没生效"——这个项目真的踩过）、
+每个索引的列与列顺序正确、老索引还在、三条真实 SQL 的 `possible_keys` 里
+都能看到对应索引。
 
 > 这里刻意**没有**断言"不能出现 filesort"：Testcontainers 里的表几乎是空的，
 > 数据量小的时候优化器会**理性地**选择全表扫描，那种断言必然时绿时红。
 > 一个会随机变红的用例比没有用例更糟，因为它会让人开始无视红灯。
 > 耗时对比放在上面那个可复现脚本里，不放测试里。
+
+### 分页的 COUNT 才是真正的瓶颈（V3）
+
+上面把"取 10 行数据"优化到 0.09ms 之后，接口并没有变快 ——
+压测只有 **39 req/s、平均延迟 255ms**。数据查询已经那么快了，时间花在哪？
+
+把一次分页请求拆开量（10 万行，8 万已发布）：
+
+| 一次分页发的 SQL | 耗时 | 占比 |
+|---|---|---|
+| ① `SELECT COUNT(*) WHERE deleted = 0 AND status = 1`（分页组件要的 total） | **74.1 ms** | **99.8%** |
+| ② `SELECT ... ORDER BY is_top DESC, create_time DESC LIMIT 0,10` | 0.09 ms | 0.1% |
+| ③ 分类名查询（每页一次，已避免 N+1） | 0.05 ms | 0.1% |
+
+**"数一共有多少条"吃掉了几乎全部时间**，而那个数字用户根本不在意 ——
+它只是分页组件必须知道的一个值。
+
+为什么数得那么慢：`idx_status_create(status, create_time)` 能定位到 8 万条，
+但里面**没有 `deleted` 这一列**，而每条 SQL 都被逻辑删除插件加上了 `deleted = 0`，
+于是这 8 万条**每一条都要回表**确认一次：
+
+```
+-> Aggregate: count(0)  (actual time=74.1..74.1 rows=1)
+    -> Filter: (article.deleted = 0)  (actual time=0.129..71.5 rows=80002)     ← 这一步在回表
+        -> Index lookup on article using idx_status_create (status=1)  (rows=80002)
+```
+
+`V3` 加索引 `idx_deleted_status(deleted, status)`，让"数数"完全在索引里完成
+（**Covering index** = 要用的列全在索引里，不用回表）：
+
+```
+-> Aggregate: count(0)  (actual time=21.7..21.7 rows=1)
+    -> Covering index lookup on article using idx_deleted_status (deleted=0, status=1)  (rows=80002)
+```
+
+**74.1ms → 21.4ms（3.5 倍）**，而且完全不影响数据查询（仍是 0.09ms）。
+
+| | 优化前 | 优化后 |
+|---|---|---|
+| COUNT 执行计划 | `Index lookup` + **回表 8 万次** | **Covering index lookup**（不回表） |
+| COUNT 耗时 | 74.1 ms | **21.4 ms** |
+
+**为什么 `deleted` 放前面而不是 `(status, deleted)`**：两种顺序的 COUNT 一样快
+（实测 21.7ms vs 21.4ms），但 `(deleted, status)` 还能服务后台列表那条
+`COUNT(*) WHERE deleted = 0`；`(status, deleted)` 因为最左前缀是 `status`，对那种查询用不上。
+**既然一样快，就选能多管一种查询的顺序。**
+
+> 21ms 离"快"还有距离，因为 COUNT 天然是 O(已发布文章数) 的。
+> 把它降到 0 要靠缓存总数（要做失效一致性），那属于缓存那批工作（路线图 M2）。
+> 这里先把 O(n) 的常数项压下去，并把瓶颈本身记清楚。
+
+### 压测：用 wrk 量出来的对比
+
+工具是 `wrk`，跑在容器里打本机后端（Windows 上不用装任何东西）：
+
+```bash
+docker run --rm skandyla/wrk -t4 -c50 -d20s --latency "http://host.docker.internal:8082/article/page"
+```
+
+**① 覆盖索引的效果**（连接池 10，10 并发，10 万行数据）
+
+| | 只有 `idx_status_create` | 加了 `idx_deleted_status` |
+|---|---|---|
+| QPS | 38.94 | **607.61 / 569.44**（两次） |
+| 平均延迟 | 255.62 ms | **19.92 / 25.4 ms** |
+| P50 | 255.57 ms | 14.89 / 17.18 ms |
+| 20 秒完成请求数 | 780 | 12166 / 11400 |
+
+**约 15 倍吞吐、约 13 倍延迟改善。** 注意瓶颈自始至终不在"取 10 行数据"上，
+而在那条 COUNT 上 —— 这就是"优化要看数据、不要凭直觉"的具体例子。
+
+**② 连接池大小的影响**（都有覆盖索引，50 并发）
+
+| 池大小 | QPS | P50 | P99 |
+|---|---|---|---|
+| 10（默认） | 623 / 666 / 657 | 72 / 68 / 71 ms | 135 / 516 / 107 ms |
+| 20 | **872 / 872** | **52 / 50 ms** | 521 / 77 ms |
+
+同一行有多个数字 = 同一配置重复跑了几次。可以看出：
+
+- **QPS 很稳定**（池 20 两次都是 872），所以吞吐这个指标可信；
+- **P99 很不稳定**（同一配置能跑出 107ms 也能跑出 516ms）——
+  单次 20 秒的压测里，一次 GC 或 Docker Desktop 的一次抖动就足以污染尾延迟。
+  所以这张表里**不拿 P99 下结论**，只看 QPS 与 P50。
+- 池从 10 加到 20，吞吐涨了约 34%，P50 也降了约 28%。
+  那为什么不默认用 20？因为**池大小应该跟着机器核数走**：
+  HikariCP 官方公式是 `连接数 ≈ 核数 × 2 + 磁盘数`。
+  本机这台开发机容器里有 **32 核**（实测 `docker info` 的 NCPU=32），
+  按公式该远不止 20；而线上那台 ECS 大概率是 2~4 核，公式算下来是 5~9，
+  取 10 已经偏宽松。所以做成 `DB_POOL_SIZE` 可配置（见「配置」章节），
+  换机器改环境变量即可，不用改代码。
+
 
 ### 慢查询日志
 
@@ -1304,7 +1416,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 151 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 153 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1316,10 +1428,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 151 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 153 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**19 个测试类，151 个用例，全部通过：**
+**19 个测试类，153 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -1331,7 +1443,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleAdminTest` | 26 | 后台文章增删改查、草稿隔离、状态流转、权限、逻辑删除（用 `JdbcTemplate` 直查物理行） |
 | `ArticlePublicTest` | 14 | 前台列表与详情、只返回已发布、分页边界、排序白名单 |
 | `ArticleViewCountTest` | 10 | 浏览量：Redis 计数、累加不丢、定时批量落库、落库后增量清零 |
-| `ArticleIndexTest` | 5 | 索引契约：V2 迁移确实执行、列顺序正确、老索引没被误删、两条查询都能用上对应索引 |
+| `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
 | `UploadAdminTest` | 10 | 封面上传：类型/大小白名单、UUID 重命名、非管理员 403 |
 | `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |
 | `SecurityHeadersTest` | 7 | 四个安全响应头，含 401 与上传响应两条易漏路径 |
@@ -1342,7 +1454,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ProfileProdConfigTest` | 3 | prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量 |
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **151** | |
+| **合计** | **153** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

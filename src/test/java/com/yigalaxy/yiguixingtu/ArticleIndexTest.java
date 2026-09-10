@@ -84,21 +84,25 @@ class ArticleIndexTest extends AbstractIntegrationTest {
     // =================================================================
 
     @Test
-    @DisplayName("Flyway 应当把 V2 迁移标记为执行成功")
-    void flywaySchemaHistory_shouldContainSuccessfulV2() {
-        // 【为什么值得单独测一条"迁移跑没跑"】
+    @DisplayName("Flyway 应当把 V2 / V3 两个迁移都标记为执行成功")
+    void flywaySchemaHistory_shouldContainSuccessfulV2AndV3() {
+        // 【为什么值得单独测"迁移跑没跑"】
         //   这个项目真的踩过：pom 里少一个 spring-boot-flyway 模块时，
         //   应用【编译通过、启动成功、什么都不报】，
         //   但所有迁移脚本一个都没执行 —— 建表是"静默失效"的。
         //   所以"没有报错"不能作为"迁移生效"的证据，
         //   必须去 flyway_schema_history 里看到那一行。
-        Integer applied = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM flyway_schema_history WHERE version = ? AND success = 1",
-                Integer.class, "2");
+        //   两个版本都断言：以后新加 V4 时照抄这一条即可，
+        //   免得"加了迁移但没生效"再发生一次却没人发现。
+        for (String version : List.of("2", "3")) {
+            Integer applied = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM flyway_schema_history WHERE version = ? AND success = 1",
+                    Integer.class, version);
 
-        assertEquals(1, applied,
-                "flyway_schema_history 里应当有一条 version=2 且 success=1 的记录；"
-                        + "如果没有，说明 V2 迁移没有真正执行（先检查 pom 里 spring-boot-flyway 还在不在）");
+            assertEquals(1, applied,
+                    "flyway_schema_history 里应当有一条 version=" + version + " 且 success=1 的记录；"
+                            + "如果没有，说明该迁移没有真正执行（先检查 pom 里 spring-boot-flyway 还在不在）");
+        }
     }
 
     // =================================================================
@@ -123,8 +127,43 @@ class ArticleIndexTest extends AbstractIntegrationTest {
     }
 
     // =================================================================
-    //  ③ 老索引没有被误删
+    //  ②b 覆盖索引（V3）：给分页的 COUNT 用
     // =================================================================
+
+    @Test
+    @DisplayName("article 上应当有 idx_deleted_status，且列顺序是 (deleted, status)")
+    void article_shouldHaveDeletedStatusIndexInOrder() {
+        List<String> columns = indexColumns("idx_deleted_status");
+
+        // 【这个索引的意义和上面那个完全不同，别混了】
+        //   上面 idx_status_top_create 解决的是"取 10 行数据"；
+        //   这个解决的是"数一共有多少条"—— 分页组件每次都要的 total。
+        //   实测：没有它的时候，COUNT 要在索引里定位到 8 万条、
+        //   再【回表】8 万次去确认 deleted=0，占掉一次分页请求
+        //   99.8% 的耗时；有了它，整个 COUNT 都在索引里完成，不需要回表。
+        //
+        //   为什么 deleted 在前而不是 status 在前：
+        //     两种顺序的 COUNT 一样快（实测 21.7ms vs 21.4ms），
+        //     但 (deleted, status) 还能服务"只按 deleted 数总数"的后台列表；
+        //     (status, deleted) 因为最左前缀是 status，对那种查询用不上。
+        assertEquals(List.of("deleted", "status"), columns,
+                "idx_deleted_status 的列顺序必须是 (deleted, status)");
+    }
+
+    @Test
+    @DisplayName("分页用的 COUNT 应当能用上覆盖索引（Covering index）")
+    void explainCountQuery_shouldUseCoveringIndex() {
+        // 这条 SQL 就是 MyBatis-Plus 分页时自动发的那条计数语句的形状
+        Map<String, Object> plan = explain(
+                "SELECT COUNT(*) FROM article WHERE deleted = 0 AND status = 1");
+
+        // 和上面两条一样看 possible_keys：它只取决于 SQL 形状与索引定义，
+        // 空表上也稳定（key 会随数据量变化，不能当断言）。
+        assertTrue(Objects.toString(plan.get("possible_keys"), "").contains("idx_deleted_status"),
+                "COUNT(*) 应当被认为能用上 idx_deleted_status（覆盖索引），"
+                        + "实际 possible_keys=" + plan.get("possible_keys") + "，key=" + plan.get("key"));
+    }
+
 
     @Test
     @DisplayName("idx_status_create 应当保留：它服务的是'按发布时间排序'那条路径")

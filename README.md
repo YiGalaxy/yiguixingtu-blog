@@ -2072,6 +2072,7 @@ scp yiguixingtu-web/static-media/* root@服务器IP:/var/www/media/
 | 19 | **`nginx -t` 通过、改完 reload 过** | `sudo nginx -t && sudo systemctl reload nginx` —— 配置写了但没 reload 是最常见的一种"明明改了却没生效" |
 | 20 | **磁盘不会被日志写满** | `df -h` 看水位；`docker system df` 看镜像/卷/构建缓存占比。容器日志已配轮转（每容器上限 30MB），应用日志文件有 15 天 + 2GB 双重上限（见「备份与恢复」后面那节），但**构建缓存**会随每次 `--build` 增长，定期 `docker builder prune` 清一下 |
 | 21 | **日志文件确实写在卷里（升级后还能查）** | `docker exec yiguixingtu-prod-backend ls -l /app/logs` 应当能看到 `yiguixingtu.log` 且属主是 `app`；再 `docker compose -f docker-compose.prod.yaml up -d --force-recreate backend` → 文件仍在（守 `LOG_DIR` 指向挂载点 —— 指错的话日志会写进容器可写层，**重建即丢，而且没有任何提示**） |
+| 22 | **归档页把全部文章的内链放进了服务端 HTML** | `curl -s https://你的域名/archive \| grep -c 'href="/article/'` 应当**等于已发布文章的篇数**（后端上限 500），并且源码里能看到「20xx 年 x 月」这样的分组标题与「共 N 篇」—— 归档页是 SSR 的，它存在的意义就是"一次拿到全部内链"（爬虫不用执行 JS、站内 Ctrl+F 也能用）；只看到 `<div id="__nuxt"></div>` 说明 SSR 没生效。这一条同时守两件事：**前端真的按年月把 `GET /article/archive` 的分组渲染出来了**，以及**这个页面没有被 Nginx 配成静态文件**（和 sitemap / robots / feed.xml 一样，它属于前端的运行时路由，必须由 `location /` 转发给前端容器） |
 
 #### 这份清单在本机演练过一遍（不是纸面清单）
 

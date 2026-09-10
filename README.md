@@ -2069,6 +2069,7 @@ scp yiguixingtu-web/static-media/* root@服务器IP:/var/www/media/
 | 17 | **HTTPS 真的生效、且会自动续期** | `curl -I https://你的域名` 返回 200 且证书有效（浏览器地址栏是小锁不是"不安全"）；方式 A 的话再跑一次 `sudo certbot renew --dry-run`。⚠️ 用阿里云免费证书的话它是**一年期、不自动续**，记得设置到期提醒 |
 | 18 | **http 会跳到 https** | `curl -I http://你的域名` 应当是 **301** 到 https（没有这条跳转的话，用户用 http 打开会看到一个空白页或证书错误） |
 | 19 | **`nginx -t` 通过、改完 reload 过** | `sudo nginx -t && sudo systemctl reload nginx` —— 配置写了但没 reload 是最常见的一种"明明改了却没生效" |
+| 20 | **磁盘不会被日志写满** | `df -h` 看水位；`docker system df` 看镜像/卷/构建缓存占比。容器日志已配轮转（每容器上限 30MB，见「备份与恢复」后面那节），但**构建缓存**会随每次 `--build` 增长，定期 `docker builder prune` 清一下 |
 
 #### 这份清单在本机演练过一遍（不是纸面清单）
 
@@ -2120,21 +2121,39 @@ docker compose -f docker-compose.prod.yaml build --build-arg MAVEN_MIRROR_URL=
 
 ### 5. 备份与恢复
 
+> ⚠️ **容器名别弄混**：生产编排用了独立项目名与 `-prod` 后缀，
+> 所以生产库的容器叫 **`yiguixingtu-prod-mysql`**；
+> 本地开发那个叫 `yiguixingtu-mysql`。下面给的都是**生产**的名字 ——
+> 拿开发的名字去服务器上执行，只会得到一句 `No such container`。
+
 ```bash
-# —— 备份 MySQL（建议加进 crontab 每天跑一次）——
-docker exec yiguixingtu-mysql sh -c \
+# —— 备份 MySQL ——
+# --single-transaction：备份期间不锁表（InnoDB），站点不用停机
+# 密码从容器自己的环境变量取（compose 里注入过），不用写在命令里
+mkdir -p /srv/backup
+docker exec yiguixingtu-prod-mysql sh -c \
   'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --databases yiguixingtu' \
-  > backup_$(date +%F).sql
+  > /srv/backup/yiguixingtu_$(date +%F).sql
 
 # —— 恢复 ——
-docker exec -i yiguixingtu-mysql sh -c \
-  'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD"' < backup_2026-09-10.sql
+# 恢复前【先停掉后端】，避免写入和恢复互相打架
+docker compose -f docker-compose.prod.yaml stop backend
+docker exec -i yiguixingtu-prod-mysql sh -c \
+  'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD"' < /srv/backup/yiguixingtu_2026-09-11.sql
+docker compose -f docker-compose.prod.yaml start backend
 ```
 
-两个参数值得说明：
-- `--single-transaction`：备份期间不锁表（InnoDB），站点不用停机
-- 恢复前**先停掉后端**，避免写入和恢复互相打架：
-  `docker compose -f docker-compose.prod.yaml stop backend`
+**每天自动备份一次（crontab）**：
+
+```bash
+crontab -e
+# 加上这一行：每天 3:00 备份，并删掉 7 天前的
+0 3 * * * docker exec yiguixingtu-prod-mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --databases yiguixingtu' > /srv/backup/yiguixingtu_$(date +\%F).sql && find /srv/backup -name 'yiguixingtu_*.sql' -mtime +7 -delete
+```
+
+> ⚠️ **`%F` 里的 `%` 必须写成 `\%`** —— crontab 把没转义的 `%` 当成"命令结束/换行"，
+> 不转义的话这条任务会以一种很难看懂的方式失败（而且 crontab 不会报错给你）。
+> 这是 crontab 最经典的坑之一，特意写在这里免得你调试半天。
 
 #### ⚠️ 别忘了备份上传的图片
 
@@ -2159,6 +2178,29 @@ docker run --rm \
 > **备份要验证过才算备份**。建议演练一次：拷一份库出来、导进一个新库、
 > 启动应用确认文章都在；图片也一样 —— 把备份拷进一个空卷，确认还能显示。
 > 没验证过的备份，真出事时大概率用不了。
+
+#### 磁盘不会被日志写满（容器日志已配轮转）
+
+Docker 默认的 `json-file` 日志驱动**不轮转** —— 也就是容器日志会一直长下去。
+一台 40GB 盘的 ECS，加上 MySQL 慢查询日志，几个月后就可能"数据库写不进去、
+容器起不来"，而且错误信息不会指向日志。
+
+所以 `docker-compose.prod.yaml` 里给四个服务都配了轮转（共用一份 YAML 锚点）：
+
+```yaml
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"     # 单个日志文件到 10MB 就切
+    max-file: "3"       # 最多留 3 个（合计每容器 30MB）
+```
+
+每个容器最多 30MB，四个容器合计上限 120MB。
+**要长期保留的是审计表**（`operation_log`，结构化、可查询），不是这些文本日志 ——
+两者的职责分开，才不会指望日志文件当审计用。
+
+> 想查看某个容器最近在报什么：`docker compose -f docker-compose.prod.yaml logs --tail=200 backend`
+> 磁盘水位也要看：`df -h` 与 `docker system df`（后者会告诉你镜像/卷/构建缓存各占多少）。
 
 ### 6. 升级流程
 

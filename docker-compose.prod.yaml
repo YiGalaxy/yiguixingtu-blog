@@ -47,6 +47,33 @@
 # 独立项目名：与本地开发的 docker-compose.yaml 彻底分开（原因见上）
 name: yiguixingtu-prod
 
+# =====================================================================
+# 容器日志轮转（四个服务共用同一份配置）
+#
+# 【为什么必须配 —— 不配的话它会在某一天悄悄把服务器磁盘写满】
+#   Docker 默认的日志驱动是 json-file，而且**默认不轮转**：
+#   `/var/lib/docker/containers/<id>/<id>-json.log` 会一直长下去。
+#   而我们的应用恰恰是"会持续打日志"的那种：
+#     · 后端每次请求都有访问日志，还有审计、定时任务、SQL（prod 已关）等
+#     · Nginx 那层已经单独配了 access_log，但容器里的是另一份
+#   一台 40GB 盘的 ECS，如果 MySQL 慢查询日志 + 容器日志都不管，
+#   几个月后就是"数据库写不进去、容器起不来"，而且错误信息不会指向日志。
+#
+# 【为什么是 10m × 3】
+#   每个容器最多留 30MB（四个服务合计上限 120MB），既能装下最近一段时间的排查信息，
+#   又不会因为"日志太重要"而无限增长。真需要长期保留的是**审计表**
+#   （operation_log，结构化、可查询），不是这些文本日志 ——
+#   把两者的职责分开，才不会指望日志文件当审计用。
+#
+# 【为什么用 YAML 锚点】四个服务要配一模一样的东西，
+#   复制四遍的话，哪天改了一处就会漏掉另三处；锚点让"只有一份定义"。
+# =====================================================================
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
 
   # -------------------------------------------------------------------
@@ -105,6 +132,8 @@ services:
       # start_period 里的失败【不算】失败次数：MySQL 首次初始化数据目录要几十秒，
       # 不给这个宽限期的话，容器还没初始化完就被判定 unhealthy
       start_period: 40s
+    # 日志轮转：与其它服务共用 x-logging 锚点（上限 10m × 3，见文件顶部说明）
+    logging: *default-logging
     restart: unless-stopped
 
   # -------------------------------------------------------------------
@@ -133,6 +162,8 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+    # 日志轮转：与其它服务共用 x-logging 锚点（上限 10m × 3，见文件顶部说明）
+    logging: *default-logging
     restart: unless-stopped
 
   # -------------------------------------------------------------------
@@ -228,6 +259,8 @@ services:
       retries: 5
       # 启动宽限期给足：Spring 启动 + Flyway 建表 + 管理员引导都要时间
       start_period: 60s
+    # 日志轮转：与其它服务共用 x-logging 锚点（上限 10m × 3，见文件顶部说明）
+    logging: *default-logging
     restart: unless-stopped
 
   # -------------------------------------------------------------------
@@ -283,6 +316,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    # 日志轮转：与其它服务共用 x-logging 锚点（上限 10m × 3，见文件顶部说明）
+    logging: *default-logging
     restart: unless-stopped
 
 volumes:

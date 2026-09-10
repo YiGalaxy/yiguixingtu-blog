@@ -664,7 +664,7 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 | **M2** | ⬜ 待做 | **A1 + A2**：缓存三件套 + 浏览量计数 | 「数据库与缓存」升级为掌握级；那条 `了解 Redis 高并发` **从"了解"行移出** |
 | **M3** | ✅ 完成（3.1 多环境 · 3.2 OSS上传 · 3.3 Dockerfile+四容器 · 3.4 部署文档 · 3.5 管理员引导） | **E1 + B4 + B5 + B6**：多环境 → OSS 上传 → 上线 → CD | 徽章「已上线」与结尾「阿里云 ECS + OSS」**变成真的**；过一遍 §8「简历同步规则」第 1 条的不可见注释核对门 |
 | **M4** | ⬜ 待做 | **A3 + A4**：Nginx + Resilience4j 限流、Spring 事件驱动的操作审计 | 技能栏加 `Resilience4j`（限流与熔断降级）、`Redisson`；「切面与事务」那条**保持原样** —— `@Transactional` / `@PreAuthorize` 就是最主流的用法，不需要改 |
-| **M5** | 🔄 进行中（5.2 ✅ 完成 / 其余待做） | **D + E 其余**：索引 EXPLAIN、traceId、压测对比、登出失效、幂等 | 面试纵深：**这些是"做过才答得出"的细节** |
+| **M5** | 🔄 进行中（5.2 ✅ 5.9 ✅ / 5.1 卡住待查 / 其余待做） | **D + E 其余**：索引 EXPLAIN、traceId、压测对比、登出失效、幂等 | 面试纵深：**这些是"做过才答得出"的细节** |
 | **M6** | ⬜ 待做 | **C / F**：标签评论、搜索、消息队列、前端站点 | 按需，别为了关键词硬做 |
 
 **顺序理由**：B1/B2 只是给测试和 CI 加壳、**不改业务代码**，风险最低，却立刻把 76 个用例从"只能自己跑"变成"任何人都能验证"，所以排在最前面；A 批改的是现有业务代码，收益最快但风险略高，紧随其后；E1/B5 负责把东西真正交付出去；D/E 其余是**在 A/B 建好的东西上加纵深**（traceId 的价值要靠 A4 的异步日志才体现）；C 需要新业务模块，放最后。
@@ -1122,6 +1122,39 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 > **全篇都不要出现"自研切面/自定义注解"这类词**（见 §20）。
 
 ### M5 · 可观测与安全（2–3 天，9 个提交）
+
+> ### 🔄 进度：5.2 ✅（登出 token 失效）· 5.9 ✅（安全响应头 + Dependabot）· 5.1 ⏸ 卡住
+>
+> **5.1 卡在哪（记录清楚，避免下次从零重来）**
+>   已经做到的：
+>     · 依赖补齐了两个 —— `spring-boot-micrometer-tracing-brave`（Boot 的自动配置模块）
+>       与 `micrometer-tracing-bridge-brave`（真正的 Brave 实现）。
+>       ⚠️ 只加前者的话：编译通过、启动正常、`Tracer` Bean 也能注入，
+>       但 traceId 永远是空的 —— **又是一个 Boot 4 拆模块导致的静默失效**，
+>       和 Flyway 那次（spring-boot-flyway + flyway-core + flyway-mysql 三个都要）是同一个模式
+>     · `logback-spring.xml` 本身是好的：日志文件、按天按大小滚动、保留 15 天、
+>       格式里带 `[%X{traceId:-}]` 槽位 —— 实测文件真的写出来了，只是槽位永远是空的
+>   没做到的：
+>     · 日志里没有 traceId、响应头里没有 `X-B3-TraceId`（在**真实启动的服务上**用 curl 验证过，
+>       不只是 MockMvc，所以不是测试环境的限制）
+>   已排除：
+>     · 配置项名字是对的 —— 读 `spring-boot-micrometer-tracing` 的
+>       `spring-configuration-metadata.json` 确认过，属性是
+>       `management.tracing.sampling.probability` 与 `management.tracing.propagation.type`；
+>       另外发现 `management.tracing.propagation.produce` 的**默认值只产出 W3C**
+>       （也就是 `traceparent`，不含 `X-B3-TraceId`）——
+>       想拿 B3 响应头必须显式把 produce 也设成含 B3
+>     · 但既然**日志里连 traceId 都没有**，说明问题更靠前：
+>       **HTTP 请求根本没有创建 span**，改传播格式的配置解决不了这个
+>   下一步建议：
+>     用 `--debug` 启动，看 condition evaluation report 里
+>     tracing / observation 相关的自动配置到底为什么没生效
+>     （上一次 Flyway 的静默失效就是靠"去查 flyway_schema_history 存不存在"发现的，
+>      这次同理：先确认"span 到底有没有被创建"）
+>   改动暂存在 `git stash`（`stash@{0}`）
+>
+> **5.9 已完成**（提交 `002efad`）：四个安全响应头 + Dependabot。
+> 实测：200 与 401 两条路径都带上了三个头，HSTS 在明文请求上正确地不出现。
 
 | # | 提交标题 | 内容 | 测试要求 |
 |---|---|---|---|

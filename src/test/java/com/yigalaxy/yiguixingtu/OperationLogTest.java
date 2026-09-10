@@ -535,6 +535,55 @@ class OperationLogTest extends AbstractIntegrationTest {
                 "删除记录里应当有内容快照（昵称），实际=" + deleteLog.getDetail());
     }
 
+    @Test
+    @DisplayName("⑭ 分类的增 / 改 / 删也都会留痕，删除记录里保留分类名快照")
+    void categoryOperations_shouldBeAudited() throws Exception {
+        String firstName = mark + "-分类甲";
+
+        mockMvc.perform(post("/admin/category")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"" + firstName + "\",\"sort\":1}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        Category created = categoryMapper.selectOne(new LambdaQueryWrapper<Category>()
+                .eq(Category::getName, firstName));
+        assertNotNull(created, "前置条件：分类应当建出来了");
+
+        OperationLog createLog = awaitLog("CREATE_CATEGORY", created.getId());
+        assertNotNull(createLog, "新建分类应当留下审计");
+        assertTrue(createLog.getDetail().contains(firstName),
+                "detail 里要有分类名，实际=" + createLog.getDetail());
+
+        // ---- 改名 ----
+        String secondName = mark + "-分类乙";
+        mockMvc.perform(put("/admin/category/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"" + secondName + "\",\"sort\":2}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog updateLog = awaitLog("UPDATE_CATEGORY", created.getId());
+        assertNotNull(updateLog, "编辑分类应当留下审计");
+        assertTrue(updateLog.getDetail().contains(firstName) && updateLog.getDetail().contains(secondName),
+                "detail 里应当同时有旧名和新名，实际=" + updateLog.getDetail());
+
+        // ---- 删除 ----
+        mockMvc.perform(delete("/admin/category/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog deleteLog = awaitLog("DELETE_CATEGORY", created.getId());
+        assertNotNull(deleteLog, "删除分类应当留下审计");
+        // 分类删除时会把名字改写成 原名#deleted#id（为了释放唯一索引），
+        // 所以从 category 表里已经看不出它原来叫什么 —— 只有审计记录能回答
+        assertTrue(deleteLog.getDetail().contains(secondName),
+                "删除记录里必须保留分类名快照，实际=" + deleteLog.getDetail());
+    }
+
     // ================================================================
     //  三、"不该记的绝不记"
     // ================================================================

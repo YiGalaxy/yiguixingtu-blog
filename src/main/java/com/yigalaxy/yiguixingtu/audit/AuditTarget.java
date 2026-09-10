@@ -24,5 +24,8 @@ public enum AuditTarget {
     TAG,
 
     /** 评论 */
-    COMMENT
+    COMMENT,
+
+    /** 分类 */
+    CATEGORY
 }

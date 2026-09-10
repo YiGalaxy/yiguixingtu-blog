@@ -74,7 +74,16 @@
   只算已发布、逻辑删除不计入，走 Redis 缓存 60 秒（写操作后失效）
 
 **分类**
-- 分类列表（游客可访问）
+- 分类列表（游客可访问，走 Redis 缓存 —— 首页 SSR 每次都要用它，而它只在分类被改时才变）
+- 后台增删改（仅管理员）：改名 / 改描述 / 改排序
+- **分类下还有文章时拒绝删除**（返回 400 + "还有 N 篇在用"）：删掉分类后那些文章
+  仍然引用着它的 id，而分类已经查不到了 —— 文章会变成"没有分类名"且看不出原因。
+  宁可拒绝并让用户先调整文章，也不要留下这种数据不一致
+- ⚠️ 分类是**逻辑删除**，而 `category` 上有唯一索引 `uk_name`：所以删除时会像
+  `user` 表那样把名字改写成 `原名#deleted#id`，把名字释放出来 ——
+  否则"删掉分类 A 再建同名 A"会直接撞 `Duplicate entry`，
+  而带 `@TableLogic` 的查重语句又看不见那行已删除的数据（**同一个坑、同一套解法**；
+  标签当初选了物理删除，所以它没有这个问题，两处的取舍分别写在 V5 与实体注释里）
 
 **标签**
 - 标签的增删改查（后台，仅管理员），标签名唯一、带排序值
@@ -137,11 +146,10 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   图片存服务器本地磁盘，并用**具名卷**持久化
-- 集成测试 **28 个类 254 个用例**，行覆盖率 **90.2%**
+- 集成测试 **29 个类 266 个用例**，行覆盖率 **90.2%**
 
 ### 🚧 规划中
 
-- 分类的后台增删改（目前只有只读列表接口）
 - **评论的楼中楼回复**（现在是一条条平铺的评论，没有父子关系）——
   先把"能评论 + 能审核"这条主流程做扎实；回复要牵动前端渲染与分页语义，
   等真有需求时加一列 `parent_id` 即可
@@ -216,11 +224,12 @@ com.yigalaxy.yiguixingtu
 │   ├── LocalFileStorage            # 本地磁盘（唯一实现，见「文件上传」章节）
 │   └── UploadProperties            # 上传配置绑定
 ├── category
-│   ├── controller/CategoryController      # 分类列表（公开）
-│   ├── service/CategoryService(+Impl)
+│   ├── CategoryController                 # 分类列表（公开）
+│   ├── AdminCategoryController            # 后台：增删改（删时会检查是否还有文章在用）
+│   ├── service/CategoryService(+Impl)     # ⚠️ 删除时把名字改写成 原名#deleted#id
 │   ├── entity/Category
-│   ├── mapper/CategoryMapper
-│   └── dto/CategoryVO
+│   ├── mapper/CategoryMapper              # 含一条手写 COUNT（要自己写 deleted = 0）
+│   └── dto/                               # CategoryVO / CategoryForm
 └── tag
     ├── TagController                      # 前台：标签列表（公开，带文章数）
     ├── AdminTagController                 # 后台：标签增删改查（ADMIN）
@@ -818,7 +827,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 ## 接口列表
 
-共 **30 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
+共 **34 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
 具体到角色见下方「接口 × 角色权限矩阵」。
 
 | # | 方法 | 路径 | 说明 | 是否需要登录 |
@@ -852,9 +861,13 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 27 | GET | `/admin/comment/page` | 评论分页（含待审核，**带邮箱与 IP**） | 是（ADMIN） |
 | 28 | PUT | `/admin/comment/{id}/status` | 审核评论（1 通过 / 2 拒绝） | 是（ADMIN） |
 | 29 | DELETE | `/admin/comment/{id}` | 删除评论（逻辑删除） | 是（ADMIN） |
-| 30 | POST | `/upload` | 上传图片（封面图），返回可访问 URL | 是（ADMIN） |
+| 30 | GET | `/admin/category/list` | 分类列表（后台） | 是（ADMIN） |
+| 31 | POST | `/admin/category` | 新建分类 | 是（ADMIN） |
+| 32 | PUT | `/admin/category/{id}` | 编辑分类（改名 / 描述 / 排序） | 是（ADMIN） |
+| 33 | DELETE | `/admin/category/{id}` | 删除分类（**分类下有文章时会被拒绝**） | 是（ADMIN） |
+| 34 | POST | `/upload` | 上传图片（封面图），返回可访问 URL | 是（ADMIN） |
 
-**共 30 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
+**共 34 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
 用本地磁盘存储时，上传的图片通过 `GET /uploads/**` 公开读取（无需登录）。
 
 ## 接口 × 角色权限矩阵
@@ -878,6 +891,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `/admin/article/**`（全部 6 个） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/tag/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/comment/**`（全部 3 个） | ❌ 401 | ❌ 403 | ✅ |
+| `/admin/category/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
 | `POST /upload` | ❌ 401 | ❌ 403 | ✅ |
 | `GET /uploads/**`（本地存储的图片） | ✅ | ✅ | ✅ |
 
@@ -1208,6 +1222,7 @@ verify(spyArticleMapper, times(1)).selectById(articleId);   // 12 个线程 -> �
 | 文章 | 新建 / 编辑 / 发布下架 / 删除 | `CREATE_ARTICLE`、`UPDATE_ARTICLE`、`UPDATE_ARTICLE_STATUS`、`DELETE_ARTICLE` |
 | 用户 | 启用禁用 / 改角色 / 重置密码 / 删除 | `UPDATE_USER_STATUS`、`UPDATE_USER_ROLE`、`RESET_USER_PASSWORD`、`DELETE_USER` |
 | 标签 | 新建 / 编辑 / 删除 | `CREATE_TAG`、`UPDATE_TAG`、`DELETE_TAG` |
+| 分类 | 新建 / 编辑 / 删除 | `CREATE_CATEGORY`、`UPDATE_CATEGORY`、`DELETE_CATEGORY` |
 | 评论 | 审核（通过 / 拒绝）/ 删除 | `UPDATE_COMMENT_STATUS`、`DELETE_COMMENT` |
 
 ### 每条记录有哪些字段，为什么
@@ -2057,10 +2072,10 @@ mvn test
 
 | 维度 | 覆盖率 |
 |------|:---:|
-| 行覆盖 | **90.2%**（1,353 / 1,500） |
-| 方法覆盖 | **97.2%**（280 / 288） |
-| 指令覆盖 | **90.4%**（5,910 / 6,540） |
-| 分支覆盖 | 68.3%（345 / 505） |
+| 行覆盖 | **90.2%**（1,433 / 1,588） |
+| 方法覆盖 | **97.0%**（292 / 301） |
+| 指令覆盖 | **90.3%**（6,270 / 6,941） |
+| 分支覆盖 | 68.7%（365 / 531） |
 
 > 分支覆盖率明显低于行覆盖率，是因为大量的**参数校验分支、异常兜底分支、
 > 空值判断分支**不会被每个用例都走到——这是正常的，不必为了刷数字硬凑用例。
@@ -2074,7 +2089,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 254 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 266 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -2086,10 +2101,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 254 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 266 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**28 个测试类，254 个用例，全部通过：**
+**29 个测试类，266 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -2118,9 +2133,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `TagTest` | 14 | 标签：前台标签云（带已发布文章数、草稿不计）、后台增删改、**物理删除**（原生 SQL 数物理行）、删标签连带清关联、名字查重与首尾空格、权限、缓存命中与失效 |
 | `ArticleTagTest` | 12 | 文章打标签与按标签筛选：覆盖式语义（换标签旧的不留）、**校验先于写入**（失败不动原有标签）、去重、草稿不泄漏、标签不存在返回空页、列表带标签、删文章清关联、打标签后标签云计数立刻 +1 |
 | `CommentTest` | 15 | 评论：游客可发但**默认待审核**、传 `status=0` 也拿不到待审核内容、审核通过才可见、草稿不能评论、XSS 转义、公开响应体不含邮箱与 IP、后台带邮箱/IP/文章标题、审核参数校验、逻辑删除（原生 SQL 验物理行）、权限、限流 429、正序与分页 |
-| `OperationLogTest` | 13 | 操作审计：管理动作都留痕（含标签增删改、评论审核删除）、发表评论**不**记、回滚与失败不记账、审计行不含明文密码 |
+| `CategoryAdminTest` | 11 | 分类：新建/编辑/改名后前台立刻生效、重名与空格、**分类下有文章时拒绝删除**、**删掉后同名分类能重建**（名字被释放）、**文章逻辑删除后分类就能删**（守"手写 COUNT 要自己加 deleted=0"）、权限、前台仍公开 |
+| `OperationLogTest` | 14 | 操作审计：管理动作都留痕（含标签、评论、分类的增删改）、发表评论**不**记、回滚与失败不记账、审计行不含明文密码 |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **254** | |
+| **合计** | **266** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

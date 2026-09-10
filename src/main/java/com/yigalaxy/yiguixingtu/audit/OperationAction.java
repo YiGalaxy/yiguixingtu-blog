@@ -55,7 +55,16 @@ public enum OperationAction {
     UPDATE_COMMENT_STATUS("审核评论"),
 
     /** 删除评论 */
-    DELETE_COMMENT("删除评论");
+    DELETE_COMMENT("删除评论"),
+
+    /** 新建分类 */
+    CREATE_CATEGORY("新建分类"),
+
+    /** 编辑分类 */
+    UPDATE_CATEGORY("编辑分类"),
+
+    /** 删除分类 */
+    DELETE_CATEGORY("删除分类");
 
     /** 中文说明，便于直接展示与排查（不用在前端再维护一份翻译） */
     private final String description;

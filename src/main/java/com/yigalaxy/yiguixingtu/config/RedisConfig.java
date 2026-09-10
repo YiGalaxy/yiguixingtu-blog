@@ -91,6 +91,17 @@ public class RedisConfig {
     public static final String CACHE_TAG_LIST = "tag:list";
 
     /**
+     * 分类列表的缓存名。
+     *
+     * 【为什么它值得缓存】前端首页改成 SSR 之后，每次服务端渲染都会请求一次
+     * /category/list（首页的筛选条要用它），而它【只在分类被增删改时才变】——
+     * 典型的"读多写极少"。
+     * 和标签列表一样，key 里带的是文章缓存版本号（分类写操作会推进它），
+     * 所以不需要单独维护第二套失效逻辑。
+     */
+    public static final String CACHE_CATEGORY_LIST = "category:list";
+
+    /**
      * 统计结果的缓存时长：60 秒。
      * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
      * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
@@ -240,6 +251,7 @@ public class RedisConfig {
                 .withCacheConfiguration(CACHE_ARTICLE_DETAIL, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_STATS, statsConfig)
                 .withCacheConfiguration(CACHE_TAG_LIST, baseConfig)
+                .withCacheConfiguration(CACHE_CATEGORY_LIST, baseConfig)
                 .build();
     }
 

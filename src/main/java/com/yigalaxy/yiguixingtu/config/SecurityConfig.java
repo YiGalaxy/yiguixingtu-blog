@@ -4,6 +4,7 @@ import com.yigalaxy.yiguixingtu.auth.filter.JwtAuthenticationFilter;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
@@ -75,6 +76,20 @@ public class SecurityConfig {
                                 "/v3/api-docs/**",
                                 "/swagger-ui/**",
                                 "/swagger-ui.html"
+                        ).permitAll()
+
+
+                        // 【新增】前台公开读取接口 ---------------------------------
+                        // 只放行 GET！
+                        // 写操作（POST/PUT/DELETE）一个都没放行 —— 它们都在
+                        // /admin/article/** 下面，依然要求登录 + 管理员身份。
+                        //
+                        // 注意 requestMatchers 是【按顺序匹配】的，
+                        // 这几条必须写在 anyRequest() 前面，否则永远轮不到它们。
+                        .requestMatchers(HttpMethod.GET,
+                                "/article/page",     // 首页信息流
+                                "/article/*",        // 文章详情 /article/123
+                                "/category/list"     // 分类列表
                         ).permitAll()
 
                         // authenticated = 必须登录（带了合法 token）才能访问

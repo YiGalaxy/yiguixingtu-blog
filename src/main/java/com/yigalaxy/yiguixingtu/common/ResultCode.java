@@ -21,8 +21,11 @@ public enum ResultCode {
 
     USERNAME_EXISTS(400,"账号已存在"),
 
-    USER_NOT_FOUND(404,"用户不存在");
+    USER_NOT_FOUND(404,"用户不存在"),
 
+    ARTICLE_NOT_FOUND(404, "文章不存在"),
+
+    CATEGORY_NOT_FOUND(404, "分类不存在");
 
 
     /**

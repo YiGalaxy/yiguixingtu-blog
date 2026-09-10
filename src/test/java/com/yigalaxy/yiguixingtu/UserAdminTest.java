@@ -156,6 +156,89 @@ class UserAdminTest extends AbstractIntegrationTest {
     }
 
     // ================================================================
+    // 分页参数兜底：size 传多大都不能把整张表捞出来
+    //
+    // 【这三条用例在守什么】
+    //   分页接口的 size 是【客户端可以随便改】的参数：前端界面上写的是
+    //   一页 10 条，但只要有人把 URL 改成 ?size=999999，后端就得照做 ——
+    //   一次查询会把整张 user 表捞进内存、再序列化成 JSON 发出去。
+    //   一个请求就能把数据库连接、内存、带宽一起吃掉，而且不需要任何额外权限。
+    //
+    // 【被守的这道防线在哪（先查清楚再写用例，别凭印象）】
+    //   用户分页的上限是 UserServiceImpl.pageUsers() 里这一段：
+    //       long pageSize = (size == null || size < 1) ? 10L : size;
+    //       if (pageSize > 100) pageSize = 100;
+    //   也就是说【上限逻辑一直是有的】，只是以前没有任何用例盯着它 ——
+    //   谁哪天顺手删掉那个 if，不会有任何测试变红。
+    //   这三条用例就是把这段已经正确的行为固定下来（回归测试）。
+    //   ⚠️ 我一开始以为这里漏了夹取，是 grep 时用的关键字是 Math.min，
+    //      而它其实写成了 if 语句，所以没搜到。教训：断言"某处有 bug"之前
+    //      一定要把源码整段读完，并把预期失败先复现出来。
+    //
+    // 【另外还有一道全局底线，见 MybatisPlusConfig.MAX_PAGE_SIZE】
+    //   它不改变这里的预期结果（100 恰好等于底线），
+    //   作用是在所有分页查询的必经之路上兜一道，防止将来新增接口忘记夹取。
+    //   那一层无法通过 HTTP 接口触发（现有接口都自己夹过了），
+    //   所以单独放在 PaginationLimitTest 里从 Mapper 层直接验证。
+    //
+    // 【用到的东西】
+    //   · Spring MVC 的参数绑定：`?size=999999` 由 Spring 按字段名塞进 UserQuery
+    //   · MyBatis-Plus 的 PaginationInnerInterceptor：把 page 对象变成 LIMIT 查询
+    //   · MockMvc + jsonPath：断言【实际生效的 size】，
+    //     而不是只断言 HTTP 200（只断言 200 的话，一次捞出 99 万条同样返回 200）
+    //
+    // 三条分别盯住三个方向：超大要夹住、非法值要有兜底、正好等于上限时不能误夹。
+    // ================================================================
+
+    @Test
+    @DisplayName("㉖ size 传超大值 -> 被上限夹住，不会真去捞整张表")
+    void page_sizeTooLarge_shouldBeClamped() throws Exception {
+        mockMvc.perform(get("/user/page")
+                        // 这个数字远远超过表里的数据量：如果没夹住，
+                        // SQL 就会变成 LIMIT 999999，接口会把全部用户都返回出去
+                        .param("size", "999999")
+                        .header("Authorization", "Bearer " + adminToken))
+                // 外层 HTTP 状态：接口本身是正常处理的，不该因为这个参数报错
+                // （夹取是静默的，不是抛异常）
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                // 关键断言：响应里回显的 size 必须是夹取后的 100。
+                // ⚠️ 这个 100 来自 UserServiceImpl 里的 if (pageSize > 100) 判断，
+                //    不是分页插件夹的 —— 插件只改写 SQL 的 LIMIT，
+                //    不会改动 Page 对象上的 size 字段（详见 MybatisPlusConfig 的注释）
+                .andExpect(jsonPath("$.data.size").value(100));
+    }
+
+    @Test
+    @DisplayName("㉗ size 传 0 / 负数 -> 回落成默认 10 条，不报错也不返回空")
+    void page_invalidSize_shouldFallBackToDefault() throws Exception {
+        // 这两种输入是"没意义"而不是"恶意"：0 条和负条数的分页没有定义，
+        // 后端应该给出合理默认值，而不是抛异常或返回空列表
+        // （返回空的后果是前端显示"没有数据"，用户以为系统坏了）
+        for (String bad : new String[]{"0", "-5"}) {
+            mockMvc.perform(get("/user/page")
+                            .param("size", bad)
+                            .header("Authorization", "Bearer " + adminToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value(200))
+                    // 默认值是 10：UserServiceImpl 里 `size < 1` 时用 10L 兜底
+                    .andExpect(jsonPath("$.data.size").value(10));
+        }
+    }
+
+    @Test
+    @DisplayName("㉘ size 正好等于上限 -> 不该被夹小（别把上限做成 99）")
+    void page_sizeAtLimit_shouldNotBeClamped() throws Exception {
+        // 这条是防止夹取写成 `>=` 之类的差一错误：上限是 100，那 100 就必须能用。
+        // 否则以后有人要一页取 100 条做导出，会发现怎么调都只拿 99 条，还很难查
+        mockMvc.perform(get("/user/page")
+                        .param("size", "100")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.size").value(100));
+    }
+
+    // ================================================================
     // 三、启用 / 禁用
     // ================================================================
 

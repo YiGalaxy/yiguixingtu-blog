@@ -39,6 +39,7 @@
 | 运维监控 | Spring Boot Actuator + Micrometer（Prometheus registry），见「可观测」 |
 | 限流 | Resilience4j 2.4.0（`resilience4j-spring-boot4`）—— 注解式限流，**不写自研切面**；与 Nginx `limit_req` 组成两层，见「部署」章节 |
 | 链路追踪 | Micrometer Tracing + Brave（traceId 进日志 + 响应头 `X-Trace-Id`），见「可观测」 |
+| 操作审计 | Spring 事件机制（`@TransactionalEventListener` + `@Async`）+ 自建 `operation_log` 表，**不写自研切面**，见「操作审计」 |
 | 图片存储 | 本地磁盘（默认，本项目即用此方案）；阿里云 OSS SDK 3.18.1 作为可切换的备选，见「配置」章节 |
 | 工具库 | Lombok |
 | 测试 | JUnit 5 + MockMvc（`spring-boot-starter-webmvc-test`）+ **Testcontainers 2.0.5** |
@@ -69,6 +70,8 @@
 - **文章详情缓存**：同样走 Redis，写操作后立刻更新；带**防击穿**
   （`sync = true` 互斥重建，实测 12 线程并发只查库 1 次）——
   注意**浏览量不能被缓存冻住**，见下文「文章详情缓存」
+- **站点统计**：`GET /article/stats` 返回已发布文章数 / 总浏览量 / 分类数，
+  只算已发布、逻辑删除不计入，走 Redis 缓存 60 秒（写操作后失效）
 
 **分类**
 - 分类列表（游客可访问）
@@ -78,23 +81,28 @@
 - 全局异常处理（业务异常 / 参数校验 / 认证失败 / 账号禁用 / 权限不足 / 兜底）
 - 分页与排序参数安全处理（见「接口安全约定」）
 - 自动生成 OpenAPI 接口文档
+- **接口限流（两层）**：应用层用 Resilience4j 注解式限流（登录 5 次/分钟、
+  前台列表 300 次/分钟），Nginx 那层按客户端 IP 限流；被限流返回 **429** ——
+  两层的分工与数值理由见「部署」章节
+- **操作审计**：文章的增 / 改 / 发布下架 / 删除，用户的启用禁用 / 改角色 /
+  重置密码 / 删除，共 8 类写操作全部留痕（操作人、来源 IP、traceId、
+  改动内容快照）；**业务提交之后才异步落库**，回滚掉的操作不会被记下来 ——
+  见「操作审计」
 - **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   图片存服务器本地磁盘（可按配置切到阿里云 OSS，见「配置」章节）
-- 集成测试 24 个类 **198 个用例**，行覆盖率 **86%**
+- 集成测试 **25 个类 209 个用例**，行覆盖率 **86.7%**
 
 ### 🚧 规划中
 
 - 标签（tag）与文章标签关联
 - 评论 / 留言与审核
 - 分类的后台增删改（目前只有只读列表接口）
-- 文章**详情**缓存（列表缓存已完成）
-- 站点统计接口（`GET /article/stats`）
+- **审计记录的查询接口**：审计目前只负责"记下来"，还没有后台查询页面
 - 归档
 - 全文搜索（目前是 `LIKE '%关键词%'`，用不上索引；要快要上 ES）
-- 接口限流与操作审计
 
 > 详细的开发计划、技术选型取舍与分阶段提交清单见仓库根目录 `TECH_ROADMAP.md`。
 
@@ -116,6 +124,7 @@ com.yigalaxy.yiguixingtu
 │   ├── WebMvcConfig                # /uploads/** 映射到本地存储目录
 │   ├── SchedulingConfig            # @EnableScheduling（浏览量定时落库要用）
 │   ├── TraceResponseHeaderFilter   # 把当前请求的 traceId 写进响应头 X-Trace-Id
+│   ├── AsyncConfig                 # @EnableAsync + 审计落库线程池的拒绝策略（CallerRunsPolicy）
 │   └── AdminBootstrapRunner        # 空库启动时引导创建第一个管理员
 ├── auth
 │   ├── controller/AuthController   # 登录 / 注册 / 登出 / 当前用户
@@ -128,6 +137,14 @@ com.yigalaxy.yiguixingtu
 │   ├── dto/                        # LoginRequest / RegisterRequest / LoginVO
 │   ├── JwtProperties               # JWT 配置绑定
 │   └── LoginUser                   # 认证用户包装（含 status/role）
+├── audit
+│   ├── OperationLog                # 审计记录实体（对应 operation_log 表，刻意没有逻辑删除）
+│   ├── OperationAction             # 操作类型枚举（CREATE_ARTICLE / DELETE_USER …）
+│   ├── AuditTarget                 # 操作对象类型（ARTICLE / USER）
+│   ├── OperationLogEvent           # 事件对象（带上用户 / IP / traceId 的快照）
+│   ├── OperationLogRecorder        # 业务代码只调它一行：抄上下文 + 发事件
+│   ├── OperationLogListener        # @Async + AFTER_COMMIT：业务提交后才落库
+│   └── mapper/OperationLogMapper
 ├── user
 │   ├── controller/UserController   # 用户管理（类级 @PreAuthorize ADMIN）
 │   ├── service/UserService(+Impl)  # 分页 / 状态 / 角色 / 重置密码 / 逻辑删除
@@ -165,7 +182,8 @@ src/main/resources
 └── db/migration
     ├── V1__init.sql                     # user / category / article 建表
     ├── V2__add_article_sort_index.sql   # 列表排序的复合索引（附实测依据）
-    └── V3__add_count_covering_index.sql # 分页 COUNT 的覆盖索引（压测压出来的）
+    ├── V3__add_count_covering_index.sql # 分页 COUNT 的覆盖索引（压测压出来的）
+    └── V4__create_operation_log.sql     # 操作审计表（刻意没有逻辑删除，见脚本内说明）
 
 src/test/java/com/yigalaxy/yiguixingtu
 ├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
@@ -188,6 +206,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── SecurityHeadersTest             # 四个安全响应头
 ├── MetricsEndpointTest             # 指标端点与自定义业务指标
 ├── TracingTest                     # 链路追踪：traceId 进日志 + 进响应头
+├── OperationLogTest                # 操作审计：8 类写操作都留痕 / IP 取真实客户端 / 回滚与失败不记账
 ├── PaginationLimitTest             # 分页全局上限（从 Mapper 层验证插件兜底）
 ├── ProfileDevConfigTest            # dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单
 ├── ProfileProdConfigTest           # prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量
@@ -510,6 +529,38 @@ management.tracing.propagation.type=b3
 > 十几行的 `TraceResponseHeaderFilter` 写的自定义头 `X-Trace-Id`
 > （这在 servlet 过滤器里读 `tracer.currentSpan()` 是几十年来最标准的做法，
 > 见该类的注释）。`propagation.type` 真正管的是"收到上游 B3 头时继续那条 trace"。
+
+#### 异步执行线程池（`@Async` 用，目前只有操作审计）
+
+```properties
+spring.task.execution.pool.core-size=1
+spring.task.execution.pool.max-size=4
+spring.task.execution.pool.queue-capacity=200
+spring.task.execution.pool.keep-alive=60s
+spring.task.execution.pool.allow-core-thread-timeout=true
+spring.task.execution.thread-name-prefix=audit-async-
+spring.task.execution.shutdown.await-termination=true
+spring.task.execution.shutdown.await-termination-period=10s
+```
+
+操作审计的落库是**异步**的（见「操作审计」），用的是 Spring 自带的
+`ThreadPoolTaskExecutor`（配 `spring.task.execution.*` 即可，不需要自己 `new` 一个线程池）。
+
+| 参数 | 值 | 为什么是这个值 |
+|------|----|---------------|
+| `queue-capacity` | 200（**有界**） | 队列无界（默认是 `Integer.MAX_VALUE`）时，数据库一慢任务就无限堆积，最终把内存吃光 —— 表现是"应用莫名 OOM"，而且看不出跟审计有关。有界队列的意义是**压力大时明确拒绝，而不是悄悄攒** |
+| `core-size` | 1 | 审计是低频、低优先级的写入，一个线程足够；多开线程只会跟业务请求抢数据库连接 |
+| `max-size` | 4 | 只在队列快满时临时扩容，属于"应急"而不是常态 |
+| `keep-alive` + `allow-core-thread-timeout` | 60s + true | 低峰期不必一直占着线程 |
+| `thread-name-prefix` | `audit-async-` | 日志里一眼能分辨"这行不在处理请求的线程上" |
+| `await-termination` | true / 10s | 关停时把已排队的审计任务做完，不因为一次重启丢掉记录 |
+
+⚠️ **拒绝策略配不了**：Boot 没有暴露这个配置项，所以在 `config/AsyncConfig`
+里用 `ThreadPoolTaskExecutorCustomizer` 设成了 **`CallerRunsPolicy`**
+（队列满时由提交任务的线程自己执行）。为什么必须是它：另外三种默认策略里，
+`AbortPolicy` 会**抛异常**——那等于让"审计写不进去"把一个已经成功的用户请求搞成 500，
+本末倒置；`DiscardPolicy` / `DiscardOldestPolicy` 会**静默丢记录**。
+`CallerRunsPolicy` 唯一的代价是让请求多等一次插入，换的是"既不失败也不丢"。
 
 #### 数据库连接池（HikariCP）
 
@@ -1065,6 +1116,78 @@ verify(spyArticleMapper, times(1)).selectById(articleId);   // 12 个线程 -> �
 `if (artSaving.value) return` —— 因为极快连点时，第一次点击设置的状态
 还没让浏览器重绘，第二次点击就已经进来了，光靠按钮禁用挡不住。
 
+## 操作审计（谁在什么时候做了什么）
+
+**场景**：某天发现一篇文章被人改成了广告，或者某个账号被悄悄提了权限。
+应用日志能告诉你"发生过什么"，但日志是**没有结构的一堆文本行**、
+还会被轮转删掉；真正要回答的问题只有四个字：
+**谁、何时、对什么、做了什么**。
+
+**做法**：一张 `operation_log` 表 + Spring 的事件机制。
+
+### 记了哪些操作
+
+| 对象 | 操作 | action |
+|------|------|--------|
+| 文章 | 新建 / 编辑 / 发布下架 / 删除 | `CREATE_ARTICLE`、`UPDATE_ARTICLE`、`UPDATE_ARTICLE_STATUS`、`DELETE_ARTICLE` |
+| 用户 | 启用禁用 / 改角色 / 重置密码 / 删除 | `UPDATE_USER_STATUS`、`UPDATE_USER_ROLE`、`RESET_USER_PASSWORD`、`DELETE_USER` |
+
+### 每条记录有哪些字段，为什么
+
+| 字段 | 内容 | 为什么需要它 |
+|------|------|-------------|
+| `user_id` + `username` | 操作人 | **两个都存是有意的**：id 用来关联查询，username 是**快照**。用户改名或被删之后（本项目的删除会把用户名改写成 `原名#deleted#id`），靠 id 已经追不回"当时是谁"了 |
+| `action` / `target_type` / `target_id` | 做了什么、对哪条数据 | 用枚举而不是字符串（见 `OperationAction`）：写错一个字母会出现一个永远统计不到的"分类"，而且不会报错 |
+| `detail` | 补充说明 | 例如 `标题=xxx`、`角色 GUEST → ADMIN`。**删除类操作必须在 detail 里留标题 / 用户名快照** —— 删掉之后再回查那条数据，已经查不出它原来叫什么了 |
+| `ip` | 来源 IP | 取 `X-Forwarded-For` 的**第一段**。线上请求先过 Nginx，`getRemoteAddr()` 拿到的是 `127.0.0.1`，记它没有意义 |
+| `trace_id` | 链路追踪 ID | **这条记录和日志系统之间的那根线**：有了它，就能从"谁改了这篇文章"一路查到"那次请求里每一条 SQL、每一次报错"。没有它，审计表只是一个孤立的记录 |
+| `create_time` | 什么时候 | 索引都是带时间列的，因为审计查询**永远带时间范围** |
+
+### 链路：业务代码只加一行
+
+```
+Service（写方法）
+   │  operationLogRecorder.record(...)      ← 业务侧只有这一行，不关心后面怎么处理
+   ▼
+OperationLogRecorder
+   │  在这一刻（还在请求线程上）把"当前是谁 / 从哪来 / traceId"抄进事件对象
+   │  publishEvent(OperationLogEvent)
+   ▼
+OperationLogListener（@Async + @TransactionalEventListener(AFTER_COMMIT)）
+   │  业务事务真的提交了 → 在另一个线程上插库
+   ▼
+operation_log 表（异步完成，请求早就返回了）
+```
+
+| 设计点 | 怎么做的 | 为什么 |
+|--------|---------|--------|
+| 为什么用事件，而不是在写方法里直接 `insert` | 业务只"喊一声" | 直插有三个问题：① 每加一个写方法都得记得加一行，漏了没人发现；② 审计写入落在业务事务里，插库失败会把用户的正常操作一起搞挂；③ 每次写操作都同步多一次数据库往返 |
+| 为什么是 `AFTER_COMMIT` | 事务提交后才记账 | 业务最后回滚了（比如保存时分类不存在），这条记录就不该存在。不这样写，表里会出现一批"从没发生过"的操作 |
+| 为什么还要 `fallbackExecution = true` | 没有事务时**立即**执行 | `UserServiceImpl` 的启用禁用 / 改角色 / 重置密码三个方法**没有 `@Transactional`**（这是已知的风格不一致）。默认 `false` 时，在那里发的事件会被**静默丢弃** —— 审计对这三个接口等于没生效，而且不会有任何报错 |
+| 那三个方法为什么不顺手补上 `@Transactional` | 刻意不动 | 补上会把**清缓存挪进事务里**：缓存已清、事务还没提交的这段时间里，任何一次读都会把**旧数据**重新塞回缓存，提交之后缓存里就是脏的，一直脏到 TTL 到期。现在的写法（先改库、再清缓存）反而窗口更小 |
+| 为什么 `@Async` | 请求不等落库 | 审计是一次额外的数据库写入，没道理让用户的上传 / 保存动作等它。⚠️ 但因为换了线程，用户、IP、traceId 这三个 ThreadLocal 必须在**发布事件的那一刻**就抄进事件对象 —— 这个坑不注意的话，审计表里这三个字段会全是 `null` |
+| `@Async` 还需要什么 | `@EnableAsync`（见 `config/AsyncConfig`） | 没有这个注解，`@Async` 就只是一个注释：不报错、也不生效（和 `@EnableCaching` / `@EnableScheduling` 是同一类坑） |
+| 线程池满了怎么办 | 有界队列 200 + `CallerRunsPolicy` | 见「配置」章节的说明。核心是**既不抛异常也不丢记录** |
+| 落库失败呢 | 监听器自己 `catch` + 打 ERROR 日志 | 监听器是链路的末端（业务早就提交返回了），异常往上抛没有接收方。⚠️ 代价说清楚：数据库真挂了会有审计记录丢失。个人博客可以接受；换到金融场景就该走"消息队列 + 落库确认"来保证不丢 |
+| 为什么这张表**没有逻辑删除** | 项目里唯一没有 `deleted` 的业务表 | 审计的价值就是"发生过的事不能被抹掉"。给它加逻辑删除等于给了"把痕迹藏起来"的操作空间；真要清理历史数据，应该是按时间归档这种明确的运维动作 |
+| 为什么 `username` 不直接查 `user` 表 | 存快照 | 用户删除后用户名会被改写、行也被标记删除，关联查已经查不出人；审计记录必须**自己带着**当时的信息 |
+| 现在有查询接口吗 | **没有** | 目前只写入，还没有后台查询页面 —— 这一点也写在「规划中」里，不做成"看起来有、其实没做完" |
+
+### ⚠️ 写这类测试时踩到的坑（记下来免得再踩）
+
+`@Transactional` 的测试类**永远不会提交**（跑完就回滚），而落库监听器等的就是那个
+`AFTER_COMMIT` —— 两者一叠加，事件永远等不到提交，**一条审计都不会写**。
+它的失败长相还很误导：测试红在"查不到审计记录"，看起来像功能没实现，
+真正的原因却是"测试环境的事务语义和线上不一样"。
+
+所以 `OperationLogTest` 显式声明了 `Propagation.NOT_SUPPORTED`，让业务真的提交，
+代价是数据要自己清理（`@AfterEach` 里按唯一标记物理删除）。
+同一类取舍在 `ArticleDetailCacheTest` 的并发用例里也出现过 —— 那次是为了让别的线程看得见数据。
+
+另一条：落库是异步的，所以断言**必须轮询等**（`awaitLog`），
+不能"请求一返回就查库说没有"—— 那是假绿；也不能 `sleep` 一个固定值，
+给短了随机红、给长了每条用例白等。
+
 ## 接口安全约定
 
 几个容易被忽略、但这里都处理了的地方：
@@ -1086,6 +1209,7 @@ verify(spyArticleMapper, times(1)).selectById(articleId);   // 12 个线程 -> �
 | `user` | 用户 | `uk_username` 唯一 | Flyway `V1__init.sql` |
 | `category` | 文章分类 | `uk_name` 唯一 | Flyway `V1__init.sql` |
 | `article` | 文章（含草稿与浏览量） | `idx_status_top_create(status, is_top, create_time)`、`idx_status_create(status, create_time)`、`idx_deleted_status(deleted, status)`、`idx_category(category_id)` | Flyway `V1` + `V2` + `V3` |
+| `operation_log` | 操作审计（谁 / 何时 / 对什么 / 做了什么） | `idx_user_time(user_id, create_time)`、`idx_create_time(create_time)` | Flyway `V4__create_operation_log.sql` |
 | `flyway_schema_history` | Flyway 自己的迁移记录表 | —— | Flyway 自动创建 |
 
 > `article` 上四个索引看着多，其实每个都有明确的归属，缺了会有可量化的退化：
@@ -1093,8 +1217,12 @@ verify(spyArticleMapper, times(1)).selectById(articleId);   // 12 个线程 -> �
 > `idx_status_create` 管"按发布时间排序"、`idx_category` 管"按分类筛"。
 > 哪一条是谁的、为什么不能互相替代，见「性能」章节（那里有逐条的实测数字）。
 >
-> 表结构**不要手动改**。需要改表就新增一个迁移脚本（`V4__xxx.sql`），
+> 表结构**不要手动改**。需要改表就新增一个迁移脚本（`V5__xxx.sql`），
 > 让开发库、测试库、生产库走同一条路径。
+>
+> `operation_log` 是**唯一没有 `deleted` 字段**的业务表，这是刻意的：
+> 审计的价值就在于"发生过的事不能被抹掉"，给它加上逻辑删除等于
+> 给了"把痕迹藏起来"的操作空间（理由写在 `V4__create_operation_log.sql` 里）。
 
 ## 性能
 
@@ -1781,10 +1909,10 @@ mvn test
 
 | 维度 | 覆盖率 |
 |------|:---:|
-| 行覆盖 | **86.2%**（507 / 588） |
-| 方法覆盖 | **95.2%**（119 / 125） |
-| 指令覆盖 | **86.3%**（2,227 / 2,581） |
-| 分支覆盖 | 55.2%（111 / 201） |
+| 行覆盖 | **86.7%**（1,045 / 1,206） |
+| 方法覆盖 | **95.0%**（228 / 240） |
+| 指令覆盖 | **86.5%**（4,450 / 5,146） |
+| 分支覆盖 | 64.4%（244 / 379） |
 
 > 分支覆盖率明显低于行覆盖率，是因为大量的**参数校验分支、异常兜底分支、
 > 空值判断分支**不会被每个用例都走到——这是正常的，不必为了刷数字硬凑用例。
@@ -1798,7 +1926,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 198 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 209 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1810,10 +1938,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 198 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 209 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**24 个测试类，198 个用例，全部通过：**
+**25 个测试类，209 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -1839,8 +1967,9 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ProfileDevConfigTest` | 6 | dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单 |
 | `ProfileProdConfigTest` | 3 | prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量 |
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
+| `OperationLogTest` | 11 | 操作审计：8 类写操作都留痕（含操作人/对象/IP/traceId/detail 快照）、IP 取 `X-Forwarded-For` 真实客户端、**失败与回滚的操作不记账**、审计行里不含明文密码 |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **198** | |
+| **合计** | **209** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。
@@ -1853,7 +1982,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 用 static 代码块（singleton container pattern）只拉一次、全程共用，容器的回收交给
 > Testcontainers 的 Ryuk（JVM 退出时自动清理），不需要手写 `@AfterAll`。
 
-**写测试的四条约定（不是随便定的）：**
+**写测试的五条约定（不是随便定的）：**
 
 1. **断言要落到数据库**。用 `JdbcTemplate` 直查原生 SQL 验证，而不是只断言 HTTP 状态码。
    比如验证"删除文章是逻辑删除"，必须确认**物理行还在且 `deleted = 1`**——
@@ -1865,6 +1994,11 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
    正确的做法是在 `@BeforeEach` 里插一个自己的用户，用它的**真实 id** 签发 token。
 4. **`@Transactional` 让每个用例跑完自动回滚**，不污染数据库。
    注意它**回滚不了 Redis**，所以涉及缓存的用例要在 `@AfterEach` 里手动清 key。
+5. **测"提交之后才发生的事"，必须先把测试事务关掉**（`@Transactional(propagation = NOT_SUPPORTED)`）。
+   测试事务永远只回滚、不提交，`@TransactionalEventListener(AFTER_COMMIT)` 就永远等不到
+   那个 commit —— 功能明明是好的，用例却红在"没生效"，还看不出是环境的锅。
+   关掉之后数据要自己清理（`@AfterEach` 里按唯一标记物理删除），
+   异步落库的断言还要**轮询**等而不是 `sleep` 固定值（见 `OperationLogTest`）。
 
 ## 许可证
 

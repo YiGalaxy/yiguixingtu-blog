@@ -4,6 +4,9 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.yigalaxy.yiguixingtu.auth.cache.UserAuthCache;
+import com.yigalaxy.yiguixingtu.audit.AuditTarget;
+import com.yigalaxy.yiguixingtu.audit.OperationAction;
+import com.yigalaxy.yiguixingtu.audit.OperationLogRecorder;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
 import com.yigalaxy.yiguixingtu.user.dto.UserQuery;
@@ -25,10 +28,22 @@ public class UserServiceImpl implements UserService {
     /** 用户认证信息缓存：任何会改变"用户是否合法 / 角色"的操作，都必须清掉它 */
     private final UserAuthCache userAuthCache;
 
-    public UserServiceImpl(UserMapper userMapper, PasswordEncoder passwordEncoder, UserAuthCache userAuthCache) {
+    /**
+     * 操作审计记录器。
+     * 用户管理全是"改权限、改状态、删账号"这类高危动作，
+     * 出事之后第一个要回答的问题就是"谁在什么时候干的"，所以每个写方法都要记一笔。
+     * 具体怎么落库见 audit 包的 OperationLogRecorder / OperationLogListener。
+     */
+    private final OperationLogRecorder operationLogRecorder;
+
+    public UserServiceImpl(UserMapper userMapper,
+                           PasswordEncoder passwordEncoder,
+                           UserAuthCache userAuthCache,
+                           OperationLogRecorder operationLogRecorder) {
         this.userMapper = userMapper;
         this.passwordEncoder = passwordEncoder;
         this.userAuthCache = userAuthCache;
+        this.operationLogRecorder = operationLogRecorder;
 
     }
 
@@ -215,6 +230,12 @@ public class UserServiceImpl implements UserService {
         //    最长撑到 TTL 到期（30 分钟）—— 那这个功能就形同虚设。
         userAuthCache.evict(id);
 
+        // 记一笔审计：启用/禁用直接决定这个账号还能不能登录，属于权限类高危操作
+        // detail 里带上用户名，因为审计表里只有 target_id，
+        // 事后翻审计时能直接看懂"动的是谁"，不用再回查 user 表
+        operationLogRecorder.record(OperationAction.UPDATE_USER_STATUS, AuditTarget.USER, id,
+                "用户=" + user.getUsername() + "，" + (status == 1 ? "启用" : "禁用"));
+
         log.info("修改用户状态: id={}, status={}", id, status);
     }
 
@@ -248,6 +269,12 @@ public class UserServiceImpl implements UserService {
         //    （比如刚被降级的人，缓存里仍是 ADMIN，还能进后台）
         userAuthCache.evict(id);
 
+        // 记一笔审计：改角色就是改权限（GUEST → ADMIN 等于提权），最需要留痕
+        // detail 里把"从什么角色改成什么角色"都写下来：
+        // 只记改完之后的值，事后根本看不出这是一次提权还是一次降权
+        operationLogRecorder.record(OperationAction.UPDATE_USER_ROLE, AuditTarget.USER, id,
+                "用户=" + user.getUsername() + "，角色 " + user.getRole() + " → " + role);
+
         log.info("修改用户角色: id={}, role={}", id, role);
     }
 
@@ -280,6 +307,14 @@ public class UserServiceImpl implements UserService {
         // 4.【关键】人删了，缓存还留着 = 幽灵账号，拿旧 token 依然能通行
         userAuthCache.evict(id);
 
+        // 记一笔审计：删除是最不可逆的操作（这里只是逻辑删除，但账号等于废了），
+        // detail 里留一份【改写之前】的用户名快照 ——
+        // 上面刚把 username 改写成 "原名#deleted#id"，
+        // 之后就再也无法从 user 表看出"删掉的到底是哪个账号"，只有这条记录能还原。
+        // 另外本方法是 @Transactional 的，事件绑在事务上，回滚时不会留下这条记录。
+        operationLogRecorder.record(OperationAction.DELETE_USER, AuditTarget.USER, id,
+                "用户=" + user.getUsername());
+
         log.info("删除用户: id={}, username={}", id, user.getUsername());
     }
 
@@ -310,6 +345,15 @@ public class UserServiceImpl implements UserService {
         // 4. 清缓存：缓存里虽然不含密码，但保持"一改用户就清缓存"的一致习惯；
         //    将来若要做"改密码后旧 token 立即失效"，这里就不用再补了
         userAuthCache.evict(id);
+
+        // 记一笔审计：能回答"这个账号的密码是谁、什么时候重置的"，
+        // 排查"用户说登不上"时这是第一手线索。
+        // ⚠️ detail 里【绝不能】带上密码 —— 审计表是长期保留的，
+        //    明文密码写进去等于把泄露面从"业务库"扩大到"审计库"。
+        // 本方法没有 @Transactional，事件靠 fallbackExecution 兜底立即派发，
+        // 所以别把 record 挪到 @Transactional 方法之外去，否则会丢掉"事务回滚就不记录"的保证。
+        operationLogRecorder.record(OperationAction.RESET_USER_PASSWORD, AuditTarget.USER, id,
+                "用户=" + user.getUsername());
 
         log.info("重置用户密码: id={}", id);
     }

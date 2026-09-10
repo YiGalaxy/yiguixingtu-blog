@@ -157,7 +157,7 @@
 |---|---|---|---|---|---|---|
 | 1 | **Resilience4j（限流 + 熔断降级）** | `@RateLimiter` / `@CircuitBreaker` 注解 + `application-*.properties` 规则 | 手写限流注解 + Lua 脚本是**自研轮子**；Resilience4j 是 Spring 官方生态的现成方案，**纯库、零额外部署** | 4.1 | 接口限流、熔断降级 | M4 后 |
 | 2 | **Nginx `limit_req`（入口层限流）** | `nginx.conf` | 应用层限流拦不住"请求还没进 JVM"的洪水；**入口先拦一道，成本为零**（Nginx 本来就有） | 4.1 | Nginx 限流 | M4 后 |
-| 3 | **Spring 事件 + `@TransactionalEventListener(AFTER_COMMIT)` + `@Async`** | `event/OpLogEvent`、`listener/OpLogListener`；线程池走 `spring.task.execution.*` 配置 | 操作审计用 **Spring 原生事件机制**，**不自研 `@Aspect`**；`AFTER_COMMIT` 天然解决"业务回滚了日志却留下"的老问题 | 4.2 | 事件驱动、异步解耦 | M4 后 |
+| 3 | **Spring 事件 + `@TransactionalEventListener(AFTER_COMMIT)` + `@Async`** | `audit/OperationLogEvent`、`audit/OperationLogRecorder`、`audit/OperationLogListener`；线程池走 `spring.task.execution.*` 配置 | 操作审计用 **Spring 原生事件机制**，**不自研 `@Aspect`**；`AFTER_COMMIT` 天然解决"业务回滚了日志却留下"的老问题 | 4.2 ✅ | 事件驱动、异步解耦 | M4 后 |
 | 4 | **`@Scheduled`** | `task/ViewCountSyncTask` | 详情接口每次都 `UPDATE view_count`，读接口带写操作 | 2.3 | 定时任务 + 批量落库 | M2 后 |
 | 5 | **Spring Cache + `RedisConfig`** | `config/RedisConfig`、`@Cacheable` / `@CacheEvict` | 现在**连 `RedisConfig` 都不存在**，`@EnableCaching` 没开，Redis 只有一处手写调用 | 2.1 · 2.2 | 缓存三件套、缓存一致性 | M2 后 |
 | 6 | **Flyway** | `db/migration/V1__init.sql` | 表是手工建的，DDL 散在 md 里，换台机器就要照抄 SQL；**也是 Testcontainers 的前置**（容器起来是空库，没迁移就没表） | 1.1 | Schema 版本化 | M1 后 |
@@ -663,7 +663,7 @@ Nginx 层用 `wrk`/`ab` 打到触发 `limit_req`（返回 503）——**两层�
 | **M1** | ✅ 完成（1.1 Flyway · 1.2 Testcontainers · 1.3 CI+JaCoCo） | **B3 + B1 + B2**：Flyway → Testcontainers → CI/JaCoCo | 技能栏「工程化」加 **Testcontainers / CI-CD / JaCoCo / Flyway**；项目经历「测试与部署」那条可以写容器化集成测试 |
 | **M2** | ✅ 完成（2.1 列表缓存 · 2.2 详情缓存+防击穿 · 2.3 浏览量 · 2.4 统计接口） | **A1 + A2**：缓存三件套 + 浏览量计数 | 「数据库与缓存」升级为掌握级；那条 `了解 Redis 高并发` **从"了解"行移出** |
 | **M3** | ✅ 完成（3.1 多环境 · 3.2 OSS上传 · 3.3 Dockerfile+四容器 · 3.4 部署文档 · 3.5 管理员引导） | **E1 + B4 + B5 + B6**：多环境 → OSS 上传 → 上线 → CD | 徽章「已上线」与结尾「阿里云 ECS + OSS」**变成真的**；过一遍 §8「简历同步规则」第 1 条的不可见注释核对门 |
-| **M4** | 🔄 进行中（4.1 ✅ 限流 / 4.2 操作审计待做） | **A3 + A4**：Nginx + Resilience4j 限流、Spring 事件驱动的操作审计 | 技能栏加 `Resilience4j`（限流与熔断降级）、`Redisson`；「切面与事务」那条**保持原样** —— `@Transactional` / `@PreAuthorize` 就是最主流的用法，不需要改 |
+| **M4** | ✅ 完成（4.1 ✅ 限流 · 4.2 ✅ 操作审计） | **A3 + A4**：Nginx + Resilience4j 限流、Spring 事件驱动的操作审计 | 技能栏加 `Resilience4j`（限流与熔断降级）、`Redisson`；「切面与事务」那条**保持原样** —— `@Transactional` / `@PreAuthorize` 就是最主流的用法，不需要改 |
 | **M5** | 🔄 进行中（5.1 ✅ 5.2 ✅ 5.3 ✅ 5.4 ✅ 5.7 ✅ 5.8 ✅ 5.9 ✅ / 5.6 完成一半 / 5.5 可选未做） | **D + E**：traceId、索引与压测、指标、幂等、登出失效、安全头、错误码 | 面试纵深：**这些是"做过才答得出"的细节** |
 | **M6** | ⬜ 待做 | **C / F**：标签评论、搜索、消息队列、前端站点 | 按需，别为了关键词硬做 |
 
@@ -1179,10 +1179,47 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 >   所以在 `AbstractIntegrationTest` 里加了 `@BeforeEach`：
 >   **每条用例开始前把限流器换成新实例**（和"在 ArticleCacheTest 里清 Redis key"同一个道理）。
 
+> **4.2 已完成**（本次提交）：Spring 事件驱动的操作审计 + `V4__create_operation_log.sql`，
+> `OperationLogTest` 11 个用例。
+>   · 落点：**8 类写操作** —— 文章的新建 / 编辑 / 发布下架 / 删除，
+>     用户的启用禁用 / 改角色 / 重置密码 / 删除。业务侧只在写方法末尾加一行
+>     `operationLogRecorder.record(...)`，不关心后面怎么处理
+>   · 链路：Service → `audit/OperationLogRecorder`（**在请求线程上**把用户 / IP / traceId
+>     抄进事件对象）→ `audit/OperationLogListener`（`@TransactionalEventListener(AFTER_COMMIT)`
+>     + `@Async`）→ 异步插库。包名从计划里的 `event/OpLogEvent` 改成了 `audit/OperationLog*`：
+>     三样东西都是 ThreadLocal，必须在"发布的那一刻"抄下来，否则审计表里会是三个 null
+>   · **`fallbackExecution = true` 是必须的**：`UserServiceImpl` 的启用禁用 / 改角色 /
+>     重置密码三个方法**没有 `@Transactional`**（这是已知的风格不一致，**刻意不补** ——
+>     补上会把清缓存挪进事务里，反而扩大"缓存已清、库还没提交"的脏读窗口）。
+>     默认 `false` 时那里发的事件会被**静默丢弃**：审计对这三个接口等于没生效，且不报错
+>   · 线程池直接用 Boot 自带的 `spring.task.execution.*`（**有界队列 200**）。
+>     拒绝策略 Boot 没暴露配置项，用 `config/AsyncConfig` 的 `ThreadPoolTaskExecutorCustomizer`
+>     设成 `CallerRunsPolicy` —— 另外三种要么抛异常（把一次成功的用户请求搞成 500）、
+>     要么静默丢记录，只有它既不失败也不丢
+>   · 表刻意**没有 `deleted` 字段**（项目里唯一一张）：审计的价值就是"发生过的事抹不掉"
+>
+> **⚠️ 本次踩到的三个坑（都写进了代码注释 / 测试注释）**
+>   ① 🚨 **Mapper 必须放在名为 `mapper` 的包里**。项目扫描规则是
+>      `@MapperScan("com.yigalaxy.yiguixingtu.**.mapper")`，它会被拼成 Ant 路径
+>      `.../**&#47;mapper/**&#47;*.class`。`OperationLogMapper` 一开始平放在 `audit/` 下：
+>      编译通过、**启动直接失败**（`No qualifying bean of type 'OperationLogMapper'`）。
+>      修法是把接口挪进 `audit/mapper/`，而不是把扫描规则改宽（改宽会连带扫到别的包）
+>   ② **`@Transactional` 的测试类永远不会提交**，而监听器等的就是那个 `AFTER_COMMIT` ——
+>      两者一叠加，**一条审计都不会写**；失败长相还是"查不到审计记录"，
+>      看起来像功能没实现，真因却是测试环境的事务语义和线上不一样。
+>      所以 `OperationLogTest` 显式声明 `Propagation.NOT_SUPPORTED`，数据自己清（`@AfterEach` 物理删）
+>   ③ **"重置密码"那条用例第一版拼了 29 位密码**，被 `@Size(min = 6, max = 20)` 拦在参数校验；
+>      而业务错误走的是 **HTTP 200 + body.code**，`status().isOk()` 照样通过，
+>      于是测试红在"查不到审计记录"上 —— 实际是请求根本没走到 Service。
+>   → 教训：**断言"某件事没发生"之前，先确认"那件事本来该发生的路径"真的走通了**。
+>      所以第⑪条特意留了对照组：同一段代码正常提交时**确实**会记账。
+>   → 另外：落库是异步的，断言必须**轮询**（`awaitLog`），
+>      既不能"请求一返回就查库说没有"（假绿），也不能 `sleep` 一个固定值（给短了随机红）
+
 | # | 提交标题 | 内容 | 测试要求 |
 |---|---|---|---|
 | **4.1** | ✅ `新增Nginx与应用层两层限流，并用Resilience4j实现熔断降级` | `resilience4j-spring-boot4` + 库自带的限流切面（**不写 `@Aspect`**）；`ResultCode` 加 429；`GlobalExceptionHandler` 捕获 `RequestNotPermitted`（返回 `ResponseEntity`）；Nginx 配 `limit_req`；落点 `/auth/login`、`/article/page` | 配额用完返回 **HTTP 429 + code 429**；窗口刷新后恢复；正常路径不受影响 —— **已完成，见上方进度块** |
-| **4.2** | `新增Spring事件驱动的操作审计，事务提交后异步落库` | `event/OpLogEvent` + `@TransactionalEventListener(AFTER_COMMIT)` + `@Async` + `OperationLog` 实体；线程池走 `spring.task.execution.*`（**配 `queue-capacity` 为有界值**） | 后台写操作后 `operation_log` 有记录且响应耗时不明显增加；**故意让业务回滚 → 不产生日志**（证明 `AFTER_COMMIT` 生效） |
+| **4.2** | ✅ `新增Spring事件驱动的操作审计，事务提交后异步落库` | `audit/OperationLogEvent` + `OperationLogRecorder` + `OperationLogListener`（`@TransactionalEventListener(AFTER_COMMIT, fallbackExecution = true)` + `@Async`）；`V4__create_operation_log.sql`；线程池走 `spring.task.execution.*`（**`queue-capacity` 为有界值 200** + `CallerRunsPolicy`） | 后台写操作后 `operation_log` 有记录且响应耗时不明显增加；**故意让业务回滚 → 不产生日志**（证明 `AFTER_COMMIT` 生效） —— **已完成，见上方进度块** |
 
 > **README 同步（2 个提交各过一遍 R5 清单）**
 > 4.1 → 接口表给 `/auth/login`、`/article/page` 标注"有限流"，「统一返回」章节补 429，Nginx 章节补 `limit_req` 配置与"为什么两层都要"；4.2 → 「已实现」补"操作审计"、数据库章节补 `operation_log` 表、配置章节说明 `spring.task.execution` 参数。
@@ -1579,7 +1616,7 @@ Signed-off-by: 别太在亿啦 <2175548220@qq.com>
 | **3.4** 部署文档 | **w3.4** 前端 README | 手机 4G 打开域名：能发文、能看到图、能登录后台 |
 | **3.5** 管理员初始化引导（新增） | —— | 用一个**全新空库**启动后端 → 能创建出管理员并登录后台（当前会卡在没有管理员这一步） |
 | **4.1** 限流 | **w4.1** 429 处理 | 连点登录 6 次 → 前端提示"请求过于频繁"（**不是**"网络异常"） |
-| **4.2** 操作日志 + `@Async` | —— | 后台写操作后前端无感；`operation_log` 有记录 |
+| **4.2** 操作日志 + `@Async` | —— | 后台写操作后前端无感；`operation_log` 有记录（**已完成**：8 类写操作，异步落库，请求耗时不增加） |
 | **5.1** logback + traceId | **w5.3** 错误带 traceId | 前端报错时拿 traceId 去后端日志里能定位到同一次请求 |
 | **5.2** 登出 token 失效 | **w5.1** 登出链路 | 点"退出" → 后端收到登出 → 再点需要登录的操作 → 401 → 弹登录框且 `user` 已清空 |
 | **5.3** 索引优化 | —— | 首页列表加载主观/客观变快 |

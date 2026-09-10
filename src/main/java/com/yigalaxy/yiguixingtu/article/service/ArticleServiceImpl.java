@@ -5,6 +5,9 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.yigalaxy.yiguixingtu.article.cache.ArticleCacheVersion;
+import com.yigalaxy.yiguixingtu.audit.AuditTarget;
+import com.yigalaxy.yiguixingtu.audit.OperationAction;
+import com.yigalaxy.yiguixingtu.audit.OperationLogRecorder;
 import com.yigalaxy.yiguixingtu.article.cache.PublishedArticleCache;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
@@ -86,16 +89,25 @@ public class ArticleServiceImpl implements ArticleService {
      */
     private final PublishedArticleCache publishedArticleCache;
 
+    /**
+     * 操作审计记录器。
+     * 业务代码只调它一行，剩下的（用户/IP/traceId 的采集、事务提交后异步落库）
+     * 都在 audit 包里，见 OperationLogRecorder 的类注释。
+     */
+    private final OperationLogRecorder operationLogRecorder;
+
     public ArticleServiceImpl(ArticleMapper articleMapper,
                               CategoryMapper categoryMapper,
                               ArticleViewCounter viewCounter,
                               ArticleCacheVersion articleCacheVersion,
-                              PublishedArticleCache publishedArticleCache) {
+                              PublishedArticleCache publishedArticleCache,
+                              OperationLogRecorder operationLogRecorder) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
         this.viewCounter = viewCounter;
         this.articleCacheVersion = articleCacheVersion;
         this.publishedArticleCache = publishedArticleCache;
+        this.operationLogRecorder = operationLogRecorder;
     }
 
     // =================================================================
@@ -303,6 +315,13 @@ public class ArticleServiceImpl implements ArticleService {
         // （为什么不是 @CacheEvict(allEntries = true)，见 ArticleCacheVersion 的类注释）
         articleCacheVersion.bump();
 
+        // 【记一笔审计】放在这里而不是 Controller 里，有两个原因：
+        //   ① 这个方法是 @Transactional 的，事件会绑在事务上 ——
+        //      事务回滚时这条记录根本不会落库（'没真正发生的事不该被记'）
+        //   ② 此刻 insert 已经执行完，拿得到新文章的 id
+        operationLogRecorder.record(OperationAction.CREATE_ARTICLE, AuditTarget.ARTICLE,
+                article.getId(), "标题=" + article.getTitle());
+
         // insert 之后，MyBatis-Plus 会把刚生成的自增主键【回填】到 article 对象里，
         // 所以这里能直接拿到新文章的 ID。
         return article.getId();
@@ -340,6 +359,11 @@ public class ArticleServiceImpl implements ArticleService {
 
         // 改完内容要让列表缓存失效（标题/摘要/分类/置顶都可能变，列表显示会跟着变）
         articleCacheVersion.bump();
+
+        // 记一笔审计。detail 里带上"改成了什么标题"——
+        // 只记"谁在什么时候改了哪篇"的话，事后想查"标题是被谁改成这样的"还是得去翻日志
+        operationLogRecorder.record(OperationAction.UPDATE_ARTICLE, AuditTarget.ARTICLE, id,
+                "标题=" + form.getTitle().trim());
     }
 
     @Override
@@ -361,6 +385,10 @@ public class ArticleServiceImpl implements ArticleService {
 
         // 发布/下架会直接影响前台列表能不能看到这篇，必须让缓存失效
         articleCacheVersion.bump();
+
+        // 记一笔审计。发布和下架都走这个方法，用 detail 区分开具体是哪个动作
+        operationLogRecorder.record(OperationAction.UPDATE_ARTICLE_STATUS, AuditTarget.ARTICLE, id,
+                status == 1 ? "发布" : "下架");
     }
 
     @Override
@@ -375,6 +403,11 @@ public class ArticleServiceImpl implements ArticleService {
 
         // 删掉的不能再出现在列表里
         articleCacheVersion.bump();
+
+        // 记一笔审计。detail 里把标题也记下来：
+        // 文章被逻辑删除之后，按 id 已经查不到标题了，只有快照能追溯"删的是哪一篇"
+        operationLogRecorder.record(OperationAction.DELETE_ARTICLE, AuditTarget.ARTICLE, id,
+                "标题=" + exist.getTitle());
     }
 
     // =================================================================

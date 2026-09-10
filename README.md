@@ -561,6 +561,7 @@ mybatis-plus.configuration.log-impl=org.apache.ibatis.logging.nologging.NoLoggin
 | `UPLOAD_LOCAL_DIR` | ⬜ | 上传目录，compose 里已设成 `/app/uploads`（必须是挂载点路径） |
 | `UPLOAD_BASE_URL` | ⬜ | 图片对外地址前缀；compose 里复用 `PUBLIC_API_BASE`，保证与浏览器看到的地址一致 |
 | `UPLOAD_KEY_PREFIX` | ⬜ | 存储路径前缀，默认 `cover`（形如 `cover/2026/09/{uuid}.png`） |
+| `LOG_DIR` | ⬜ | 应用日志目录，compose 里已设成 `/app/logs`（必须是挂载点路径，否则"保留 15 天"是空话） |
 
 #### 跨域白名单（**上线必改这一项**）
 
@@ -2069,7 +2070,8 @@ scp yiguixingtu-web/static-media/* root@服务器IP:/var/www/media/
 | 17 | **HTTPS 真的生效、且会自动续期** | `curl -I https://你的域名` 返回 200 且证书有效（浏览器地址栏是小锁不是"不安全"）；方式 A 的话再跑一次 `sudo certbot renew --dry-run`。⚠️ 用阿里云免费证书的话它是**一年期、不自动续**，记得设置到期提醒 |
 | 18 | **http 会跳到 https** | `curl -I http://你的域名` 应当是 **301** 到 https（没有这条跳转的话，用户用 http 打开会看到一个空白页或证书错误） |
 | 19 | **`nginx -t` 通过、改完 reload 过** | `sudo nginx -t && sudo systemctl reload nginx` —— 配置写了但没 reload 是最常见的一种"明明改了却没生效" |
-| 20 | **磁盘不会被日志写满** | `df -h` 看水位；`docker system df` 看镜像/卷/构建缓存占比。容器日志已配轮转（每容器上限 30MB，见「备份与恢复」后面那节），但**构建缓存**会随每次 `--build` 增长，定期 `docker builder prune` 清一下 |
+| 20 | **磁盘不会被日志写满** | `df -h` 看水位；`docker system df` 看镜像/卷/构建缓存占比。容器日志已配轮转（每容器上限 30MB），应用日志文件有 15 天 + 2GB 双重上限（见「备份与恢复」后面那节），但**构建缓存**会随每次 `--build` 增长，定期 `docker builder prune` 清一下 |
+| 21 | **日志文件确实写在卷里（升级后还能查）** | `docker exec yiguixingtu-prod-backend ls -l /app/logs` 应当能看到 `yiguixingtu.log` 且属主是 `app`；再 `docker compose -f docker-compose.prod.yaml up -d --force-recreate backend` → 文件仍在（守 `LOG_DIR` 指向挂载点 —— 指错的话日志会写进容器可写层，**重建即丢，而且没有任何提示**） |
 
 #### 这份清单在本机演练过一遍（不是纸面清单）
 
@@ -2179,13 +2181,18 @@ docker run --rm \
 > 启动应用确认文章都在；图片也一样 —— 把备份拷进一个空卷，确认还能显示。
 > 没验证过的备份，真出事时大概率用不了。
 
-#### 磁盘不会被日志写满（容器日志已配轮转）
+#### 磁盘不会被日志写满（两类日志都管住了）
 
-Docker 默认的 `json-file` 日志驱动**不轮转** —— 也就是容器日志会一直长下去。
-一台 40GB 盘的 ECS，加上 MySQL 慢查询日志，几个月后就可能"数据库写不进去、
-容器起不来"，而且错误信息不会指向日志。
+**要分清楚有两份日志，它们的去处和上限完全不同**：
 
-所以 `docker-compose.prod.yaml` 里给四个服务都配了轮转（共用一份 YAML 锚点）：
+| | 谁写的 | 去哪 | 上限 | 怎么查 |
+|---|---|---|---|---|
+| 标准输出 | 应用 + 各容器 | Docker 的 `json-file` | **每容器 30MB**（锚点配置 10m×3） | `docker compose -f docker-compose.prod.yaml logs --tail=200 backend` |
+| 应用日志文件 | logback | 具名卷 `logs_data` → 容器内 `/app/logs` | **滚 15 天**、单文件 50MB、总量 2GB（logback 自己的策略） | `docker exec yiguixingtu-prod-backend ls -l /app/logs` |
+
+Docker 默认的 `json-file` 驱动**不轮转** —— 不管它，容器日志会一直长下去。
+一台 40GB 盘的 ECS 加上 MySQL 慢查询日志，几个月后就可能"数据库写不进去、
+容器起不来"，而且错误信息不会指向日志。所以 compose 里给四个服务都配了轮转：
 
 ```yaml
 x-logging: &default-logging
@@ -2195,12 +2202,18 @@ x-logging: &default-logging
     max-file: "3"       # 最多留 3 个（合计每容器 30MB）
 ```
 
-每个容器最多 30MB，四个容器合计上限 120MB。
-**要长期保留的是审计表**（`operation_log`，结构化、可查询），不是这些文本日志 ——
-两者的职责分开，才不会指望日志文件当审计用。
+> ⚠️ **日志文件必须挂卷，否则"保留 15 天"是句空话**
+> logback 默认把日志写在容器工作目录下的 `logs/`（也就是容器的可写层）——
+> 容器一重建（改配置、升级、`up -d --build`）就全没了，
+> **而那恰恰是最需要回头查历史日志的时候（刚升级完发现不对）**。
+> 所以 backend 服务挂了 `logs_data:/app/logs` 并把 `LOG_DIR` 指过去，
+> 实测：`/app/logs` 属主是 `app:app`、日志文件真的在写、卷里也确实有文件。
+> 这个卷**不需要备份**（它只是排查用的），而且 logback 有 15 天 + 2GB 双重上限，不会无限涨。
 
-> 想查看某个容器最近在报什么：`docker compose -f docker-compose.prod.yaml logs --tail=200 backend`
-> 磁盘水位也要看：`df -h` 与 `docker system df`（后者会告诉你镜像/卷/构建缓存各占多少）。
+> **要长期保留的是审计表**（`operation_log`，结构化、可查询），不是这些文本日志 ——
+> 两者的职责分开，才不会指望日志文件当审计用。
+
+> 磁盘水位也要看：`df -h` 与 `docker system df`（后者告诉你镜像/卷/构建缓存各占多少）。
 
 ### 6. 升级流程
 

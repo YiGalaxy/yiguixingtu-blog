@@ -221,6 +221,20 @@ services:
       #   直接复用 PUBLIC_API_BASE（Nginx 把 /api/ 反代到后端根路径），
       #   这样两者天然一致 —— 分开填两个变量最容易出现"有一个忘了改"。
       UPLOAD_BASE_URL: ${PUBLIC_API_BASE:?必须在 .env 里设置 PUBLIC_API_BASE（浏览器访问后端的地址）}
+      # ---- 日志目录 ----
+      # logback-spring.xml 里用的是 ${LOG_DIR:-logs}，默认写在容器工作目录下的 logs/ ——
+      # 那是容器的【可写层】：容器一重建（改配置、升级版本、up -d --build 都会重建）
+      # 日志就全没了，于是"按天滚动 + 保留 15 天"这句在生产上其实是空话。
+      # 指到 /app/logs（下面挂了具名卷）之后，"15 天"才真的成立，
+      # 升级重启之后也还能回头查上周的日志。
+      LOG_DIR: /app/logs
+      # ---- 容器日志轮转的补充说明 ----
+      # 上面那段 x-logging 管的是【stdout】（docker logs 能看到的那些），
+      # 这里是【应用自己写的文件日志】。两者都留着是有意的：
+      #   · stdout  → 出问题第一眼要看的东西，docker logs 直接给
+      #   · 文件    → 按天滚动、保留 15 天，能回头查"上周那次是几点开始的"
+      # 只留 stdout 的话受 30MB 轮转限制，翻不了那么久；只留文件的话
+      # 排查时要先进容器。两条路都留着，代价只是几十 MB。
     volumes:
       # 【上传的图片必须放在卷里，这是本文件里最容易被忽略的一处】
       #   不挂卷的话，图片写进容器的可写层：容器一重建就全没了
@@ -235,6 +249,12 @@ services:
       #   `docker run --rm -v yiguixingtu-prod_uploads_data:/data -v $PWD:/out alpine cp -r /data /out`
       #   就能把文件拷出来（README 备份章节有这条）。
       - uploads_data:/app/uploads
+      # 【日志目录也要挂卷，否则 logback 配的"保留 15 天"是空话】
+      #   默认（不挂卷）日志写在容器的可写层里，容器一重建就没了 ——
+      #   而"重建"恰恰是我们最需要看历史日志的时候（刚升级完发现不对）。
+      #   注意：这个卷【不需要备份】，它只是排查用的；日志总量由 logback 的
+      #   maxHistory=15 天 + totalSizeCap=2GB 双重限制，不会无限涨。
+      - logs_data:/app/logs
     ports:
       # 应用端口要给 Nginx 反代，所以这一行必须映射 —— 但【只绑到 127.0.0.1】。
       #
@@ -326,3 +346,5 @@ volumes:
   redis_data:
   # 用户上传的封面图（写到这里，见 backend 服务里 UPLOAD_LOCAL_DIR 的说明）
   uploads_data:
+  # 应用日志文件（写到这里，见 backend 服务里 LOG_DIR 的说明）
+  logs_data:

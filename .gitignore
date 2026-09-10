@@ -33,3 +33,13 @@ logs/
 *.local.properties
 application-local.yml
 application-secret.properties
+
+### 个人材料（含手机号 / 邮箱 / 证件照，不进仓库） ###
+### 理由：博客仓库将来很可能为了让面试官看代码而转为公开，
+###       一旦公开，已提交进 git 历史的个人信息很难彻底删除。
+###       若想给简历做版本管理，请单独放一个私有仓库。 ###
+resume.html
+photo_small.jpg
+FB33CB8D10A0D8B5530592F153E4CA1B.jpg
+_preview*
+

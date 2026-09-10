@@ -74,6 +74,23 @@ public class RedisConfig {
     public static final String CACHE_ARTICLE_STATS = "article:stats";
 
     /**
+     * 标签列表的缓存名（前台标签云：每个标签 + 它下面【已发布】的文章数）。
+     *
+     * 【为什么它值得缓存】
+     *   这个列表要用一条 JOIN + GROUP BY 算"每个标签有几篇已发布文章"，
+     *   而它是首页/侧边栏那种"每次打开都请求"的接口 —— 典型的"计算不贵但频率高"。
+     *
+     * 【⚠️ 它为什么和文章缓存共用同一个版本号】
+     *   标签列表里的文章数会随"文章发布/下架/删除/改标签"而变，
+     *   而那些操作本来就会推进 {@code article:page:version}（见 ArticleCacheVersion）。
+     *   共用同一个版本号，等于"文章一变，标签列表也一起失效"，
+     *   不需要再维护第二套失效逻辑 —— 少一套需要同步的机制，
+     *   就少一处"忘了 bump"的可能。
+     *   （代价：改一篇文章会让标签列表也重新查一次库。标签列表本身就轻，可以接受。）
+     */
+    public static final String CACHE_TAG_LIST = "tag:list";
+
+    /**
      * 统计结果的缓存时长：60 秒。
      * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
      * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
@@ -222,6 +239,7 @@ public class RedisConfig {
                 .withCacheConfiguration(CACHE_ARTICLE_PAGE, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_DETAIL, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_STATS, statsConfig)
+                .withCacheConfiguration(CACHE_TAG_LIST, baseConfig)
                 .build();
     }
 

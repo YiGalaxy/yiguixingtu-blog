@@ -40,7 +40,16 @@ public enum OperationAction {
     RESET_USER_PASSWORD("重置用户密码"),
 
     /** 删除用户 */
-    DELETE_USER("删除用户");
+    DELETE_USER("删除用户"),
+
+    /** 新建标签 */
+    CREATE_TAG("新建标签"),
+
+    /** 编辑标签（改名 / 改排序） */
+    UPDATE_TAG("编辑标签"),
+
+    /** 删除标签 */
+    DELETE_TAG("删除标签");
 
     /** 中文说明，便于直接展示与排查（不用在前端再维护一份翻译） */
     private final String description;

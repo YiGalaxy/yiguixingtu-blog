@@ -10,6 +10,8 @@ import com.yigalaxy.yiguixingtu.audit.mapper.OperationLogMapper;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.category.entity.Category;
 import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
+import com.yigalaxy.yiguixingtu.tag.entity.Tag;
+import com.yigalaxy.yiguixingtu.tag.mapper.TagMapper;
 import com.yigalaxy.yiguixingtu.user.entity.User;
 import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -95,6 +97,9 @@ class OperationLogTest extends AbstractIntegrationTest {
     private CategoryMapper categoryMapper;
 
     @Autowired
+    private TagMapper tagMapper;
+
+    @Autowired
     private UserMapper userMapper;
 
     @Autowired
@@ -164,6 +169,11 @@ class OperationLogTest extends AbstractIntegrationTest {
         jdbcTemplate.update("DELETE FROM operation_log WHERE username LIKE ? OR detail LIKE ?",
                 "%" + mark + "%", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM article WHERE title LIKE ?", mark + "%");
+        // 标签这块要额外清：标签是物理删除，用例里造的标签（以及它们的关联）
+        // 不会随测试事务回滚消失 —— 本类是 NOT_SUPPORTED，所有写入都是真提交
+        jdbcTemplate.update("DELETE FROM article_tag WHERE tag_id IN (SELECT id FROM tag WHERE name LIKE ?)",
+                "%" + mark + "%");
+        jdbcTemplate.update("DELETE FROM tag WHERE name LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM user WHERE username LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM category WHERE name LIKE ?", "%" + mark + "%");
     }
@@ -410,6 +420,63 @@ class OperationLogTest extends AbstractIntegrationTest {
         // 反向确认这条用例不是"空跑"：记录确实记下了"谁重置了谁的密码"
         assertTrue(log.getDetail().contains(guest.getUsername()),
                 "detail 应当记下被重置密码的是哪个账号，实际=" + log.getDetail());
+    }
+
+    @Test
+    @DisplayName("⑫ 标签的增 / 改 / 删也都会留痕，删除记录里保留标签名快照")
+    void tagOperations_shouldBeAudited() throws Exception {
+        // 【为什么这条用例在本类、而不在 TagTest 里】
+        //   审计是 @TransactionalEventListener(AFTER_COMMIT) 才落库的，
+        //   而 TagTest 整体是 @Transactional（跑完回滚）—— 事务永远不提交，
+        //   事件会被直接丢弃，那边断言"查得到审计"必然失败。
+        //   本类是 NOT_SUPPORTED（让业务真的提交），所以审计相关的断言都放这里。
+        String firstName = mark + "-标签甲";
+
+        mockMvc.perform(post("/admin/tag")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"" + firstName + "\",\"sort\":1}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        Tag created = tagMapper.selectOne(new LambdaQueryWrapper<Tag>().eq(Tag::getName, firstName));
+        assertNotNull(created, "前置条件：标签应当建出来了");
+
+        OperationLog createLog = awaitLog("CREATE_TAG", created.getId());
+        assertNotNull(createLog, "新建标签应当留下 CREATE_TAG 审计");
+        assertEquals(admin.getUsername(), createLog.getUsername(), "要记下是谁建的");
+        assertTrue(createLog.getDetail().contains(firstName),
+                "detail 里要有标签名，实际=" + createLog.getDetail());
+
+        // ---- 改名 ----
+        String secondName = mark + "-标签乙";
+        mockMvc.perform(put("/admin/tag/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"" + secondName + "\",\"sort\":2}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog updateLog = awaitLog("UPDATE_TAG", created.getId());
+        assertNotNull(updateLog, "编辑标签应当留下 UPDATE_TAG 审计");
+        // 只记新名字的话，事后看不出"这是一次改名"还是别的调整
+        assertTrue(updateLog.getDetail().contains(firstName) && updateLog.getDetail().contains(secondName),
+                "detail 里应当同时有旧名和新名，实际=" + updateLog.getDetail());
+
+        // ---- 删除 ----
+        mockMvc.perform(delete("/admin/tag/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog deleteLog = awaitLog("DELETE_TAG", created.getId());
+        assertNotNull(deleteLog, "删除标签应当留下 DELETE_TAG 审计");
+        // 【这条断言是本用例存在的主要理由】标签是【物理删除】——
+        // 删完之后 tag 表里再也查不到这个名字，只有审计记录能回答
+        // "当时删掉的到底是哪个标签"。这也是"物理删除"能被接受的前提：
+        // 删除这件事本身并没有失去痕迹。
+        assertTrue(deleteLog.getDetail().contains(secondName),
+                "删除记录里必须保留标签名快照，实际=" + deleteLog.getDetail());
     }
 
     // ================================================================

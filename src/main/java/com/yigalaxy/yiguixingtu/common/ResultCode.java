@@ -64,7 +64,18 @@ public enum ResultCode {
 
     ARTICLE_NOT_FOUND(404, "文章不存在"),
 
-    CATEGORY_NOT_FOUND(404, "分类不存在");
+    CATEGORY_NOT_FOUND(404, "分类不存在"),
+
+    TAG_NOT_FOUND(404, "标签不存在"),
+
+    /**
+     * 标签名重复。
+     * 【为什么和 USERNAME_EXISTS 分开而不是共用一个"已存在"】
+     *   前端要提示的是"标签名已存在，换一个"，而不是笼统的"已存在"——
+     *   用户在标签管理页面上看到后者会不知道是哪一项冲突了。
+     *   状态码都是 400（语义是"你提交的内容有问题"），message 各说各的。
+     */
+    TAG_NAME_EXISTS(400, "标签名已存在");
 
 
     /**

@@ -299,17 +299,93 @@ docker exec -it yiguixingtu-redis redis-cli DEL auth:user:<上一步查到的 id
 
 ### 4. 配置
 
-#### 基础配置
+#### 多环境配置怎么分工
 
-配置文件：`src/main/resources/application.properties`
+配置按**「公共 + 各环境」**拆成三份，原则是**打包一次、处处运行**：
+
+| 文件 | 放什么 | 激活方式 |
+|------|--------|---------|
+| `application.properties` | **所有环境都一样**的东西：应用名、MyBatis-Plus、JWT、Flyway、跨域默认值 | 总是加载 |
+| `application-dev.properties` | 本地数据库/Redis 地址、**打印 SQL**、Swagger 开着 | 默认（`spring.profiles.active=dev`） |
+| `application-prod.properties` | 全部凭据走环境变量、**关 SQL 日志**、**关 Swagger** | 环境变量 `SPRING_PROFILES_ACTIVE=prod` |
+
+> **为什么线上不用改文件？** 操作系统环境变量的优先级高于配置文件，
+> 所以同一个 jar，本地直接 `java -jar` 就是 dev，服务器上设一个
+> `SPRING_PROFILES_ACTIVE=prod` 就是 prod —— 不打第二份包、也不用改代码。
+
+#### dev（本地开发）
 
 | 项 | 值 |
 |----|-----|
 | 服务端口 | `8082` |
 | MySQL | `localhost:3310`，库 `yiguixingtu`，用户 `root/root` |
 | Redis | `localhost:6380` |
-| 分页插件 | MyBatis-Plus `PaginationInnerInterceptor`（已注册） |
-| SQL 日志 | `mybatis-plus.configuration.log-impl=StdOutImpl`（开发期打印 SQL） |
+| SQL 日志 | 开着（`StdOutImpl`）—— 本地查"为什么查不到数据"最有用 |
+| Swagger | 开着 —— 本地要能点开 `/swagger-ui.html` 自己调接口 |
+
+> 本地把 `root/root` 明文写在仓库里是**刻意的**：这个库由 compose 起、只监听本机、
+> 也没有真实数据，换来的是别人 clone 下来 `docker compose up -d` 就能直接跑。
+
+#### prod（生产）
+
+**这个文件里所有凭据都【不给默认值】**，例如：
+
+```properties
+spring.datasource.url=${DB_URL}
+spring.datasource.password=${DB_PASSWORD}
+spring.data.redis.password=${REDIS_PASSWORD}
+springdoc.api-docs.enabled=false
+mybatis-plus.configuration.log-impl=org.apache.ibatis.logging.nologging.NoLoggingImpl
+```
+
+**为什么故意不给默认值**：一旦写了 `:root` 这样的兜底值，忘记配环境变量的后果就是
+"服务带着一个公开的默认凭据悄悄跑起来"——这比启动失败危险得多。
+现在忘配会直接启动报 `Could not resolve placeholder 'DB_PASSWORD'`，
+**部署当场就发现**，而不是上线一周后被人拖库。
+
+生产环境需要的环境变量：
+
+| 变量 | 必填 | 说明 |
+|------|:---:|------|
+| `SPRING_PROFILES_ACTIVE` | ✅ | 固定填 `prod` |
+| `JWT_SECRET` | ✅ | ≥32 字节，签发 token 用。**必须换掉仓库里的默认值** |
+| `DB_URL` | ✅ | 例如 `jdbc:mysql://mysql:3306/yiguixingtu?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true` |
+| `DB_USERNAME` / `DB_PASSWORD` | ✅ | 数据库账号（建议单独建低权限账号，别用 root） |
+| `REDIS_HOST` / `REDIS_PASSWORD` | ✅ | 内网也建议设密码 |
+| `REDIS_PORT` | ⬜ | 默认 `6379` |
+| `CORS_ALLOWED_ORIGINS` | ✅ | **前端域名**，例如 `https://你的域名`；多个用英文逗号分隔 |
+| `SERVER_PORT` | ⬜ | 默认 `8082` |
+
+#### 跨域白名单（**上线必改这一项**）
+
+```properties
+app.cors.allowed-origins=${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+```
+
+原来这一项**写死在 `SecurityConfig` 里**（`http://localhost:3000`），后果是：
+前端换个端口就跨域失败，一部署换成域名必然跨域失败，而且改完还得重新打包。
+现在它从配置读，本地不用管（默认值就是 3000），线上填自己的域名即可。
+
+#### ⚠️ Swagger 在 prod 必须真的关掉（这里踩过一个坑）
+
+`application-prod.properties` 里设了 `springdoc.api-docs.enabled=false`，
+但**光设这一项是不够的**：实测发现属性确实是 `false`，可请求 `/v3/api-docs`
+**依然返回 200** —— 文档照旧对外可见。原因是 `SecurityConfig` 里
+`/v3/api-docs/**`、`/swagger-ui/**` 这些路径是**无条件放行**的。
+
+对一个要上线的站点来说，Swagger 等于一份写好的接口说明书
+（有哪些接口、参数叫什么、哪些要管理员权限），不该公开。
+所以现在把"是否生成文档"和"是否放行文档路径"**绑在同一个开关上**：
+
+```java
+if (apiDocsEnabled) {
+    auth.requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll();
+}
+```
+
+于是 prod 下这些路径不再被放行，未登录访问 `/v3/api-docs` 得到 **401**。
+两条路径都有用例盯着（`ProfileDevConfigTest` 断言 dev 下可访问、
+`ProfileProdConfigTest` 断言 prod 下不可访问）。
 
 #### 数据库迁移（Flyway）
 

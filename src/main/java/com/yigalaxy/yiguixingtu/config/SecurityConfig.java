@@ -110,6 +110,14 @@ public class SecurityConfig {
                             "/auth/register"
                     ).permitAll();
 
+                    // 【本地存储的上传文件必须放行】
+                    //   用本地磁盘存储时，/uploads/** 就是图片的访问地址，
+                    //   而封面图是给【所有访客】看的（包括未登录的游客）。
+                    //   不放行的话图片会返回 401，前台全变成裂图 ——
+                    //   这种问题还特别隐蔽：后台上传明明成功了，前台就是不显示。
+                    //   注意只放行 GET（读图片），上传接口 POST /upload 依然要求管理员。
+                    auth.requestMatchers(HttpMethod.GET, "/uploads/**").permitAll();
+
                     // 【健康检查端点必须放行】
                     //   容器的健康检查（docker-compose.prod.yaml 里 backend 的 healthcheck）
                     //   会去请求 /actuator/health，而它是不带 token 的 ——

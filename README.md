@@ -72,7 +72,9 @@
 - **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
-- 集成测试 8 个类 **76 个用例**，行覆盖率 **86.2%**
+- **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
+  存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
+- 集成测试 9 个类 **105 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
 
@@ -397,6 +399,11 @@ mybatis-plus.configuration.log-impl=org.apache.ibatis.logging.nologging.NoLoggin
 | `REDIS_PORT` | ⬜ | 默认 `6379` |
 | `CORS_ALLOWED_ORIGINS` | ✅ | **前端域名**，例如 `https://你的域名`；多个用英文逗号分隔 |
 | `SERVER_PORT` | ⬜ | 默认 `8082` |
+| `UPLOAD_STORAGE` | ⬜ | `local`（默认）/ `oss`。**上线建议设成 `oss`** |
+| `OSS_ENDPOINT` / `OSS_BUCKET` | 用 OSS 时必填 | 例如 `https://oss-cn-hangzhou.aliyuncs.com` / `你的-bucket` |
+| `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | 用 OSS 时必填 | ⚠️ RAM 子账号的密钥，只授权该 Bucket 读写 |
+| `OSS_SIGNED_URL` | ⬜ | 默认 `false`（公有读）；Bucket 私有读时设 `true` |
+| `UPLOAD_BASE_URL` | ⬜ | 仅 `local` 时用：图片对外的地址前缀，例如 `https://你的域名` |
 
 #### 跨域白名单（**上线必改这一项**）
 
@@ -428,6 +435,45 @@ if (apiDocsEnabled) {
 于是 prod 下这些路径不再被放行，未登录访问 `/v3/api-docs` 得到 **401**。
 两条路径都有用例盯着（`ProfileDevConfigTest` 断言 dev 下可访问、
 `ProfileProdConfigTest` 断言 prod 下不可访问）。
+
+#### 文件上传与对象存储
+
+```properties
+# local（本地磁盘，默认）/ oss（阿里云 OSS）
+app.upload.storage=${UPLOAD_STORAGE:local}
+app.upload.allowed-extensions=jpg,jpeg,png,gif,webp
+app.upload.max-size=5MB
+```
+
+**为什么存储做成可切换的**：本地开发和测试不应该依赖真实 OSS 凭据与外网
+（否则 clone 下来的人根本没法验证上传功能，CI 也跑不了）；
+上线初期也可以先用本地存储把站点跑起来，等 OSS 配好改一个配置切过去，
+不用改代码、不用重新构建。
+
+| 存储 | 图片地址 | 适用 |
+|---|---|---|
+| `local` | `{base-url}/uploads/cover/2026/09/{uuid}.png`，由后端提供 | 本地开发、测试、还没配 OSS 时 |
+| `oss` | `https://{bucket}.{endpoint}/{key}` | 生产环境（推荐） |
+
+切到 OSS 需要这些配置（生产环境请用**环境变量**注入）：
+
+```properties
+app.upload.storage=oss
+app.upload.oss-endpoint=${OSS_ENDPOINT}          # https://oss-cn-hangzhou.aliyuncs.com
+app.upload.oss-bucket=${OSS_BUCKET}
+app.upload.oss-access-key-id=${OSS_ACCESS_KEY_ID}
+app.upload.oss-access-key-secret=${OSS_ACCESS_KEY_SECRET}
+app.upload.oss-key-prefix=${OSS_KEY_PREFIX:cover}
+app.upload.oss-signed-url=${OSS_SIGNED_URL:false}  # Bucket 私有读时设为 true
+```
+
+> ⚠️ **必须用 RAM 子账号的 AccessKey，不要用主账号密钥。**
+> 主账号密钥等于整个账号的权限（能改账单、能删所有资源），一旦泄漏后果不可控；
+> RAM 子账号可以只授权这一个 Bucket 的读写，就算泄漏，损失也被限制在一个桶里。
+> 这是最小权限原则最典型的一个应用场景。
+>
+> 缺配置时**启动会直接失败**并告诉缺哪一项，而不是等用户第一次上传才发现 ——
+> 与下面 prod 凭据不给默认值是同一个取向。
 
 #### 数据库迁移（Flyway）
 
@@ -544,8 +590,10 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 16 | PUT | `/admin/article/{id}` | 编辑文章 | 是（ADMIN） |
 | 17 | PUT | `/admin/article/{id}/status` | 发布 / 下架文章 | 是（ADMIN） |
 | 18 | DELETE | `/admin/article/{id}` | 删除文章（逻辑删除） | 是（ADMIN） |
+| 19 | POST | `/upload` | 上传图片（封面图），返回可访问 URL | 是（ADMIN） |
 
 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
+用本地磁盘存储时，上传的图片通过 `GET /uploads/**` 公开读取（无需登录）。
 
 ## 接口 × 角色权限矩阵
 
@@ -563,6 +611,8 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `GET /auth/me` | ❌ 401 | ✅ | ✅ |
 | `/user/**`（全部 5 个） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/article/**`（全部 6 个） | ❌ 401 | ❌ 403 | ✅ |
+| `POST /upload` | ❌ 401 | ❌ 403 | ✅ |
+| `GET /uploads/**`（本地存储的图片） | ✅ | ✅ | ✅ |
 
 **几个刻意的设计决定：**
 

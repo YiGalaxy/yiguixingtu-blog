@@ -43,3 +43,7 @@ photo_small.jpg
 FB33CB8D10A0D8B5530592F153E4CA1B.jpg
 _preview*
 
+
+### 本地存储的上传文件（app.upload.storage=local 时产生） ###
+uploads/
+

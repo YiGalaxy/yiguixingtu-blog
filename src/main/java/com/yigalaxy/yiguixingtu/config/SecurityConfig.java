@@ -18,6 +18,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -186,6 +187,51 @@ public class SecurityConfig {
                 // 就是之前你被拦的那个 Please sign in 页面，关掉，不用它
                 .formLogin(AbstractHttpConfigurer::disable)
                 .httpBasic(AbstractHttpConfigurer::disable)
+
+                // 4.5 安全响应头 -------------------------------------------------
+                //
+                // 【为什么一个 JSON 接口也要管这些头】
+                //   这些头是给【浏览器】看的，用来约束浏览器怎么对待我们的响应。
+                //   本项目虽然是前后端分离的接口服务，但同一台机器上还挂着前端页面，
+                //   而且将来可能有人把接口地址直接贴进浏览器打开 ——
+                //   多这几行成本几乎为零，却挡掉了几类最常见的网页攻击。
+                //
+                // 【Spring Security 的默认值】
+                //   其实它默认已经带了下面前两项（X-Content-Type-Options / X-Frame-Options），
+                //   这里显式写出来是为了"看得见"：安全配置最怕的就是
+                //   "我以为它开了" —— 显式配置 + 用例断言，才不会靠猜。
+                .headers(headers -> headers
+                        // ① 禁止浏览器"猜"内容类型。
+                        //    没有它的话，浏览器可能把一个被上传的文本文件当 HTML 解析执行，
+                        //    这是上传功能最典型的一类连带风险（XSS）。
+                        .contentTypeOptions(Customizer.withDefaults())
+
+                        // ② 禁止本接口被任何页面用 iframe 嵌套。
+                        //    防的是"点击劫持"：攻击者把自己的页面套在上面，
+                        //    诱导用户在看不见真实界面的情况下点到某个按钮。
+                        .frameOptions(frame -> frame.deny())
+
+                        // ③ 控制 Referer（来源页地址）怎么发给别的站点。
+                        //    我们的接口地址可能带查询参数（比如 ?keyword=xxx），
+                        //    默认策略下这些会跟着 Referer 泄漏给第三方站点。
+                        //    no-referrer 表示"一个字节都不发"，最省心。
+                        .referrerPolicy(referrer -> referrer
+                                .policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER))
+
+                        // ④ HSTS：告诉浏览器"以后访问我这个域名，一律只用 HTTPS"。
+                        //    防的是"降级攻击"——把用户的 HTTPS 请求劫持成 HTTP 再窃听。
+                        //
+                        //    ⚠️ 一个容易误解的点：浏览器【只在 HTTPS 响应上】认这个头。
+                        //    本地开发是 http://localhost，所以本地看不到它 —— 这是对的，
+                        //    不是配置没生效。用例里用 .secure(true) 模拟 HTTPS 请求来验证。
+                        //
+                        //    maxAge 设一年（31536000 秒），并包含子域名。
+                        //    ⚠️ 这个值不要随便改大或加 preload：一旦浏览器记住了，
+                        //    在 maxAge 到期前【无法撤销】，如果域名将来不支持 HTTPS 就彻底打不开了。
+                        .httpStrictTransportSecurity(hsts -> hsts
+                                .includeSubDomains(true)
+                                .maxAgeInSeconds(31536000))
+                )
 
                 // 【新增】统一处理"未登录/无权限"，返回JSON而不是默认的HTML/403
                 .exceptionHandling(ex -> ex

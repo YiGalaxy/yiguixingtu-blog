@@ -1,0 +1,47 @@
+# =====================================================================
+# Dependabot 配置 —— 让依赖漏洞"自动暴露"，而不是等出事才发现
+#
+# 【它解决什么问题】
+#   Java 项目的依赖树里通常有几十上百个间接依赖，其中任何一个爆出漏洞，
+#   我们都不会知道 —— 除非有人主动去查。
+#   Dependabot 会定期检查并在有安全更新时【自动开 PR】，
+#   把"要不要升级"变成一个看得见的待办，而不是一个隐藏的风险。
+#
+# 【为什么只配 maven 与 github-actions】
+#   · maven            —— 后端依赖（本项目唯一会打进产物的依赖来源）
+#   · github-actions   —— CI 里用的 action 也是依赖，而且它们能拿到仓库权限，
+#                         被投毒的影响比一个普通库更大
+#
+# 【为什么是每周一次而不是每天】
+#   每天一次会产生大量 PR 噪音，反而容易让人开始无视它们。
+#   每周一次对一个个人项目足够及时，也更容易坚持看。
+# =====================================================================
+version: 2
+updates:
+  - package-ecosystem: maven
+    directory: "/"
+    schedule:
+      interval: weekly
+      # 周一早上：新的一周开始时处理，不会打断正在做的事
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    commit-message:
+      # 提交信息跟着本仓库的风格走（中文、动词开头），见 TECH_ROADMAP §15 R4
+      prefix: "升级依赖"
+    labels:
+      - dependencies
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    commit-message:
+      prefix: "升级CI依赖"
+    labels:
+      - dependencies
+      - ci

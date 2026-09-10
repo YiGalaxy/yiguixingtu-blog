@@ -16,7 +16,6 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -141,29 +140,22 @@ class MetricsEndpointTest extends AbstractIntegrationTest {
         //   第一版是匿名请求、断言 404，结果拿到 401 —— 因为 Spring Security 的
         //   anyRequest().authenticated() 在【路由之前】就把它拦掉了，
         //   请求根本没走到"这个端点存不存在"那一步。
-        //   于是 401 同时对应两种完全不同的情况：
-        //     ⓐ 端点没开（安全）  ⓑ 端点开着、只是要登录（有风险）
-        //   断言 401 等于把这两种情况混在一起，测了个寂寞。
-        //
-        // 【为什么不断言 HTTP 404 —— 这一步又踩了一次】
-        //   带上 token 之后权限不再是障碍，本以为会拿到 404，结果拿到的是
-        //   HTTP 200 + {"code":500,"message":"服务器内部错误"}。
-        //   原因是这个项目有一条刻意的约定（见 README「统一返回与错误处理」）：
-        //   所有异常都转成 HTTP 200 + body 里的 code，
-        //   而"找不到端点"抛出的 NoResourceFoundException 也落进了兜底的
-        //   @ExceptionHandler(Exception.class)，于是变成了 code 500。
-        //   也就是说：在这个项目里，HTTP 状态码【不能】用来判断"端点存不存在"。
-        //
-        //   所以断言改成"响应体里没有 env / beans 的数据"。
-        //   这样写的另一个好处是它跟错误码约定解耦：
-        //   将来 5.6 真把状态码统一成 404 了，这条用例不用改也依然成立。
+        //   这个 401 是【有意保留】的：不向未登录者暴露站点有哪些接口。
+        //   所以要看"端点有没有开"，必须先用管理员身份过掉鉴权。
         String token = loginAsAdminAndGetToken();
 
+        // 【为什么现在可以断言真正的 404 了】
+        //   这里一开始拿到的不是 404，而是 HTTP 200 + {"code":500}：
+        //   本项目的统一返回约定把所有异常都转成 200 + body.code，
+        //   "找不到端点"抛出的 NoResourceFoundException 也落进了兜底处理器。
+        //   后来给 GlobalExceptionHandler 补了专门的分支（见那个类的注释），
+        //   让"请求本身有问题"这一类返回真实状态码，业务错误仍保持 200。
+        //   于是这条用例从"打开响应体翻有没有 env 数据"简化成了直接断言 404 ——
+        //   这本身就是那个改动带来的收益：状态码能表达的东西，不用再去解析内容。
         mockMvc.perform(get("/actuator/env").header("Authorization", "Bearer " + token))
-                .andExpect(content().string(not(containsString("propertySources"))));
-
+                .andExpect(status().isNotFound());
         mockMvc.perform(get("/actuator/beans").header("Authorization", "Bearer " + token))
-                .andExpect(content().string(not(containsString("\"beans\""))));
+                .andExpect(status().isNotFound());
     }
 
     // =================================================================

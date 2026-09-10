@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-153%20passing-success)
+![Tests](https://img.shields.io/badge/tests-160%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **153 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **160 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -77,7 +77,7 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
-- 集成测试 19 个类 **153 个用例**，行覆盖率 **86%**
+- 集成测试 20 个类 **160 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
 
@@ -165,11 +165,12 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── AuthLoginTest                   # 登录链路
 ├── UserRegisterTest                # 注册
 ├── JwtSecurityTest                 # JWT 与 Security 过滤链
-├── GlobalExceptionHandlerTest      # 全局异常处理
+├── GlobalExceptionHandlerTest      # 全局异常处理（含 404 / 405 的真实状态码）
 ├── UserAdminTest                   # 用户管理（含 token 即时失效）
 ├── ArticleAdminTest                # 后台文章管理
 ├── ArticlePublicTest               # 前台公开接口（草稿隔离）
 ├── ArticleViewCountTest            # 浏览量：Redis 计数 + 定时批量落库
+├── ArticleIdempotencyTest          # 接口幂等（Idempotency-Key）
 ├── ArticleIndexTest                # 索引契约：迁移已执行 + 列顺序 + 对真实查询可用（含分页 COUNT 的覆盖索引）
 ├── UploadAdminTest                 # 封面上传（类型/大小校验、权限）
 ├── LogoutTokenTest                 # 登出后旧 token 立即失效（jti 黑名单）
@@ -684,7 +685,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 12 | DELETE | `/user/{id}` | 删除用户（逻辑删除） | 是（ADMIN） |
 | 13 | GET | `/admin/article/page` | 后台文章分页（含草稿，多条件筛选） | 是（ADMIN） |
 | 14 | GET | `/admin/article/{id}` | 后台文章详情（含正文） | 是（ADMIN） |
-| 15 | POST | `/admin/article` | 新增文章 | 是（ADMIN） |
+| 15 | POST | `/admin/article` | 新增文章（**可选 `Idempotency-Key` 请求头防重复提交**，见下） | 是（ADMIN） |
 | 16 | PUT | `/admin/article/{id}` | 编辑文章 | 是（ADMIN） |
 | 17 | PUT | `/admin/article/{id}/status` | 发布 / 下架文章 | 是（ADMIN） |
 | 18 | DELETE | `/admin/article/{id}` | 删除文章（逻辑删除） | 是（ADMIN） |
@@ -764,25 +765,79 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 400 | 参数校验失败 / 用户名或密码错误 / 账号已存在 |
 | 401 | 未登录或登录已过期 |
 | 403 | 无权限访问 / 账号已被禁用 |
-| 404 | 用户不存在 / 文章不存在 / 分类不存在 |
+| 404 | 用户不存在 / 文章不存在 / 分类不存在 / **接口不存在** |
+| 405 | **请求方法不支持**（用 POST 打了一个只支持 GET 的接口） |
+| 429 | **请求正在处理中，请勿重复提交**（幂等键命中了"处理中"状态） |
 | 500 | 服务器内部错误 |
 
 ### ⚠️ 关于 HTTP 状态码（一个必须说清楚的现状）
 
-本项目**目前不是**"HTTP 状态码 == body.code"。实际规则是：
+本项目**不是**"HTTP 状态码 == body.code"，而是**分成两类**处理。这个划分是有意的：
 
 | 场景 | 由谁处理 | HTTP 状态码 | body.code |
 |------|---------|:---:|:---:|
 | 未登录 / token 无效 | `SecurityConfig` 的 `authenticationEntryPoint` | **401** | 401 |
 | 权限不足（过滤器层） | `SecurityConfig` 的 `accessDeniedHandler` | **403** | 403 |
 | 权限不足（`@PreAuthorize`） | `GlobalExceptionHandler#handleAccessDenied` | **403** | 403 |
-| 业务异常 / 参数校验 / 认证失败 / 账号禁用 / 未知异常 | `GlobalExceptionHandler` 其余 5 个 handler | **200** | 400 / 401 / 403 / 500 |
+| **地址不存在** | `GlobalExceptionHandler#handleNoResourceFound` | **404** | 404 |
+| **请求方法用错** | `GlobalExceptionHandler#handleMethodNotSupported` | **405** | 405 |
+| 业务异常 / 参数校验 / 认证失败 / 账号禁用 / 未知异常 | `GlobalExceptionHandler` 其余 handler | **200** | 400 / 401 / 403 / 500 |
 
-也就是说：**鉴权类错误返回真实的 401/403，业务类错误返回 HTTP 200 + 业务 code**。
-前端需要判断两次（先看 HTTP 状态码，再看 `body.code`）。
+**划分的依据是"这个错误是谁的问题"**：
 
-这是一个**已知的、有意保留的现状**，不是遗漏：改成"HTTP 状态码与 body.code 完全一致"属于**破坏性变更**，
-必须前后端在同一个时间窗内一起改，目前排在计划的 5.6 项。
+- **请求本身有问题**（地址写错、方法用错、没登录、没权限）→ 返回**真实状态码**。
+  因为这一类错误【不是业务语义的一部分】，而且中间所有的软件
+  （Nginx 访问日志、监控告警、负载均衡健康检查、浏览器）**都只看状态码**。
+  如果这些也报 200，"全站错误率"在监控里永远是 0% —— 数据库挂了、接口全 500，
+  报表上还是一片绿。
+- **业务上不成功**（密码错、文章不存在、参数不合法）→ **HTTP 200 + body.code**。
+  前端只需要认 `code` 一个地方，不用同时判断状态码和内容；
+  这是一种常见且自洽的约定。
+
+> **为什么业务错误不一起改成真实状态码**
+> 那是**破坏性变更**：前端现在写的是"只要 HTTP 200 就读 body.code"，
+> 一改状态码，前端每个调用点都要跟着改并重新回归。
+> 而"请求本身有问题"这一类前端**永远不会主动触发**（它不会去请求不存在的地址），
+> 所以改它对前端零影响 —— 这是算过收益与破坏面之后的取舍，不是漏改了。
+> 完整统一（业务错误也一致）排在路线图 5.6，需要前后端在同一个时间窗内一起改。
+
+## 接口幂等（防止重复提交）
+
+**场景**：后台点「发布」，网络卡了两秒没反应，你又点了一下 ——
+浏览器发出两个一模一样的创建请求，数据库里就出现了两篇一样的文章。
+
+**做法**：幂等键（`Idempotency-Key` 请求头），这是 Stripe 等支付接口用的同一套思路。
+
+```
+前端：打开「新建文章」弹窗时生成一个 UUID —— 这一次提交动作全程用它
+后端：① 拿这个键去 Redis 占位（SET NX，原子的）
+      ② 占上了 → 正常创建，成功后把结果（文章 id）存起来，24 小时后过期
+      ③ 没占上、但已有结果 → 直接把上次的 id 返回，【不再创建】
+      ④ 没占上、还没结果 → 说明另一个同样的请求正在处理，返回 429「请勿重复提交」
+```
+
+| 设计点 | 怎么做的 | 为什么 |
+|--------|---------|--------|
+| 键什么时候生成 | **打开弹窗时一次**，保存成功后换新 | 每次点保存都生成新键的话，点两下就是两个不同的键，后端当成两次请求，**照样写出两篇**。绑定到"一次提交动作"才拦得住 |
+| 占位用什么命令 | `SET key value NX EX 60`（`setIfAbsent`） | "判断不存在"和"写入"必须在一条命令里原子完成；分两步的话两个并发请求会同时查到不存在然后都写进去 |
+| 结果为什么存起来 | 存的是**创建出来的文章 id** | 只存"处理过了"的话，重复请求只能回一句"你已经创建过了"，前端还得自己去列表里找是哪一篇 —— 把问题丢给了调用方 |
+| 占位 TTL 为什么是 60 秒（结果 24 小时） | 两者差两个数量级 | 占位代表"正在处理"，正常只存在几十毫秒。若给 24 小时，一旦进程中途被杀，这个键会一直返回"正在处理"，用户重试永远失败且看不出原因 |
+| 创建失败怎么办 | 捕获异常后**主动释放占位** | 不释放的话，用户在占位 TTL 内重试都会得到"处理中"—— 一个没有原因也无法自救的失败。"失败就该能重试"是最基本的预期 |
+| Redis 挂了怎么办 | **放行**（打日志，不阻断） | 幂等是保护层，不该因为它自己挂了就让用户彻底发不出文章；代价是极端情况下可能重复创建一篇，删掉即可。⚠️ 换成"扣款、下单"这类场景就该反过来**拒绝** —— 那时重复执行的代价远大于暂时不能用 |
+| 哪些接口要幂等 | 只有 `POST`（新建） | `PUT`/`DELETE` 本来就是幂等的（执行两次结果和执行一次一样），给它们加幂等键只是徒增复杂度 |
+| 不带这个头会怎样 | 行为与以前**完全一样** | 幂等键是可选的，否则对老调用方就是破坏性改动。前端可以平滑升级 |
+
+> **为什么不自制 `@Idempotent` 注解 + AOP 切面**：那要自己处理环绕通知、
+> 参数序列化、切面顺序（还得保证在事务外层），坑一个不少，
+> 而收益只是"调用方少写一行"。用主流做法更省事也更可靠。
+>
+> **为什么不用数据库唯一索引兜底**：它需要一条**业务唯一性规则**
+> （比如"同一作者不能有同名文章"），而这条规则本身就是错的 ——
+> 用户完全可能真想写两篇同名的。用业务约束去实现技术目的，会误伤正常场景。
+
+前端一侧还做了**第一道防线**：按钮保存中会置灰，且 `saveArticle` 开头直接
+`if (artSaving.value) return` —— 因为极快连点时，第一次点击设置的状态
+还没让浏览器重绘，第二次点击就已经进来了，光靠按钮禁用挡不住。
 
 ## 接口安全约定
 
@@ -1416,7 +1471,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 153 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 160 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1428,21 +1483,22 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 153 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 160 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**19 个测试类，153 个用例，全部通过：**
+**20 个测试类，160 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
 | `AuthLoginTest` | 4 | 登录成功/失败、禁用账号、返回体结构 |
 | `UserRegisterTest` | 3 | 注册成功、用户名重复、参数校验 |
 | `JwtSecurityTest` | 4 | JWT 签发/解析、无 token 401、游客 403 |
-| `GlobalExceptionHandlerTest` | 3 | 异常到统一返回体的映射 |
+| `GlobalExceptionHandlerTest` | 5 | 异常到统一返回体的映射（含「地址不存在 → 真 404」「方法用错 → 真 405」） |
 | `UserAdminTest` | 21 | 用户管理全部接口 + 自我保护 + 分页夹取 + **禁用/删除/降级后的 token 即时失效** |
 | `ArticleAdminTest` | 26 | 后台文章增删改查、草稿隔离、状态流转、权限、逻辑删除（用 `JdbcTemplate` 直查物理行） |
 | `ArticlePublicTest` | 14 | 前台列表与详情、只返回已发布、分页边界、排序白名单 |
 | `ArticleViewCountTest` | 10 | 浏览量：Redis 计数、累加不丢、定时批量落库、落库后增量清零 |
+| `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
 | `UploadAdminTest` | 10 | 封面上传：类型/大小白名单、UUID 重命名、非管理员 403 |
 | `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |
@@ -1454,7 +1510,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ProfileProdConfigTest` | 3 | prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量 |
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **153** | |
+| **合计** | **160** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

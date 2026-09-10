@@ -3,6 +3,7 @@ package com.yigalaxy.yiguixingtu.user.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.yigalaxy.yiguixingtu.auth.cache.UserAuthCache;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
 import com.yigalaxy.yiguixingtu.user.dto.UserQuery;
@@ -12,6 +13,7 @@ import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 @Slf4j
@@ -20,10 +22,14 @@ public class UserServiceImpl implements UserService {
 
     private final UserMapper userMapper;
     private final PasswordEncoder passwordEncoder;
+    /** 用户认证信息缓存：任何会改变"用户是否合法 / 角色"的操作，都必须清掉它 */
+    private final UserAuthCache userAuthCache;
 
-    public UserServiceImpl(UserMapper userMapper, PasswordEncoder passwordEncoder) {
+    public UserServiceImpl(UserMapper userMapper, PasswordEncoder passwordEncoder, UserAuthCache userAuthCache) {
         this.userMapper = userMapper;
         this.passwordEncoder = passwordEncoder;
+        this.userAuthCache = userAuthCache;
+
     }
 
     /**
@@ -99,13 +105,13 @@ public class UserServiceImpl implements UserService {
         LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<User>()
                 .eq(StringUtils.hasText(query.getRole()), User::getRole, query.getRole())
                 .eq(query.getStatus() != null, User::getStatus, query.getStatus())
-                // and(...) 把"用户名 或 昵称"这组条件用小括号包起来，
-                // 否则会和前面的 eq 条件混在一起，导致 SQL 逻辑错误
                 .and(StringUtils.hasText(query.getKeyword()), w -> w
                         .like(User::getUsername, query.getKeyword())
                         .or()
-                        .like(User::getNickname, query.getKeyword()))
-                .orderByDesc(User::getCreateTime);
+                        .like(User::getNickname, query.getKeyword()));
+
+        // ---- 排序：走白名单方法（见下），不让前端直接决定 SQL ----
+        applySort(wrapper, query.getSortField(), query.getSortOrder());
 
         // ---- 执行分页查询 ----
         IPage<User> userPage = userMapper.selectPage(page, wrapper);
@@ -114,6 +120,53 @@ public class UserServiceImpl implements UserService {
         // convert(...) 会保留分页信息（总条数、总页数），只替换里面的数据
         return userPage.convert(this::toVO);
     }
+    /**
+     * 应用排序。
+     *
+     * 【为什么必须用白名单，不能直接把前端传的字段名拼进 SQL？】
+     * 如果无脑拼成 "order by " + sortField，前端传
+     *     id; DELETE FROM user
+     * 这种内容就可能造成 SQL 注入。
+     * 用 switch 做白名单后，前端只能在这几个字段里选，
+     * 传了别的字段一律走默认排序 —— 从根上杜绝注入。
+     *
+     * @param wrapper   查询条件对象
+     * @param sortField 前端传的排序字段（对应表格列的 prop）
+     * @param sortOrder "asc" 升序 / "desc" 降序
+     */
+    private void applySort(LambdaQueryWrapper<User> wrapper, String sortField, String sortOrder) {
+        boolean asc = "asc".equalsIgnoreCase(sortOrder);
+
+        switch (sortField == null ? "" : sortField) {
+            case "id" -> {
+                if (asc) wrapper.orderByAsc(User::getId);
+                else wrapper.orderByDesc(User::getId);
+            }
+            case "username" -> {
+                if (asc) wrapper.orderByAsc(User::getUsername);
+                else wrapper.orderByDesc(User::getUsername);
+            }
+            case "nickname" -> {
+                if (asc) wrapper.orderByAsc(User::getNickname);
+                else wrapper.orderByDesc(User::getNickname);
+            }
+            case "role" -> {
+                if (asc) wrapper.orderByAsc(User::getRole);
+                else wrapper.orderByDesc(User::getRole);
+            }
+            case "status" -> {
+                if (asc) wrapper.orderByAsc(User::getStatus);
+                else wrapper.orderByDesc(User::getStatus);
+            }
+            case "createTime" -> {
+                if (asc) wrapper.orderByAsc(User::getCreateTime);
+                else wrapper.orderByDesc(User::getCreateTime);
+            }
+            // 没传 或 传了非法字段 -> 默认按创建时间倒序
+            default -> wrapper.orderByDesc(User::getCreateTime);
+        }
+    }
+
 
 
     /**
@@ -157,6 +210,11 @@ public class UserServiceImpl implements UserService {
         update.setStatus(status);
         userMapper.updateById(update);
 
+        // 4.【关键】清掉缓存。
+        //    否则被禁用的人靠缓存里的 status=1 还能继续访问，
+        //    最长撑到 TTL 到期（30 分钟）—— 那这个功能就形同虚设。
+        userAuthCache.evict(id);
+
         log.info("修改用户状态: id={}, status={}", id, status);
     }
 
@@ -186,9 +244,77 @@ public class UserServiceImpl implements UserService {
         update.setRole(role);
         userMapper.updateById(update);
 
+        // 4.【关键】角色变了，但缓存里还是旧角色 —— 会导致越权
+        //    （比如刚被降级的人，缓存里仍是 ADMIN，还能进后台）
+        userAuthCache.evict(id);
+
         log.info("修改用户角色: id={}, role={}", id, role);
     }
 
+    /**
+     * 删除用户（逻辑删除）
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void removeUser(Long id) {
+
+        // 1. 校验用户是否存在
+        User user = userMapper.selectById(id);
+        if (user == null) {
+            throw new BusinessException(ResultCode.USER_NOT_FOUND);
+        }
+
+        // 2.【关键坑】逻辑删除后这一行仍然留在表里，而 username 上有唯一索引。
+        //    如果不改写 username，以后有人用同一个用户名注册时：
+        //      · 带 @TableLogic 的查重语句看不到已删除的行 -> 误判为"不重复"
+        //      · 但 INSERT 时物理行还在 -> 直接撞唯一索引报 Duplicate entry
+        //    所以删除时顺便把用户名改名：既保留历史数据，又释放用户名。
+        User rename = new User();
+        rename.setId(id);
+        rename.setUsername(user.getUsername() + "#deleted#" + id);
+        userMapper.updateById(rename);
+
+        // 3. 逻辑删除：@TableLogic 会把它变成 UPDATE user SET deleted=1 WHERE id=?
+        userMapper.deleteById(id);
+
+        // 4.【关键】人删了，缓存还留着 = 幽灵账号，拿旧 token 依然能通行
+        userAuthCache.evict(id);
+
+        log.info("删除用户: id={}, username={}", id, user.getUsername());
+    }
+
+
+    /**
+     * 重置用户密码
+     */
+    @Override
+    public void resetPassword(Long id, String password) {
+
+        // 1. 校验密码长度（DTO 上也校验了一次，这里再兜一层：Service 可能被别处调用）
+        if (password == null || password.length() < 6 || password.length() > 20) {
+            throw new BusinessException(ResultCode.PARAM_ERROR, "密码长度需要在6-20之间");
+        }
+
+        // 2. 校验用户是否存在
+        User user = userMapper.selectById(id);
+        if (user == null) {
+            throw new BusinessException(ResultCode.USER_NOT_FOUND);
+        }
+
+        // 3. BCrypt 加密后更新（绝不能存明文）
+        User update = new User();
+        update.setId(id);
+        update.setPassword(passwordEncoder.encode(password));
+        userMapper.updateById(update);
+
+        // 4. 清缓存：缓存里虽然不含密码，但保持"一改用户就清缓存"的一致习惯；
+        //    将来若要做"改密码后旧 token 立即失效"，这里就不用再补了
+        userAuthCache.evict(id);
+
+        log.info("重置用户密码: id={}", id);
+    }
 
 
 }
+
+

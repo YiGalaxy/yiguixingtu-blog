@@ -5,11 +5,13 @@ import com.yigalaxy.yiguixingtu.auth.LoginUser;
 import com.yigalaxy.yiguixingtu.common.Result;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
+import com.yigalaxy.yiguixingtu.user.dto.ResetPasswordRequest;
 import com.yigalaxy.yiguixingtu.user.dto.UserQuery;
 import com.yigalaxy.yiguixingtu.user.dto.UserVO;
 import com.yigalaxy.yiguixingtu.user.service.UserService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -71,6 +73,27 @@ public class UserController {
         }
 
         userService.updateRole(id, role);
+        return Result.success();
+    }
+
+    @Operation(summary = "删除用户")
+    @DeleteMapping("/{id}")
+    public Result<Void> remove(@PathVariable Long id) {
+
+        // 【保护措施】不允许删除自己，防止管理员把自己删掉导致系统没人能管
+        if (id.equals(getCurrentUserId())) {
+            throw new BusinessException(ResultCode.PARAM_ERROR, "不能删除自己的账号");
+        }
+
+        userService.removeUser(id);
+        return Result.success();
+    }
+
+    @Operation(summary = "重置用户密码")
+    @PutMapping("/{id}/password")
+    public Result<Void> resetPassword(@PathVariable Long id,
+                                      @Valid @RequestBody ResetPasswordRequest request) {
+        userService.resetPassword(id, request.getPassword());
         return Result.success();
     }
 

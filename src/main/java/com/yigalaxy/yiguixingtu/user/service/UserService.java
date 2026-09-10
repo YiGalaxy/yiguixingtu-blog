@@ -50,4 +50,17 @@ public interface UserService {
      * @param role ADMIN / GUEST
      */
     void updateRole(Long id, String role);
+
+    /**
+     * 删除用户（逻辑删除）
+     * @param id 用户ID
+     */
+    void removeUser(Long id);
+
+    /**
+     * 重置用户密码
+     * @param id       用户ID
+     * @param password 新密码（明文传入，内部会用 BCrypt 加密后存储）
+     */
+    void resetPassword(Long id, String password);
 }

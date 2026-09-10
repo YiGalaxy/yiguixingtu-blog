@@ -1,8 +1,10 @@
 package com.yigalaxy.yiguixingtu.auth.filter;
 
 import com.yigalaxy.yiguixingtu.auth.LoginUser;
+import com.yigalaxy.yiguixingtu.auth.cache.UserAuthCache;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.user.entity.User;
+import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -40,9 +42,19 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     /** JWT 工具类：负责解析 token。由 Spring 注入进来。 */
     private final JwtUtil jwtUtil;
 
-    /** 构造方法：Spring 创建这个过滤器时，把 JwtUtil 传进来。 */
-    public JwtAuthenticationFilter(JwtUtil jwtUtil) {
+    /** 用户 Mapper：用来查数据库，确认用户是否还存在 / 是否被禁用 */
+    private final UserMapper userMapper;
+
+    /** 用户认证信息缓存：先查它，命中就不用查库了 */
+    private final UserAuthCache userAuthCache;
+
+    /** 构造方法：Spring 创建这个过滤器时，把 JwtUtil、UserMapper、UserAuthCache 一起传进来。 */
+    public JwtAuthenticationFilter(JwtUtil jwtUtil, UserMapper userMapper, UserAuthCache userAuthCache) {
         this.jwtUtil = jwtUtil;
+        this.userMapper = userMapper;
+        this.userAuthCache = userAuthCache;
+
+
     }
 
     /**
@@ -80,47 +92,76 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             // 如果签名不对或已过期，这里会抛异常，跳到下面的 catch
             Claims claims = jwtUtil.parseToken(token);
 
-            // ============ 第3步：从 token 里取出用户信息 ============
-            // claims 就是 token 里存的"数据"，即登录时放进去的 userId/role/username
-            Long userId = ((Number) claims.get("userId")).longValue();   // 取 userId（转成 Long）
-            String username = claims.getSubject();                       // 取用户名（我们存在 subject 字段）
-            String role = (String) claims.get("role");                   // 取角色
+            // ============ 第3步：从 token 里取出用户 ID ============
+            Long userId = ((Number) claims.get("userId")).longValue();
 
-            // ============ 第4步：组装一个"已登录用户" ============
-            // 构造一个 User 对象，只填需要的字段。这里不需要密码，因为 token 已经证明身份了
-            User user = new User();
-            user.setId(userId);
-            user.setUsername(username);
-            user.setRole(role);
+            // ============ 第4步【核心修复】：拿到这个人的"当前"状态 ============
+            // 【为什么必须校验？】token 一旦签发就无法撤销，光看 token 看不出：
+            //   ① 用户是否已被【禁用】(status = 0)
+            //   ② 用户是否已被【删除】(逻辑删除)
+            //   ③ 用户角色是否已被【修改】（token 里存的是签发那一刻的旧角色）
+            // 不校验的后果：被禁用/被删除的人拿着旧 token 依然畅通无阻，
+            //              直到 token 自然过期（你配的是 24 小时）。
+            //
+            // 【取数顺序：先缓存、后数据库】
+            //   · 命中缓存 -> 0 次数据库查询（绝大多数请求走这条）
+            //   · 未命中   -> 查一次库，把结果写回缓存，供后续请求使用
+            //
+            // 缓存里存的是 id/username/nickname/role/status，【不含密码】。
+            // 禁用、删除、改角色时 UserServiceImpl 会主动清掉这个缓存，
+            // 所以这里读到的一定是最新状态（TTL 30 分钟只是兜底）。
+            User dbUser = userAuthCache.get(userId);
 
-            // 用 LoginUser 把 User 包起来（LoginUser 实现了 Spring Security 的 UserDetails）
-            LoginUser loginUser = new LoginUser(user);
+            if (dbUser == null) {
+                // 缓存没命中才查库。
+                //
+                // 【注意】selectById 是 MyBatis-Plus 的方法，User 实体上有 @TableLogic，
+                //        它会自动追加 "AND deleted = 0" —— 已删除的用户查出来就是 null。
+                dbUser = userMapper.selectById(userId);
 
-            // ============ 第5步：构造"已认证"令牌 ============
-            // UsernamePasswordAuthenticationToken 是"认证信息"的容器。
-            // 3个参数：(当前登录用户, 密码凭证, 权限列表)
-            //   - 第二个参数传 null，因为 token 已验证过，不需要密码
-            //   - 第三个参数是权限（loginUser.getAuthorities() 返回 ROLE_ADMIN 等）
-            // 用3参构造器 = 表示"已认证"（authenticated=true），这是合法的登录状态
-            UsernamePasswordAuthenticationToken authentication =
-                    new UsernamePasswordAuthenticationToken(loginUser, null, loginUser.getAuthorities());
+                if (dbUser != null) {
+                    // 查到就写回缓存，下次请求就不用查库了
+                    userAuthCache.put(dbUser);
+                }
+            }
 
-            // setDetails：记录一些请求细节（比如来源IP等），通常这样写即可
-            authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+            if (dbUser == null) {
+                // 情况①：用户已被删除
+                log.warn("token 对应用户不存在或已删除, userId={}", userId);
+            } else if (dbUser.getStatus() == null || dbUser.getStatus() != 1) {
+                // 情况②：用户已被禁用
+                log.warn("用户已被禁用, userId={}, username={}", userId, dbUser.getUsername());
+            } else {
+                // ============ 第5步：用【数据库里的最新信息】组装当前登录用户 ============
+                // 关键：这里不再使用 token 里的 role，而是用 dbUser.getRole()。
+                // 好处是"刚被降级的管理员"立刻失去权限，不用等 token 过期；
+                // "刚被提升的游客"也立刻获得权限。
+                //
+                // 安全习惯：密码哈希后面用不到了，先清掉，
+                // 避免它跟着 principal 在内存里被误用、或被日志打出来。
+                dbUser.setPassword(null);
+                LoginUser loginUser = new LoginUser(dbUser);
 
-            // ============ 第6步：放入"登记簿" ============
-            // SecurityContextHolder 相当于一个"当前请求的登记簿"，
-            // 把 authentication 放进去，就表示"这个请求已经登录了，当前用户是 loginUser"
-            // 之后在 Controller 里就能通过 SecurityContextHolder 拿到当前用户
-            SecurityContextHolder.getContext().setAuthentication(authentication);
+                // ============ 第6步：构造"已认证"令牌 ============
+                // 3个参数：(当前登录用户, 密码凭证, 权限列表)
+                // 第二个参数传 null，因为 token 已验证过，不需要密码
+                UsernamePasswordAuthenticationToken authentication =
+                        new UsernamePasswordAuthenticationToken(loginUser, null, loginUser.getAuthorities());
+
+                // setDetails：记录请求细节（来源 IP 等）
+                authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+
+                // ============ 第7步：放入"登记簿" ============
+                SecurityContextHolder.getContext().setAuthentication(authentication);
+            }
 
         } catch (Exception e) {
-            // token 无效/过期，走到这里。我们不做设置认证，
+            // token 无效/过期/格式错误，走到这里。不做认证设置，
             // 后续 SecurityConfig 的 .anyRequest().authenticated() 会拦下来返回 401
             log.warn("解析token失败: {}", e.getMessage());
         }
 
-        // ============ 第7步：放行 ============
+        // ============ 第8步：放行 ============
         // 把请求交给下一个过滤器/最终到 Controller
         filterChain.doFilter(request, response);
     }

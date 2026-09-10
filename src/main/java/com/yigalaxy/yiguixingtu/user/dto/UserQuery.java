@@ -30,4 +30,10 @@ public class UserQuery {
 
     @Schema(description = "状态筛选：1正常 0禁用")
     private Integer status;
+
+    @Schema(description = "排序字段：id / username / nickname / role / status / createTime", example = "createTime")
+    private String sortField;
+
+    @Schema(description = "排序方向：asc 升序 / desc 降序", example = "desc")
+    private String sortOrder;
 }

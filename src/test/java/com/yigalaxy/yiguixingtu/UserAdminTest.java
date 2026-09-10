@@ -1,9 +1,11 @@
 package com.yigalaxy.yiguixingtu;
 
+import com.yigalaxy.yiguixingtu.auth.cache.UserAuthCache;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.user.entity.User;
 import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -16,9 +18,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.annotation.Transactional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -57,6 +57,9 @@ class UserAdminTest {
 
     @Autowired
     private JwtUtil jwtUtil;
+
+    @Autowired
+    private UserAuthCache userAuthCache;
 
     /** 测试用的管理员、游客，以及各自的 token */
     private User admin;
@@ -285,5 +288,81 @@ class UserAdminTest {
                         .content("{\"username\":\"test_guest_um\",\"password\":\"123456\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(ResultCode.ACCOUNT_DISABLED.getCode()));
+    }
+
+    // ================================================================
+    // 六、token 失效验证（本次修复的核心）
+    // ================================================================
+
+    @Test
+    @DisplayName("⑯ 用户被禁用后，他手里的旧 token 立即失效 -> 401")
+    void disabledUser_oldToken_shouldBeRejected() throws Exception {
+        // 【预热】先让 guest 正常访问一次，把它写进缓存
+        // （关键！不预热的话，缓存本来就是空的，测不出 evict 有没有生效）
+        mockMvc.perform(get("/auth/me")
+                        .header("Authorization", "Bearer " + guestToken))
+                .andExpect(status().isOk());
+
+        // 管理员禁用 guest
+        mockMvc.perform(put("/user/{id}/status", guest.getId())
+                        .param("status", "0")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk());
+
+        // 若 evict 漏写，这里会命中"status=1"的脏缓存 → 返回 200，测试失败
+        mockMvc.perform(get("/auth/me")
+                        .header("Authorization", "Bearer " + guestToken))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    @DisplayName("⑰ 用户被删除后，他手里的旧 token 立即失效 -> 401")
+    void deletedUser_oldToken_shouldBeRejected() throws Exception {
+        // 【预热】
+        mockMvc.perform(get("/auth/me")
+                        .header("Authorization", "Bearer " + guestToken))
+                .andExpect(status().isOk());
+
+        // 管理员删除 guest
+        mockMvc.perform(delete("/user/{id}", guest.getId())
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk());
+
+        // 若 evict 漏写，会命中旧缓存（用户"还在"）→ 200，测试失败
+        mockMvc.perform(get("/auth/me")
+                        .header("Authorization", "Bearer " + guestToken))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    @DisplayName("⑱ 管理员被降级后，旧 token 立即失去管理权限 -> 403")
+    void demotedAdmin_oldToken_shouldLoseAdminRights() throws Exception {
+        // 造第二个管理员
+        User admin2 = insertUser("test_admin2_um", "ADMIN");
+        String admin2Token = jwtUtil.generateToken(admin2.getId(), admin2.getUsername(), "ADMIN");
+
+        // 【预热】admin2 先成功访问一次管理接口，把"ADMIN"写进缓存
+        mockMvc.perform(get("/user/page")
+                        .header("Authorization", "Bearer " + admin2Token))
+                .andExpect(status().isOk());
+
+        // 把 admin2 降级为游客
+        mockMvc.perform(put("/user/{id}/role", admin2.getId())
+                        .param("role", "GUEST")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk());
+
+        // 若 evict 漏写，会命中缓存里的旧角色 ADMIN → 200，测试失败
+        mockMvc.perform(get("/user/page")
+                        .header("Authorization", "Bearer " + admin2Token))
+                .andExpect(status().isForbidden());
+    }
+
+    @AfterEach
+    void tearDown() {
+        // @Transactional 只能回滚数据库，回滚不了 Redis。
+        // 这里手动清掉本用例产生的缓存 key，避免污染后续测试、累积垃圾。
+        if (admin != null) userAuthCache.evict(admin.getId());
+        if (guest != null) userAuthCache.evict(guest.getId());
     }
 }

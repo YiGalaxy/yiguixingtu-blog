@@ -67,6 +67,9 @@ public class RedisConfig {
     /** 文章前台已发布列表的缓存名 */
     public static final String CACHE_ARTICLE_PAGE = "article:page";
 
+    /** 文章详情的缓存名（前台只缓存已发布的） */
+    public static final String CACHE_ARTICLE_DETAIL = "article:detail";
+
     /** 站点统计的缓存名（首页那三个数字） */
     public static final String CACHE_ARTICLE_STATS = "article:stats";
 
@@ -171,26 +174,38 @@ public class RedisConfig {
                 .serializeValuesWith(
                         RedisSerializationContext.SerializationPair.fromSerializer(jsonSerializer));
 
-        // ---------------- 缓存写入器：用默认策略就行 ----------------
+        // ---------------- 缓存写入器：用 locking 版本，为了防击穿 ----------------
         //
-        // 【这里原来写的是 BatchStrategies.keys()，现在改回默认了 —— 说明一下为什么】
-        //   最初的方案是"写操作时用 @CacheEvict(allEntries = true) 清空整个缓存"。
-        //   那个方案踩了一个很隐蔽的坑：Spring Data Redis 的 RedisCache.clear()
-        //   （allEntries 背后调用的东西）【不是同步完成的】—— 方法返回时还没删完，
-        //   删除在后台继续跑。表现出来就是"发布文章后刷新前台，有时看得到有时看不到"，
-        //   测试也会随机红。
-        //   当时为了让它"至少在语义上同步"，显式指定了 BatchStrategies.keys()
-        //   （走 Lua 脚本，KEYS + DEL 一起原子执行）。但 KEYS 会阻塞 Redis 的单线程，
-        //   是个拿生产安全换局部语义的交换。
+        // 【这里原来写的是 BatchStrategies.keys()，后来改成默认，现在改成 locking】
+        //   三次变化对应三次认识，按顺序说清楚：
         //
-        //   后来换了方案：不再删缓存，改成【版本号】（见 ArticleCacheVersion）。
-        //   版本号一变，旧 key 再也拼不出来，等于瞬间全部失效 —— 一条数据都不用删。
-        //   顺带的好处是：
-        //     · 完全不需要 clear()，也就不用跟它的异步语义较劲了
-        //     · 不需要 KEYS / SCAN，生产上更安全
-        //     · 失效代价从 O(缓存条数) 降到 O(1)（一次 INCR）
-        //   所以这里改回默认的写入器：没有 clear 调用，批量策略就用不上了。
-        RedisCacheWriter cacheWriter = RedisCacheWriter.nonLockingRedisCacheWriter(connectionFactory);
+        //   ① 最初用 @CacheEvict(allEntries = true) 清缓存 ——
+        //      踩到一个很隐蔽的坑：RedisCache.clear() 【不是同步完成的】，
+        //      方法返回时还没删完，删除在后台继续跑。业务表现是
+        //      "发布文章后刷新前台，有时看得到有时看不到"。当时为了让语义至少同步，
+        //      显式指定了 BatchStrategies.keys()（Lua 脚本原子执行），
+        //      但 KEYS 会阻塞 Redis 单线程，是拿生产安全换局部语义。
+        //
+        //   ② 改用【版本号】方案后（见 ArticleCacheVersion）根本不需要 clear() 了，
+        //      于是去掉批量策略、改回默认写入器。
+        //
+        //   ③ 现在做详情缓存要【防击穿】，需要"未命中时只有一个人去加载"这个能力。
+        //      它由 @Cacheable(sync = true) + lockingRedisCacheWriter 一起提供：
+        //      sync = true 会让 Spring 走 Cache.get(key, Callable) 那条路，
+        //      而 locking 写入器在加载前会先抢一把 Redis 里的锁
+        //      （内部就是 SETNX + 超时释放），抢到的去查库、其余等锁后读缓存。
+        //
+        //      【为什么用框架的，而不是自己写 SETNX + 双重检查】
+        //        那正是 LockingRedisCacheWriter 内部在做的事，只是它把
+        //        锁超时、异常时释放、抢不到时重试这些细节都处理好了。
+        //        自己写一遍只会多出几个能写错的地方，而且错了的表现是
+        //        "偶发多查一次库"，几乎不可能被发现。
+        //
+        //      【代价】每次缓存未命中都会多一次 SETNX/DEL 的往返。
+        //      命中时不受影响（正常路径还是直接 GET）。
+        //      对本项目"读多写少、缓存命中率极高"的形状来说，这个代价可以忽略；
+        //      如果哪天缓存命中率很低，锁的开销就会变成负担，那时该重新评估。
+        RedisCacheWriter cacheWriter = RedisCacheWriter.lockingRedisCacheWriter(connectionFactory);
 
         // ---------------- 统计缓存的规则（只是 TTL 不同） ----------------
         // 列表缓存和统计缓存的序列化、前缀规则完全一样，只有过期时间不同，
@@ -201,10 +216,11 @@ public class RedisConfig {
 
         return RedisCacheManager.builder(cacheWriter)
                 .cacheDefaults(baseConfig)
-                // 针对具体缓存名做覆盖。两个都显式列出来，
+                // 针对具体缓存名做覆盖。三个都显式列出来，
                 // 是为了让"哪个缓存走哪套 TTL"在这几行里一眼可见，
                 // 不用去猜它到底命中了哪个默认值。
                 .withCacheConfiguration(CACHE_ARTICLE_PAGE, baseConfig)
+                .withCacheConfiguration(CACHE_ARTICLE_DETAIL, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_STATS, statsConfig)
                 .build();
     }

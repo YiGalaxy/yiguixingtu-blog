@@ -80,7 +80,7 @@ import org.springframework.stereotype.Component;
 public class ArticleCacheVersion {
 
     /**
-     * 版本号在 Redis 里的 key。
+     * 列表缓存版本号在 Redis 里的 key。
      *
      * 【为什么是 Redis 而不是一个 JVM 内存里的 AtomicLong】
      *   内存版只在【单实例】下正确：一旦部署两个后端实例，
@@ -89,6 +89,24 @@ public class ArticleCacheVersion {
      *   （这也是"缓存失效"这类状态天然属于外部存储的原因）
      */
     static final String VERSION_KEY = "article:page:version";
+
+    /**
+     * 详情缓存版本号在 Redis 里的 key。
+     *
+     * 【为什么详情要单独一个计数器，而不是和列表共用】
+     *   因为两者"需要失效的时机"不同 —— 多出来的那一类来自【浏览量的定时落库】：
+     *     · 列表缓存里也有一份 view_count，但它【不做合并】，只是原样显示库里的值。
+     *       落库之后它还是旧的，等 TTL 到了自然刷新。数字只会滞后，不会往回跳。
+     *     · 详情缓存不一样：它返回的是「缓存里的快照 + Redis 里的增量」。
+     *       落库会同时做两件事 —— 库里的快照变大、Redis 里的增量清零。
+     *       如果详情缓存里那份快照还是旧的，就会出现
+     *         「旧快照 0 + 新增量 1 = 1」
+     *       而落库前明明是 3 —— **数字当着用户的面往回跳**。
+     *   （这个 bug 是全量测试抓出来的：ArticleViewCountTest 的
+     *     "落库之后继续访问 -> 从新的基线往上加" 那条用例变红。）
+     *   所以：文章被写 → 两个版本号一起 +1；浏览量落库 → 只推动详情那个。
+     */
+    static final String DETAIL_VERSION_KEY = "article:detail:version";
 
     /** Redis 里还没这个 key 时的版本号 */
     private static final String INITIAL_VERSION = "0";
@@ -100,17 +118,35 @@ public class ArticleCacheVersion {
     }
 
     /**
-     * 取当前版本号，供拼装缓存 key 使用。
+     * 取当前版本号，供拼装【列表】缓存 key 使用。
      *
      * @return 当前版本号字符串；Redis 里还没有时返回 "0"
      */
     public String current() {
-        String v = redis.opsForValue().get(VERSION_KEY);
+        return read(VERSION_KEY);
+    }
+
+    /**
+     * 取当前版本号，供拼装【详情】缓存 key 使用。
+     *
+     * 【为什么详情要读另一个计数器】见上面 DETAIL_VERSION_KEY 的注释 ——
+     * 一句话：浏览量定时落库会改变详情里的快照，但不会改变列表的内容。
+     */
+    public String currentDetail() {
+        return read(DETAIL_VERSION_KEY);
+    }
+
+    private String read(String key) {
+        String v = redis.opsForValue().get(key);
         return v == null ? INITIAL_VERSION : v;
     }
 
     /**
-     * 把版本号 +1，让之前所有已缓存的列表【立刻失效】。
+     * 文章被写（新建 / 编辑 / 发布下架 / 删除）之后调用。
+     *
+     * 【两个版本号都要推进】
+     *   因为一次文章的写操作既改变了列表的内容（标题、摘要、排序位置），
+     *   也改变了详情的内容 —— 两个缓存都不能再用了。
      *
      * 【调用时机】必须在业务写操作【成功之后】调用。
      *   如果写操作最终抛异常回滚了，却先把版本号推进了，
@@ -119,15 +155,41 @@ public class ArticleCacheVersion {
      *   反过来（先写库成功、后忘记推版本号）才会留下脏缓存，
      *   所以这里的取向是"宁可多作废一次，也不能漏"。
      *
-     * @return 自增之后的版本号（便于日志/排查，测试也用它断言）
+     * @return 自增之后的列表版本号（便于日志/排查，测试也用它断言）
      */
     public long bump() {
-        Long next = redis.opsForValue().increment(VERSION_KEY);
+        long next = incr(VERSION_KEY);
+        incr(DETAIL_VERSION_KEY);
+        return next;
+    }
+
+    /**
+     * 浏览量定时落库【成功之后】调用，只让详情缓存失效。
+     *
+     * 【为什么列表缓存不需要跟着失效】
+     *   列表里的 view_count 是"原样展示库里的值"，落库后它只是暂时偏小、
+     *   TTL 到了自然刷新，不会出错；而详情要做"快照 + 增量"的合并，
+     *   快照过期就会让数字往回跳（详见 DETAIL_VERSION_KEY 的注释）。
+     *   只推动必要的那个，能让列表缓存不被每 5 分钟一次的无谓失效拖累。
+     *
+     * @return 自增之后的详情版本号
+     */
+    public long bumpAfterViewSync() {
+        return incr(DETAIL_VERSION_KEY);
+    }
+
+    /**
+     * 把某个版本号 +1。
+     *
+     * @return 自增之后的值
+     */
+    private long incr(String key) {
+        Long next = redis.opsForValue().increment(key);
         // increment 正常不会返回 null（key 不存在时会从 0 开始），
         // 这里兜一下是为了避免拆箱 NPE —— 宁可抛一个清楚的异常，
         // 也不要让一个莫名其妙的 NPE 出现在业务代码的堆栈里
         if (next == null) {
-            throw new IllegalStateException("推进文章列表缓存版本号失败，Redis 未返回结果");
+            throw new IllegalStateException("推进文章缓存版本号失败，Redis 未返回结果: " + key);
         }
         return next;
     }

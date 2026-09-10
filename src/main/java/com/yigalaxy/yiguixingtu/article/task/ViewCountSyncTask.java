@@ -1,6 +1,7 @@
 package com.yigalaxy.yiguixingtu.article.task;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.yigalaxy.yiguixingtu.article.cache.ArticleCacheVersion;
 import com.yigalaxy.yiguixingtu.article.cache.ArticleViewCounter;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
@@ -59,11 +60,17 @@ public class ViewCountSyncTask {
     private final ArticleMapper articleMapper;
     private final BusinessMetrics metrics;
 
+    /**
+     * 缓存版本号。落库之后要让详情缓存失效（原因见 syncViewCounts 里的注释）。
+     */
+    private final ArticleCacheVersion articleCacheVersion;
+
     public ViewCountSyncTask(ArticleViewCounter viewCounter, ArticleMapper articleMapper,
-                             BusinessMetrics metrics) {
+                             BusinessMetrics metrics, ArticleCacheVersion articleCacheVersion) {
         this.viewCounter = viewCounter;
         this.articleMapper = articleMapper;
         this.metrics = metrics;
+        this.articleCacheVersion = articleCacheVersion;
     }
 
     /**
@@ -137,6 +144,22 @@ public class ViewCountSyncTask {
         // 指标在写库之后记：先把数写进去，再对外声明"落了这么多"。
         // 顺序反过来的话，如果写库抛异常，指标就已经先涨上去了 —— 数字对不上真实情况。
         metrics.recordViewSync(deltas.size(), flushedViews);
+
+        // 【关键的一步：让详情缓存失效】
+        //   详情接口返回的浏览量 = 「缓存里的库快照 + Redis 里的增量」。
+        //   这次落库同时做了两件事：库里的快照变大了、Redis 里的增量清零了。
+        //   如果详情缓存里那份快照还是旧的，用户接下来会看到
+        //   「旧快照 + 刚产生的少量增量」，比落库前还小 —— 数字当着用户的面往回跳。
+        //   所以落库之后必须推动详情的版本号。
+        //
+        // 【为什么列表缓存不用管】
+        //   列表里的 view_count 是"原样展示库里的值"，不做合并：
+        //   落库后它只是暂时偏小、等 TTL 到了自然刷新，不会出现回跳。
+        //   只推动必要的那个，列表缓存就不会被每 5 分钟一次的无谓失效拖累。
+        //
+        // 【为什么放在写库之后】先失效、后写库的话，万一写库失败，
+        //   缓存已经白作废一次（下次重新查库）—— 虽然不会出错，但没必要。
+        articleCacheVersion.bumpAfterViewSync();
 
         log.info("浏览量同步完成: 本次处理 {} 篇文章的增量, 影响 {} 行{}",
                 deltas.size(), updated,

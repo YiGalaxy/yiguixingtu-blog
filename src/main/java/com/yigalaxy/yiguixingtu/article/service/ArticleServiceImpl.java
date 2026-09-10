@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.yigalaxy.yiguixingtu.article.cache.ArticleCacheVersion;
+import com.yigalaxy.yiguixingtu.article.cache.PublishedArticleCache;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
@@ -78,14 +79,23 @@ public class ArticleServiceImpl implements ArticleService {
     /** 浏览量计数器：详情页只写它（Redis），落库交给 ViewCountSyncTask */
     private final ArticleViewCounter viewCounter;
 
+    /**
+     * 详情页"库里的那份数据"的可缓存读取。
+     * 单独一个 Bean 是为了让 @Cacheable 的代理生效（同类内部调用不走代理），
+     * 详见该类的注释。
+     */
+    private final PublishedArticleCache publishedArticleCache;
+
     public ArticleServiceImpl(ArticleMapper articleMapper,
                               CategoryMapper categoryMapper,
                               ArticleViewCounter viewCounter,
-                              ArticleCacheVersion articleCacheVersion) {
+                              ArticleCacheVersion articleCacheVersion,
+                              PublishedArticleCache publishedArticleCache) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
         this.viewCounter = viewCounter;
         this.articleCacheVersion = articleCacheVersion;
+        this.publishedArticleCache = publishedArticleCache;
     }
 
     // =================================================================
@@ -177,35 +187,41 @@ public class ArticleServiceImpl implements ArticleService {
 
     @Override
     public ArticleVO getPublishedDetail(Long id) {
-        Article article = articleMapper.selectById(id);
 
-        // 【安全】草稿对外一律当作"不存在"，而不是返回 403 "无权限"。
-        // 因为返回 403 等于告诉别人"这里确实有一篇草稿" —— 信息就泄漏了。
-        // 对未授权的访问者来说，草稿和不存在应该长得一模一样。
-        if (article == null || article.getStatus() == null || article.getStatus() != 1) {
-            throw new BusinessException(ResultCode.ARTICLE_NOT_FOUND);
-        }
+        // 【第一步：先确认"这篇文章对外可见"，再谈计数】
+        //   库里的那份数据走缓存（含"草稿一律 404"的判断，见 PublishedArticleCache）。
+        //   ⚠️ 这一步【必须排在 INCR 前面】：草稿和不存在的文章会在这里抛 404，
+        //   如果先 INCR 再校验，那么别人拿 id 挨个探测草稿也会留下浏览痕迹 ——
+        //   有一条用例专门盯着这件事（ArticleViewCountTest 的"草稿不该被计数"）。
+        //   （第一版把它排在后面，全量测试立刻变红，正是这条用例抓出来的。）
+        ArticleVO vo = publishedArticleCache.load(id);
 
-        // 【浏览量：只记 Redis，不写库】
+        // 【第二步：记一次浏览（只记 Redis，不写库）】
         //   原来这里是一句 UPDATE article SET view_count = view_count + 1，
         //   也就是"详情页是读接口，却在每次请求里写一次库"。
         //   后果是热门文章被频繁打开时，这条 UPDATE 成为最热的写语句，
         //   而且并发访问同一篇会在同一行上排队等锁 —— 看文章被写操作拖慢。
+        //   现在只做一次 Redis INCR（内存操作、无行锁），由定时任务批量落库。
         //
-        //   现在只做一次 Redis INCR（内存操作、无行锁），
-        //   由 ViewCountSyncTask 每 5 分钟批量落库。
-        //
-        // 【注意顺序：先 INCR 再读增量】
-        //   这样返回的数字是"包含本次访问"的，用户刷新能看到自己这一下被算进去了。
-        //   （原来是先读快照再加一，所以第一次访问显示的是 0 —— 见 ArticlePublicTest
-        //    里那条用例，它跟着这次改动一起改了断言。）
+        // ⚠️ 【这行必须在缓存外面】
+        //   它是带副作用的写操作，而缓存只能缓存"纯读且幂等"的结果。
+        //   如果把它连同下面的合并一起缓起来，命中缓存的请求就不会再 INCR，
+        //   浏览量会永远停在某个值上 —— 页面照常打开、数字照常显示，只是不再增长。
         viewCounter.increment(id);
 
-        // 返回给前端的浏览量 = 库里的快照 + Redis 里还没落库的增量。
-        // 只返回库里的值的话，用户会看到"我刷新了但数字不动"——
-        // 因为最新的计数还没到落库时间。
-        ArticleVO vo = toVO(article, getCategoryName(article.getCategoryId()));
-        long dbCount = article.getViewCount() == null ? 0L : article.getViewCount();
+        // 【第三步：合并"库里的快照 + Redis 里还没落库的增量"再返回】
+        //   只返回库里的值的话，用户会看到"我刷新了但数字不动"——
+        //   因为最新的计数还没到落库时间。
+        //   顺序上"先 INCR 再读增量"，所以返回的数字【包含本次访问】，
+        //   用户刷新能看到自己这一下被算进去了。
+        //
+        // 【这里直接改 vo 会不会污染缓存】
+        //   不会。缓存用的是 Redis + JSON 序列化，每次读出来都是一个【新对象】，
+        //   改它不影响缓存里的那份。
+        //   ⚠️ 但如果将来有人把缓存换成进程内的（比如 Caffeine），
+        //      读出来的就是同一个对象引用，这行赋值会把缓存里的值改掉。
+        //      换缓存实现时记得先复制一份再改。
+        long dbCount = vo.getViewCount() == null ? 0L : vo.getViewCount();
         vo.setViewCount((int) (dbCount + viewCounter.pending(id)));
         return vo;
     }

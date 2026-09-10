@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-182%20passing-success)
+![Tests](https://img.shields.io/badge/tests-193%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **182 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **193 个集成测试全部通过**（覆盖行 86%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -32,7 +32,7 @@
 | ORM | MyBatis-Plus 3.5.17（含 `mybatis-plus-jsqlparser` 分页/条件构造） |
 | 数据库 | MySQL 8 |
 | 数据库迁移 | Flyway 12（`spring-boot-flyway` + `flyway-core` + `flyway-mysql`） |
-| 缓存 | Redis 7（缓存认证信息 / Token 黑名单 / 文章列表，另用作浏览量计数器，见「认证与鉴权」「文章列表缓存」） |
+| 缓存 | Redis 7（缓存认证信息 / Token 黑名单 / 文章列表 / 文章详情，另用作浏览量计数器，见「认证与鉴权」「文章缓存」） |
 | 安全 | Spring Security 7 + JWT（jjwt 0.12.6）+ BCrypt |
 | 参数校验 | Spring Validation（`spring-boot-starter-validation`） |
 | 接口文档 | springdoc-openapi 3.0.0（OpenAPI / Swagger UI） |
@@ -65,6 +65,9 @@
 - **浏览量异步计数**：详情页只写 Redis，定时任务每 5 分钟批量落库（见下文「浏览量为什么是异步的」）
 - **文章列表缓存**：前台列表走 Redis 缓存，写操作用**版本号**同步失效；
   带**防穿透**（空结果也缓存 30 秒）与**防雪崩**（TTL 随机抖动）—— 见下文「文章列表缓存」
+- **文章详情缓存**：同样走 Redis，写操作后立刻更新；带**防击穿**
+  （`sync = true` 互斥重建，实测 12 线程并发只查库 1 次）——
+  注意**浏览量不能被缓存冻住**，见下文「文章详情缓存」
 
 **分类**
 - 分类列表（游客可访问）
@@ -79,7 +82,7 @@
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   存储可切换（本地磁盘 / 阿里云 OSS，见「配置」章节）
-- 集成测试 22 个类 **182 个用例**，行覆盖率 **86%**
+- 集成测试 23 个类 **193 个用例**，行覆盖率 **86%**
 
 ### 🚧 规划中
 
@@ -137,6 +140,8 @@ com.yigalaxy.yiguixingtu
 │   ├── entity/Article
 │   ├── mapper/ArticleMapper
 │   ├── cache/ArticleViewCounter    # 浏览量 Redis 计数器（详情页只 INCR，不写库）
+│   ├── cache/PublishedArticleCache # 详情页那份库数据的可缓存读取（防击穿）
+│   ├── cache/ArticleCacheVersion   # 缓存版本号（列表与详情各一个，写操作一起推进）
 │   ├── task/ViewCountSyncTask      # 定时把 Redis 增量批量落库
 │   └── dto/                        # ArticleForm / ArticleQuery / ArticleVO
 ├── upload
@@ -171,6 +176,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── ArticleAdminTest                # 后台文章管理
 ├── ArticlePublicTest               # 前台公开接口（草稿隔离）
 ├── ArticleCacheTest                # 列表缓存：命中/失效/TTL/防穿透
+├── ArticleDetailCacheTest          # 详情缓存与防击穿
 ├── ArticleStatsTest                # 站点统计接口（只算已发布）
 ├── ArticleViewCountTest            # 浏览量：Redis 计数 + 定时批量落库
 ├── ArticleIdempotencyTest          # 接口幂等（Idempotency-Key）
@@ -859,6 +865,84 @@ article:page:v1 : {版本号} : {页码}:{每页}:{分类}:{关键词}:{排序}:
 缓存不会知道**，数据最多在 TTL 之后才自愈。这是"旁路缓存"必然的代价，
 不是 bug。`ArticlePublicTest` 里专门有一条用例把这个边界固定下来：
 将来如果有人加了 CDC / 触发器来失效缓存，那条用例会变红，提醒他行为变了。
+
+## 文章详情缓存
+
+详情页也做了缓存。但它的形状和列表缓存**不一样**，因为详情里有一个"每次都在变"的字段：
+**浏览量**。这一节主要讲清楚那个字段带来了哪些坑。
+
+### ⚠️ 坑一：浏览量绝不能被缓存进去
+
+详情返回的浏览量 = 「库里的快照 + Redis 里还没落库的增量」，而增量**每次访问都会变**。
+如果把最终结果整个缓存起来，命中缓存的请求就不会再执行 `INCR` ——
+**浏览量会永远停在那个值上**。
+
+这个 bug 特别隐蔽：页面照常打开、数字照常显示，只是不再增长。
+所以缓存的边界划在"**库里的那份数据**"：
+
+```
+viewCounter.increment(id)            ← 副作用，必须在缓存外
+ArticleVO vo = cache.load(id)        ← 这一层才是缓存的（存放库里的快照）
+vo.setViewCount(快照 + pending(id))   ← 合并，也在缓存外
+```
+
+`ArticleDetailCacheTest` 里有一条用例专门盯这件事：**连续访问三次，断言 1 → 2 → 3**。
+只要有人把 INCR 挪进缓存里，这条立刻就红。
+
+### 坑二：为什么这段可缓存逻辑要单独放一个类
+
+Spring Cache 靠**代理**生效，而代理拦不住"同类内部的方法调用"。
+如果直接在 `ArticleServiceImpl.getPublishedDetail()` 里调 `this.loadFromDb()`，
+`@Cacheable` 就等于没写 —— 不报错、也不生效（Spring Cache 最经典的那个坑）。
+
+所以抽出了 `PublishedArticleCache` 这个 Bean，由 Service 注入后从外部调用，代理必然生效。
+
+### 防击穿：用 `sync = true`，而不是自己写 SETNX
+
+**击穿**指的是：热点 key 恰好过期，同时涌进来 N 个请求，它们**全部**发现缓存没了、
+**全部**去查库 —— 一瞬间对同一行数据发起 N 次查询，等于缓存白做了。
+
+做法是 `@Cacheable(sync = true)`：它让 Spring 走 `Cache.get(key, Callable)` 那条路，
+Redis 那边在未命中时先抢一把锁，只有抢到的那个去加载，其余等锁释放后读缓存。
+
+> **为什么不用自己写 SETNX + 双重检查**：那正是写入器内部在做的事，
+> 只是它把锁超时、异常时释放、抢不到时重试这些细节都处理好了。
+> 自己写只会多出几个能写错的地方，而且错了的表现是"偶发多查一次库"，
+> 几乎不可能被发现。
+
+**实测证明**（`ArticleDetailCacheTest` 里那条并发用例，不是嘴上说说）：
+用 `@MockitoSpyBean` 给 `ArticleMapper` 套了一层只记账的替身，
+**12 个线程同时访问同一篇未缓存的文章，`selectById` 只被调用了 1 次**。
+
+```java
+verify(spyArticleMapper, times(1)).selectById(articleId);   // 12 个线程 -> 只有 1 次查库
+```
+
+> 📌 这条用例还顺带踩了一个测试上的坑：并发要靠多线程，而别的线程
+> **看不到当前测试事务里未提交的那一行**，它们会统统查到"文章不存在"。
+> 所以这条用例特意关掉了测试事务（`@Transactional(propagation = NOT_SUPPORTED)`），
+> 自己负责清理数据。
+
+### 失效：为什么详情要**单独一个**版本号
+
+这是全量测试抓出来的一个真 bug，值得记下来。
+
+两个缓存都有 `view_count`，但它们对"过期数据"的容忍度完全不同：
+
+| | 列表缓存 | 详情缓存 |
+|---|---|---|
+| 怎么用这个值 | **原样展示**库里的值 | **快照 + 增量**合并后展示 |
+| 落库后变旧会怎样 | 数字暂时偏小，等 TTL 自然刷新；**只会滞后，不会回跳** | 快照是旧的、增量已清零 → 显示值**比落库前还小** —— 数字当着用户的面往回跳 |
+
+具体数字：一篇文章被看了 3 次（库 0 + 增量 3 = 显示 3）→ 定时落库（库变 3、增量清零）
+→ 再有人看一次：如果详情缓存里那份快照还是旧的，就会显示 `0 + 1 = 1`，**从 3 掉到 1**。
+
+所以：**文章被写 → 两个版本号一起推进；浏览量落库 → 只推进详情那个**。
+只推动必要的，列表缓存就不会被每 5 分钟一次的无谓失效拖累。
+
+> 这个 bug 不是想出来的，是 `ArticleViewCountTest` 的
+> "落库之后继续访问 → 从新的基线往上加"那条用例变红之后才暴露的 ——
+> **全量测试的价值就在这里**：它抓到了单看某一个功能时完全想不到的交叉影响。
 
 ## 统一返回与错误处理
 
@@ -1582,7 +1666,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 182 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 193 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -1594,10 +1678,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 182 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 193 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**22 个测试类，182 个用例，全部通过：**
+**23 个测试类，193 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -1611,6 +1695,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleCacheTest` | 13 | 列表缓存：第二次走缓存、四个写操作都让缓存失效、TTL 区间、空结果也缓存（防穿透）、key 归一化 |
 | `ArticleStatsTest` | 8 | 站点统计：只算已发布、逻辑删除不计入、空库不报错、走缓存、写操作让缓存失效 |
 | `ArticleViewCountTest` | 10 | 浏览量：Redis 计数、累加不丢、定时批量落库、落库后增量清零 |
+| `ArticleDetailCacheTest` | 11 | 详情缓存：走缓存、**浏览量不被冻住**、写操作后立刻更新、下架即 404、自愈重建、**12 线程并发只查库 1 次（防击穿）**、TTL 有效 |
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
 | `UploadAdminTest` | 10 | 封面上传：类型/大小白名单、UUID 重命名、非管理员 403 |
@@ -1623,7 +1708,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ProfileProdConfigTest` | 3 | prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量 |
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **182** | |
+| **合计** | **193** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

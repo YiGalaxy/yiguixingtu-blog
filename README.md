@@ -319,7 +319,7 @@
   图片走 `type=image`（默认，5MB，存 `uploads/cover/`），音频走 `type=audio`
   （mp3，20MB，存 `uploads/music/`）—— 两套规则**互不放宽**，各有用例钉住；
   文件存服务器本地磁盘，并用**具名卷**持久化
-- 集成测试 **39 个类 433 个用例**，行覆盖率 **91.2%**
+- 集成测试 **39 个类 434 个用例**，行覆盖率 **91.2%**
 
 ### 🚧 规划中
 
@@ -2162,7 +2162,7 @@ curl -s http://127.0.0.1:8082/actuator/prometheus | head -20
 > 前端用服务名 `backend` 就能访问后端，不用手写网络配置。
 > 代价是上线时两个仓库要放在一起 —— 对一个单机博客来说这个取舍是划算的。
 
-#### ⚠️ 内存预算：2 核 2G 的机器必须给容器设上限（否则 OOM 先杀的是 MySQL）
+#### ⚠️ 内存预算：必须给容器设上限，而且基数要用【实测值】而不是标称值
 
 `docker-compose.prod.yaml` 里给四个服务都写了 `mem_limit`。**这不是"性能调优"，
 而是"能不能稳定跑起来"的前提** —— 原因在 JVM 的容器感知只认 cgroup 限额：
@@ -2180,19 +2180,31 @@ curl -s http://127.0.0.1:8082/actuator/prometheus | head -20
 
 | 服务 | 上限 | 预估实占 | 主要构成 |
 |---|---|---|---|
-| `mysql` | 512m | ~200MB | 缓冲池 128M + 连接与线程 |
-| `backend` | 768m | ~550MB | 堆 ~462M + 元空间 + 线程栈 + 直接内存 |
-| `frontend` | 320m | ~180MB | Node SSR 的常驻内存 |
-| `redis` | 128m | ~30MB | `maxmemory 96mb`（实际只用到十几 MB） |
-| **合计** | **1728m** | | 余 ~320MB 给系统 + Docker + Nginx |
+| `mysql` | 384m | ~280MB | 缓冲池 128M + 连接与线程 |
+| `backend` | 640m | ~500MB | 堆 ~384M + 元空间 160M + 直接内存 48M |
+| `frontend` | 240m | ~180MB | Node SSR 的常驻内存 |
+| `redis` | 96m | ~20MB | `maxmemory 64mb`（实际只用到十几 MB） |
+| **合计** | **1360m** | | 余 ~278MB 给系统 + Docker + Nginx |
 
-**这张表里已经实测过三项**（不是纸面估算）：
+> ⚠️⚠️ **基数是 1638MB，不是 2048MB —— 这一条是整套参数的地基**
+>
+> 实例标称"2 核 2G"，但服务器上 `free -h` 显示的是 **`Mem: 1.6Gi`（≈1638MB）**：
+> 内核并不拥有标称的全部物理内存（虚拟化层与内核自身会占掉一部分）。
+>
+> 第一版按标称的 2048 算，得出"四个容器上限之和 1728m、余 320m"这份表 ——
+> **看着合理，实际上上限之和已经超过物理内存 90MB**。而"上限之和必须给系统留余量"
+> 这条不变式恰恰是用来防这件事的：基数用错，它就成了一条**永远会通过的假测试**。
+>
+> ⇒ **内存预算必须按实测值算**。换机器时先跑 `free -m`，再回来改这一节。
 
-| 服务 | 实测方式 | 结果 |
-|---|---|---|
-| `mysql` | 容器 512m 下**从空数据目录初始化**（mysql 8.4.11） | 成功；占用 197MB / 512MB（38%），`OOMKilled=false`；`performance_schema=0`、`innodb_buffer_pool_size=128M`、`max_connections=50` 三项均生效 |
-| `redis` | 容器 128m 下启动 | 正常；`maxmemory=96MB`、`maxmemory-policy=volatile-lru` 均生效 |
-| `backend` | `--memory 768m` + 本文件里的 `JAVA_TOOL_OPTIONS` | 堆 462M / 元空间 192M / 直接内存 64M（和 718M < 768M），`gc.log` 正常生成 |
+**这张表里哪些是实测过的、哪些不是**（分开说，免得把估算当实测）：
+
+| 服务 | 实测情况 |
+|---|---|
+| `mysql` | ✅ 空数据目录初始化成功（mysql **8.4.11**），`OOMKilled=false`；`performance_schema=0`、`innodb_buffer_pool_size=128M`、`max_connections=50` 三项均生效。⚠️ 但那次是在**更大的上限**下量的，收紧到 384m 之后没有再量过 |
+| `redis` | ✅ 启动正常；`maxmemory` 与 `maxmemory-policy` 都生效 |
+| `backend` | ✅ 以 `--memory` 实测过"堆正是上限的 60%、元空间与直接内存上限都生效、`gc.log` 能写出来" |
+| `frontend` | ❌ **唯一没有实测的一项**（没在本机起 SSR 容器量过，~180MB 是估算） |
 
 > ⚠️ **MySQL 的缓冲池会被静默向上取整**（这一条是实测踩出来的）：
 > MySQL 会把 `innodb_buffer_pool_size` 取整到 `innodb_buffer_pool_chunk_size`
@@ -2202,7 +2214,13 @@ curl -s http://127.0.0.1:8082/actuator/prometheus | head -20
 > 写 `128M` 才实测得到 128M。**取值应当是 128M 的整数倍**
 > （除非连 chunk size 一起改），测试里有一条用例盯着这件事。
 
-> ⚠️ **上限之和刻意不顶满 2048**。操作系统、Docker 守护进程、Nginx、sshd
+> ⚠️ **后端那三个硬上限只留了约 48M 给代码缓存 / 线程栈 / GC 结构**：
+> 384（堆）+ 160（元空间）+ 48（直接内存）= 592M < 640M。余量是**偏薄**的
+> （JIT 代码缓存实测通常就有 40~50M）。真正兜住的是"这些上限在实际负载下都够用"
+> ——堆实际占 300M 上下、元空间 110M 上下。若出现"容器被 OOM 杀（ExitCode 137）
+> 而堆转储显示堆并没有满"，就把 `MaxRAMPercentage` 降到 50 再观察。
+
+> ⚠️ **上限之和刻意不顶满**。操作系统、Docker 守护进程、Nginx、sshd
 > 自身也要内存，而它们不在 compose 里。把容器上限之和顶到物理内存，
 > 等于把"谁先被 OOM"交给内核随机决定。
 
@@ -2216,8 +2234,10 @@ free -h          # 应当看到 Swap: 4.0Gi
 ```
 
 **为什么是 4G**：compose 不写 `memswap_limit` 时，Docker 默认允许容器使用
-"内存上限 + 等量 swap"，四个容器加起来最坏是 `512+768+320+128 = 1728M`，
-4G 刚好把最坏情况整个接住。
+"内存上限 + 等量 swap"，四个容器加起来最坏是 `384+640+240+96 = 1360M`，
+4G 的 swapfile 把最坏情况整个接住还留了很大余量 ——
+**余量是给构建用的**（`docker compose build` 跑在服务器上时要 Maven / npm 同时吃内存，
+那时候四个容器还没起来，swap 是构建不会因为内存不足被杀掉的兜底）。
 **swap 不是"内存够就不用配"** —— 它在这里的作用是给内存上限兜底，
 让容器即使在峰值也只会变慢、不会被杀。
 
@@ -2228,13 +2248,75 @@ docker stats --no-stream
 # 或看单个容器：docker inspect yiguixingtu-prod-backend --format '{{.HostConfig.Memory}}'
 ```
 
-> **换到更大内存的机器时**按同一张表整体放大即可：主要改四个 `mem_limit`；
-> backend 的堆是百分比、会自动跟着走，但 mysql 的 `--innodb-buffer-pool-size`
-> 是绝对值、要一起改（**而且要给 128M 的整数倍**，理由见上面那条取整的说明）。
+> **换到更大内存的机器时**先跑 `free -m` 拿实测值，再按同一张表的比例放大：
+> 主要改四个 `mem_limit`；backend 的堆是百分比、会自动跟着走，
+> 但 mysql 的 `--innodb-buffer-pool-size` 是绝对值、要一起改
+> （**而且要给 128M 的整数倍**，理由见上面那条取整的说明）。
+> ⚠️ 别忘了同时改 `DeploymentMemoryBudgetTest` 里的 `HOST_MEMORY_MB`
+> —— 那边也按实测值写，两边一起改才不会自相矛盾。
 >
-> ⚠️ **万一 MySQL 第一次初始化就被杀**（容器反复重启、`docker inspect` 的
-> `ExitCode` 是 137、`dmesg` 里有 oom-kill 记录）：把 mysql 提到 640m，
-> 同时把 backend 降到 640m —— **总量维持不变，不要直接加总预算**。
+> ⚠️ **万一 MySQL 初始化 / 运行中被杀**（容器反复重启、`docker inspect` 的
+> `ExitCode` 是 137、`dmesg` 里有 oom-kill 记录）：把 mysql 提到 448m、
+> 同时把 backend 降到 576m —— **总量维持不变，不要直接加总预算**。
+
+#### ⚠️ 国内服务器：Docker Hub 拉不动、GitHub 间歇性连不上（实测记录）
+
+这两个不是"配置问题"，是这个网络环境下绕不开的前提，写在这里免得下次重新踩一遍。
+
+**① Docker Hub 拉不到，而阿里云自己的镜像加速器也不顶用**
+
+实测：`/etc/docker/daemon.json` 里配了阿里云容器镜像服务的专属加速器
+（`https://<你的id>.mirror.aliyuncs.com`）之后，`docker pull redis:7` 依然失败：
+
+```
+failed to resolve reference "docker.io/library/redis:7": docker.io/library/redis:7: not found
+```
+
+注意它是 **`not found`，不是超时** —— 加速站返回了 404，而 Docker 把 404 当成
+"这个镜像不存在"，**不会**回退去连官方源。所以这句报错特别容易读成
+"镜像名写错了"，而实际上镜像名一点问题都没有。
+
+> ⚠️ 顺带一个实测教训：**浮动标签拿到的东西可能很旧**。
+> 这台机器上曾有过的 `mysql:8` 镜像，`mysqld --version` 是 **8.0.27（2021-10）**——
+> 少了四年多的安全补丁，而且它来自哪个源已经查不清了。
+> 所以 compose 里两个数据服务的镜像都**钉到了小版本**（`mysql:8.4` / `redis:7.4`），
+> `DeploymentMemoryBudgetTest` 里有一条用例盯着"不许写成只有大版本的浮动标签"。
+
+解法（实测可行）：**从 AWS 的公共 ECR 拉，再改回标准名**。它镜像了 Docker 官方镜像：
+
+```bash
+docker pull public.ecr.aws/docker/library/redis:7.4
+docker tag  public.ecr.aws/docker/library/redis:7.4 redis:7.4
+```
+
+构建要用的那几个基础镜像同理，逐个换成标准名：
+`maven:3.9-eclipse-temurin-17`、`eclipse-temurin:17-jre`、`node:24-alpine`、
+`alpine:latest`、`mysql:8.4`。
+
+> ⚠️ **别去用那些不知名的第三方加速站**（各种 `docker.1panel.live` / `hub.rat.dev` /
+> `dockerproxy.*` 之类）。它们确实常常能拉通，但你是把**生产数据库镜像**从陌生人的
+> 机器上拉下来 —— 镜像里多一个后门，在 compose 里完全看不出来。
+> ECR Public 是正经厂商在官方镜像之上做的只读镜像，性质不同。
+
+**② GitHub 是间歇性的，不能当地基**
+
+实测同一条命令：有 `git ls-remote` 正常返回 SHA 的时候，也有
+`Failed to connect to github.com port 443 after 133821 ms: Couldn't connect to server`
+的时候。所以：
+
+- 首次 `git clone` 加 **`--depth 1`**（只取当前快照、不搬全部历史，传输量小一半以上）
+  并**重试几次** —— 在忽通忽断的链路上这是把成功率明显抬高的一步
+- 部署流程**不要**依赖"服务器随时能访问 GitHub"：拉不动时用
+  `git bundle create` 从本地搬（`git bundle` 保留完整历史，服务器端
+  `git clone xx.bundle` 之后照常 `git pull`）
+- 以后的 `git pull` 只传变动的几个文件（几百 KB），比首次 clone 容易得多
+
+**③ Maven 依赖走阿里云镜像（已经写死在 Dockerfile 里）**
+
+实测直连 Maven Central 时 `dependency:go-offline` 跑了 **25 分钟还没结束**
+（`-q` 把下载日志吞了，看起来像卡死）；换成 `maven.aliyun.com/repository/public`
+之后整个构建 **7.8 分钟**。所以 `Dockerfile` 里默认写入了那个镜像地址，
+可用 `--build-arg MAVEN_MIRROR_URL=...` 覆盖或关掉。
 
 ### 1. 准备环境变量
 
@@ -2789,7 +2871,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 433 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 434 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -2801,10 +2883,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 433 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 434 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**39 个测试类，433 个用例，全部通过：**
+**39 个测试类，434 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -2844,10 +2926,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `AboutTest` | 16 | 关于页：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 返回空壳且保存能写回 / POST 是真 405）、迁移脚本已插好那一行、昵称与头像与 GitHub 与邮箱与长文本的长度与格式边界、一次性清空全部可选字段真的写成 NULL、权限 401/403、缓存命中与保存后失效 |
 | `MusicTest` | 23 | 音乐：前台只含"显示"的（隐藏的不出现）、**排序两段稳定（sort 升序、sort 相同按 id 升序）**、列表为空返回空数组而不是 404、响应字段齐全（歌词是 LRC 原文、换行不丢）、**音频地址两种形态都合法（`/uploads/music/…` 与 http(s) 外链）而 `javascript:` 被拒**、曲名/歌手/歌词/地址/状态的长度与格式边界、约 5000 字歌词原样存取（守 TEXT 列不被改成短列）、增删改与逻辑删除（原生 SQL 验物理行与 deleted）、清空歌手与封面与歌词真的写成 NULL、权限 401/403、缓存命中 / 写操作推进版本号 / key 带版本号且 TTL 落在 300~360 秒（含抖动） |
 | `SiteSettingTest` | 17 | 站点设置：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 给默认值且保存能写回 / POST 是真 405）、**迁移种子值读脚本原文核对**（守"上线这个功能本身不改变站点外观"）、六个字段逐个"能改、能读到、能清空"、**每页条数上限跟文章接口同为 50**（超了会变成"保存成功但不生效"）、**评论开关 0/1 与布尔的转换两个方向都断言**、**⑰ 评论总开关在后端真的生效**（关掉后 `POST /comment` 返回 code 403，且库里没有多出记录；再打开又能发）、权限 401/403、缓存命中与保存后失效 |
-| `DeploymentMemoryBudgetTest` | 8 | 部署配置契约（**读 `docker-compose.prod.yaml` 与 `Dockerfile`，不起 Spring 上下文**）：四个服务都必须有 `mem_limit`、上限之和要给宿主机留余量、**Dockerfile 的 ENTRYPOINT 不许带 JVM 参数**（带了会静默覆盖 `JAVA_TOOL_OPTIONS`）、三个硬上限之和必须小于 `mem_limit`、堆转储与 GC 日志必须落在挂了卷的目录里、redis 必须是 `volatile-lru`（`allkeys-lru` 会淘汰没有 TTL 的浏览量增量 = 真丢数据）、mysql 必须关 `performance_schema` 且缓冲池是 128M 的整数倍（否则被静默取整成 256M）、YAML 开启重复键检查 |
+| `DeploymentMemoryBudgetTest` | 9 | 部署配置契约（**读 `docker-compose.prod.yaml` 与 `Dockerfile`，不起 Spring 上下文**）：四个服务都必须有 `mem_limit`、上限之和要给宿主机留余量、**Dockerfile 的 ENTRYPOINT 不许带 JVM 参数**（带了会静默覆盖 `JAVA_TOOL_OPTIONS`）、三个硬上限之和必须小于 `mem_limit`、堆转储与 GC 日志必须落在挂了卷的目录里、redis 必须是 `volatile-lru`（`allkeys-lru` 会淘汰没有 TTL 的浏览量增量 = 真丢数据）、mysql 必须关 `performance_schema` 且缓冲池是 128M 的整数倍（否则被静默取整成 256M）、**数据服务的镜像必须钉住小版本**（浮动 `mysql:8` 实测拉到了四年前的 8.0.27）、YAML 开启重复键检查 |
 | `ActuatorExposureContractTest` | 4 | 管理端点的暴露面契约（`/actuator/prometheus` 在应用层是**放行**的，只能靠部署挡住）：`location /api/` 必须剥掉前缀（这也是 `/api/actuator/` 会命中后端根路径的根因）、必须有把 `/api/actuator/` 返回 404 的 location、mysql/redis 不发布任何端口且 backend/frontend 只绑 `127.0.0.1`、上线核对清单里这一项必须写出**可判定的**预期结果（404） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **433** | |
+| **合计** | **434** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

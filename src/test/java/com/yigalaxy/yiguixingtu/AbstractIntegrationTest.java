@@ -111,10 +111,14 @@ public abstract class AbstractIntegrationTest {
     /**
      * MySQL 容器。
      *
-     * 【镜像 tag 为什么写 mysql:8 而不是 mysql:8.4？】
-     *   和 docker-compose.yaml 保持一致。测试库与开发库用同一个 tag，
-     *   才不会出现"测试全绿、本地一跑就挂"的版本漂移。
-     *   （正式部署时会和 compose 一起锁定到具体小版本，见 TECH_ROADMAP 3.3）
+     * 【镜像 tag 为什么现在写 mysql:8.4 而不是浮动的 mysql:8】
+     *   生产编排（docker-compose.prod.yaml）已经把小版本钉在 8.4 ——
+     *   起因是实测踩过：一个浮动的 mysql:8 镜像拉下来竟是 Ver 8.0.27（2021-10 的版本）。
+     *   测试容器跟着钉到同一个 minor，才能保证"测试跑的那个版本"和"生产跑的那个版本"
+     *   是同一条线；否则等浮动标签某天落到另一个 minor 上，
+     *   就会出现"测试全绿、线上起不来"这种最难查的偏差。
+     *   （开发用的 docker-compose.yaml 仍是浮动 tag，本地调试要的是方便，不是可复现。）
+     *   ⚠️ 这一条以前写的是"和 docker-compose.yaml 保持一致"，见 TECH_ROADMAP 3.3。
      *
      * 【为什么不需要手动建表？】
      *   容器起来是个空库，Flyway 会在应用启动时自动执行
@@ -122,7 +126,7 @@ public abstract class AbstractIntegrationTest {
      *   也就是说：测试验证的就是生产环境真正会跑的那份建表脚本。
      */
     static final MySQLContainer MYSQL =
-            new MySQLContainer("mysql:8")
+            new MySQLContainer("mysql:8.4")
                     .withDatabaseName("yiguixingtu")
                     .withUsername("root")
                     // 容器只在测试期间存活，密码用什么都不影响安全；
@@ -135,7 +139,7 @@ public abstract class AbstractIntegrationTest {
      * 而 Redis 只需要暴露一个端口，通用容器完全够用。
      */
     static final GenericContainer<?> REDIS =
-            new GenericContainer<>("redis:7")
+            new GenericContainer<>("redis:7.4")
                     .withExposedPorts(6379);
 
     static {

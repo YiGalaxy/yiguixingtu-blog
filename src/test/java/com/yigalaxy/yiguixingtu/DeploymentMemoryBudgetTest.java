@@ -54,15 +54,28 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 class DeploymentMemoryBudgetTest {
 
-    /** 宿主机内存（MB）—— 目标服务器是"2 核 2G"，见 README「内存预算」那一节 */
-    private static final long HOST_MEMORY_MB = 2048;
+    /**
+     * 宿主机内存（MB）—— ⚠️ 这是【实测值】，不是标称值。
+     *
+     * 实例标称"2 核 2G"，但服务器上 `free -h` 显示的是 `Mem: 1.6Gi`（≈1638MB）：
+     * 内核并不拥有标称的全部物理内存（虚拟化层与内核自身会占掉一部分）。
+     *
+     * 【为什么这件事值得单独一条注释】
+     *   第一版按标称的 2048 算，得出一份"四个容器上限之和 1728m、余 320m"的表 ——
+     *   看着合理，实际上【上限之和已经超过物理内存 90MB】。
+     *   而"上限之和必须给系统留余量"这条不变式正是用来防这件事的，
+     *   基数用错，它就成了一条永远会通过的假测试。
+     *   ⇒ 换机器时先跑 `free -m`，再回来改这个常量与 compose 里的预算表。
+     */
+    private static final long HOST_MEMORY_MB = 1638;
 
     /**
      * 必须留给宿主机的余量（MB）。
      * 操作系统、Docker 守护进程、Nginx、sshd 都要内存，而它们不在 compose 里
      * （不在 compose 里的东西最难被想起来，所以留白要用断言守住）。
+     * 250MB 是照这台机器上"什么都没跑时"的实测量级定的。
      */
-    private static final long HOST_RESERVE_MB = 300;
+    private static final long HOST_RESERVE_MB = 250;
 
     /** 堆占容器上限的比例上限（%）。留出的部分给元空间 / 线程栈 / 直接内存 / JIT 代码缓存 / GC 结构 */
     private static final double MAX_HEAP_PERCENT = 70.0;
@@ -117,6 +130,26 @@ class DeploymentMemoryBudgetTest {
                     "服务 " + name + " 没有配 mem_limit。"
                             + "不设上限时容器没有 cgroup 限额，JVM 的 MaxRAMPercentage 会按【宿主机】内存算堆，"
                             + "2G 的机器上会让内核 OOM killer 来收场（被杀掉的通常是 MySQL）");
+        }
+    }
+
+    @Test
+    @DisplayName("生产编排：MySQL 与 Redis 必须钉住小版本，不许用只有大版本的浮动标签")
+    void dataImagesMustPinMinorVersion() {
+        // 【为什么专门有一条用例守这个 —— 这是实测踩出来的】
+        //   部署前试过一个浮动的 `mysql:8` 镜像，拉下来是 **Ver 8.0.27**（2021-10 的版本，
+        //   缺了四年多的安全补丁）。浮动标签会静默换版本，而 MySQL 的版本不是
+        //   "换个镜像就行"：数据目录一旦被某个版本建出来，跨 minor 升级有官方的路径要求
+        //   （8.0 → 8.4 要先升到最新的 8.0.x），而那种切换在数据目录已存在时可能直接起不来。
+        //   Redis 同理：这里存的是缓存（数据可重建），风险小一档，但"可复现"的理由是一样的。
+        //
+        //   断言方式：镜像名必须形如 `xxx:<数字>.<数字>`（带小版本），
+        //   而不是 `xxx:<单个数字>`（大版本浮动）。
+        for (String name : new String[]{"mysql", "redis"}) {
+            String image = String.valueOf(service(name).get("image"));
+            assertTrue(image.matches(".+:\\d+\\.\\d+.*"),
+                    "服务 " + name + " 的镜像写的是 `" + image + "` —— 只有大版本的浮动标签会静默换版本。"
+                            + "写成像 mysql:8.4 这样带小版本的（实测踩过：浮动 mysql:8 拉下来是四年前的 8.0.27）");
         }
     }
 

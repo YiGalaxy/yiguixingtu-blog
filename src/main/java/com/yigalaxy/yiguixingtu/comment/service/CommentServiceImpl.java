@@ -16,6 +16,7 @@ import com.yigalaxy.yiguixingtu.comment.entity.Comment;
 import com.yigalaxy.yiguixingtu.comment.mapper.CommentMapper;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
+import com.yigalaxy.yiguixingtu.setting.service.SettingService;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -84,12 +85,24 @@ public class CommentServiceImpl implements CommentService {
     private final ArticleMapper articleMapper;
     private final OperationLogRecorder operationLogRecorder;
 
+    /**
+     * 站点设置服务：**只用它的一件东西** —— 评论总开关（见 create 的第 0 步）。
+     *
+     * 【为什么评论模块要依赖设置模块】那个开关的语义是"整站此刻收不收评论"，
+     * 它属于站点设置；而"收了之后怎么存"属于这里。把这个开关复制一份到评论模块
+     * （比如自己也存一个布尔）就等于同一件事有两个真相，迟早会不一致。
+     * 反向没有依赖（设置模块不认识评论），所以不存在循环依赖。
+     */
+    private final SettingService settingService;
+
     public CommentServiceImpl(CommentMapper commentMapper,
                              ArticleMapper articleMapper,
-                             OperationLogRecorder operationLogRecorder) {
+                             OperationLogRecorder operationLogRecorder,
+                             SettingService settingService) {
         this.commentMapper = commentMapper;
         this.articleMapper = articleMapper;
         this.operationLogRecorder = operationLogRecorder;
+        this.settingService = settingService;
     }
 
     // =================================================================
@@ -133,6 +146,28 @@ public class CommentServiceImpl implements CommentService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public CommentVO create(CommentForm form, HttpServletRequest request) {
+
+        // 0. 站点级评论总开关：关掉之后【后端】拒绝新评论。
+        //
+        // 【为什么必须有这一层】前端在开关关掉时会把表单换成一句"评论已关闭"，
+        // 但那只藏了界面 —— 任何人直接 POST /comment 就绕过去了，那个开关也就成了假开关。
+        // 本项目对这类"可见性 / 可写性"规则的一贯做法是【写在 Service 里】，
+        // 而不是由前端决定（对照 pagePublished 里把 status 写死成 1 而不是读参数）。
+        //
+        // 【为什么放在所有校验的最前面】开关关掉时，连"这篇文章存不存在"都不必告诉调用方：
+        // 关站期间任何 POST 都应当得到同一个回答，而不是"评论已关闭"和"文章不存在"两种。
+        //
+        // 【为什么读的是 get()（带 Redis 缓存）】站点设置是"每次页面渲染都要读"的数据，
+        // 所以它走缓存；而后台关掉开关时会推进缓存版本号，于是这里读到的
+        // 立刻就是关闭之后的状态 —— 两处是同一份数据，不存在"关了但接口还收"的窗口。
+        //
+        // 【null 为什么放行】VO 里这个字段正常不会是 null（缺行时兜底成 true）；
+        // 万一真读到 null，按"开着"处理 —— 与前端归一化的取向一致：
+        // 配置读不到时保持现状，而不是把评论功能关掉。
+        Boolean commentEnabled = settingService.get().getCommentEnabled();
+        if (commentEnabled != null && !commentEnabled) {
+            throw new BusinessException(ResultCode.COMMENT_DISABLED);
+        }
 
         // 1. 文章必须存在，否则评论会挂到一篇不存在的文章上（那种数据永远查不出来）
         Article article = articleMapper.selectById(form.getArticleId());

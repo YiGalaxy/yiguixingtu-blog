@@ -215,6 +215,15 @@ class OperationLogTest extends AbstractIntegrationTest {
         // 所以本类改完之后要【改回迁移脚本里的初始状态】，而不是删掉它
         jdbcTemplate.update("UPDATE about SET nickname = '站长', avatar = NULL, bio = NULL,"
                 + " email = NULL, github = NULL, wechat = NULL, qq = NULL WHERE id = 1");
+        // 站点设置（F7）：同样是"只有一行、不能删"，同样要改回迁移脚本里的初始状态。
+        // ⚠️ 而且这一个【必须】还原，理由比 about 更硬：评论总开关关掉之后，
+        //    POST /comment 会被后端真的拒绝（ResultCode.COMMENT_DISABLED）——
+        //    本类是 NOT_SUPPORTED（真提交），不还原的话，凡是在它之后跑的评论用例
+        //    都会莫名其妙地失败，而报错信息是"评论已关闭"，
+        //    看起来像"评论模块坏了"，实际是上一个测试类留下的开关。
+        //    （站点名与每页条数也一起还原：它们同样是共享状态，还原是一行的事。）
+        jdbcTemplate.update("UPDATE site_setting SET site_name = '亿轨星途', announcement = NULL,"
+                + " comment_enabled = 1, icp_number = NULL, copyright = NULL, page_size = 12 WHERE id = 1");
         jdbcTemplate.update("DELETE FROM user WHERE username LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM category WHERE name LIKE ?", "%" + mark + "%");
     }

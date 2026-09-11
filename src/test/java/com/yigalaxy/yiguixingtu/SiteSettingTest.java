@@ -1,6 +1,8 @@
 package com.yigalaxy.yiguixingtu;
 
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
+import com.yigalaxy.yiguixingtu.article.entity.Article;
+import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.common.cache.ContentCacheVersion;
 import com.yigalaxy.yiguixingtu.config.RedisConfig;
@@ -81,6 +83,10 @@ class SiteSettingTest extends AbstractIntegrationTest {
 
     @Autowired
     private UserMapper userMapper;
+
+    /** ⑰ 要造一篇已发布的文章（评论必须挂在存在的文章上） */
+    @Autowired
+    private ArticleMapper articleMapper;
 
     @Autowired
     private PasswordEncoder passwordEncoder;
@@ -594,8 +600,95 @@ class SiteSettingTest extends AbstractIntegrationTest {
     }
 
     // ================================================================
+    //  六、评论总开关的「后端强制」
+    // ================================================================
+
+    @Test
+    @DisplayName("⑰ 评论总开关在后端真的生效：关掉之后接口拒绝新评论，打开之后又能发")
+    void commentSwitch_shouldBeEnforcedByBackend() throws Exception {
+        // 【为什么这条用例在这个类而不是 CommentTest】
+        //   它验证的不是"评论怎么存"，而是"站点设置里那个开关真的管住了接口"——
+        //   即这个功能的端到端效果。失败时一眼能看出该查设置那条链路。
+        Long articleId = insertPublishedArticle();
+        int before = commentCount(articleId);
+
+        // ---- ① 开着（迁移的种子值就是 1）：能发 ----
+        mockMvc.perform(post("/comment")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(commentJson(articleId, "开着的时候" + mark)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+        assertEquals(before + 1, commentCount(articleId), "开着时应当真的写进一条");
+
+        // ---- ② 关掉开关：后端必须拒绝 ----
+        setCommentEnabled(false);
+
+        mockMvc.perform(post("/comment")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(commentJson(articleId, "关掉之后" + mark)))
+                // HTTP 仍是 200，业务码是 403 —— 本项目的业务错误统一走
+                // "HTTP 200 + body.code"，见 README「统一返回与错误处理」
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(403))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.containsString("评论已关闭")));
+
+        // ⚠️ 关键在于这一条：断言【库里没有多出记录】，而不是只看接口返回。
+        //    "只藏前端表单、接口照收"那种假开关，光看返回码是看不出来的
+        assertEquals(before + 1, commentCount(articleId), "关掉之后不该有任何新评论落库");
+
+        // ---- ③ 再打开：又能发（证明开关是双向的，而不是"关了之后就再也开不开"）----
+        setCommentEnabled(true);
+
+        mockMvc.perform(post("/comment")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(commentJson(articleId, "重新打开" + mark)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+        assertEquals(before + 2, commentCount(articleId), "重新打开之后应当又能写进去");
+    }
+
+    // ================================================================
     //  工具方法
     // ================================================================
+
+    /** 把评论总开关设成指定值（走后台接口，顺便证明这条路径本身是通的） */
+    private void setCommentEnabled(boolean enabled) throws Exception {
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("开关测试" + mark, null, enabled, null, null, 10)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+    }
+
+    /**
+     * 造一篇【已发布】的文章 —— 评论必须挂在一篇存在的、已发布的文章上
+     * （草稿不能评论，见 CommentService）。
+     */
+    private Long insertPublishedArticle() {
+        Article article = new Article();
+        article.setTitle("评论开关测试文章 " + mark);
+        article.setSummary("用于验证评论总开关是否真的管住了接口");
+        article.setContent("正文");
+        article.setStatus(1);
+        article.setIsTop(0);
+        article.setViewCount(0);
+        article.setAuthorId(1L);
+        articleMapper.insert(article);
+        return article.getId();
+    }
+
+    private int commentCount(Long articleId) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM comment WHERE article_id = ?", Integer.class, articleId);
+        return count == null ? 0 : count;
+    }
+
+    private String commentJson(Long articleId, String nickname) {
+        return "{\"articleId\":" + articleId + ",\"nickname\":\"" + nickname
+                + "\",\"content\":\"评论开关测试内容\"}";
+    }
 
     /**
      * 拼保存站点设置的请求体。

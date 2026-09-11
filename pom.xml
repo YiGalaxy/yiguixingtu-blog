@@ -315,7 +315,7 @@
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
-                <version>0.8.13</version>
+                <version>0.8.15</version>
                 <configuration>
                     <!--
                       【为什么只插桩本项目自己的包】

@@ -154,6 +154,20 @@ public class RedisConfig {
     public static final String CACHE_FAVORITE_LIST = "favorite:list";
 
     /**
+     * 关于页的缓存名。
+     *
+     * 【为什么单条数据也要缓存】导航栏 / 页脚 / 关于页都可能读它，
+     * 而它【几个月才改一次】—— 典型的"读多写极少"。缓存它几乎不会有失效压力，
+     * 却省掉每次打开页面都查一次库。
+     *
+     * 【key 仍然只用版本号】这份数据只有一份、没有参数，所以 key = 版本号即可；
+     * 后台保存会推进那个版本号，于是"改完立刻生效"同样成立。
+     * 它和另外三个内容模块共用 ContentCacheVersion 那一个计数器
+     * （共用的取舍见 ContentCacheVersion 的类注释）。
+     */
+    public static final String CACHE_ABOUT = "about:detail";
+
+    /**
      * 统计结果的缓存时长：60 秒。
      * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
      * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
@@ -307,6 +321,9 @@ public class RedisConfig {
                 .withCacheConfiguration(CACHE_FRIEND_LINK_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_PROJECT_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_FAVORITE_LIST, baseConfig)
+                // 关于页是单条对象（不是列表），但 TTL 与序列化规则和列表完全一样，
+                // 所以也走 baseConfig —— 没有差异就不必造一份只为了"看起来整齐"的配置
+                .withCacheConfiguration(CACHE_ABOUT, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_ARCHIVE, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_RSS, baseConfig)
                 .build();

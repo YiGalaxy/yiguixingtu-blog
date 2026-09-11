@@ -1,6 +1,7 @@
 package com.yigalaxy.yiguixingtu;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.yigalaxy.yiguixingtu.about.entity.About;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
@@ -201,6 +202,10 @@ class OperationLogTest extends AbstractIntegrationTest {
         jdbcTemplate.update("DELETE FROM project WHERE name LIKE ?", "%" + mark + "%");
         // 收藏（F5）：同上
         jdbcTemplate.update("DELETE FROM favorite WHERE title LIKE ?", "%" + mark + "%");
+        // 关于页（F5）：这张表只有一行、而且不能删（删了前后台都拿不到数据），
+        // 所以本类改完之后要【改回迁移脚本里的初始状态】，而不是删掉它
+        jdbcTemplate.update("UPDATE about SET nickname = '站长', avatar = NULL, bio = NULL,"
+                + " email = NULL, github = NULL, wechat = NULL, qq = NULL WHERE id = 1");
         jdbcTemplate.update("DELETE FROM user WHERE username LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM category WHERE name LIKE ?", "%" + mark + "%");
     }
@@ -764,6 +769,32 @@ class OperationLogTest extends AbstractIntegrationTest {
         assertNotNull(deleteLog, "删除收藏应当留下 DELETE_FAVORITE 审计");
         assertTrue(deleteLog.getDetail().contains(secondTitle),
                 "删除记录里必须保留标题快照，实际=" + deleteLog.getDetail());
+    }
+
+    @Test
+    @DisplayName("⑱ 关于页的保存会留痕：对象类型 ABOUT、target_id 恒为 1")
+    void aboutUpdate_shouldBeAudited() throws Exception {
+        String nickname = mark + "-关于页昵称";
+
+        mockMvc.perform(put("/admin/about")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"nickname\":\"" + nickname + "\",\"bio\":\"审计用的自我介绍\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog log = awaitLog("UPDATE_ABOUT", About.SINGLE_ROW_ID);
+        assertNotNull(log, "保存关于页应当留下 UPDATE_ABOUT 审计");
+
+        // 【关于页的 target_id 恒为 1】它是全站唯一一份单条数据，
+        // 所以按 target_type = 'ABOUT' 查就能得到"关于页被谁改过几次"的完整历史，
+        // 连 id 条件都不用加 —— 和"按 target_type + target_id 查某条友链"的用法形成对照
+        assertEquals("ABOUT", log.getTargetType(), "对象类型应当是 ABOUT");
+        assertEquals(About.SINGLE_ROW_ID, log.getTargetId(), "单条记录的 target_id 恒为 1");
+        assertEquals(admin.getUsername(), log.getUsername(), "要记下是谁保存的");
+        // detail 里记昵称：关于页没有标题这类标识字段，昵称是最能指认它的东西
+        assertTrue(log.getDetail().contains(nickname),
+                "detail 里应当有昵称，实际=" + log.getDetail());
     }
 
     // ================================================================

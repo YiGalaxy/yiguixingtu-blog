@@ -98,7 +98,17 @@ public enum OperationAction {
     UPDATE_FAVORITE("编辑收藏"),
 
     /** 删除收藏 */
-    DELETE_FAVORITE("删除收藏");
+    DELETE_FAVORITE("删除收藏"),
+
+    /**
+     * 保存关于页信息。
+     *
+     * 【为什么只有 UPDATE 没有 CREATE / DELETE】
+     *   关于页是全站唯一一份单条数据：那一行由迁移脚本插好、
+     *   也不会被删除（不要了就清空字段）。所以这一族动作只有一个 ——
+     *   枚举里的取值和真实存在的动作一一对应，不留"将来可能用到"的空位。
+     */
+    UPDATE_ABOUT("保存关于页信息");
 
     /** 中文说明，便于直接展示与排查（不用在前端再维护一份翻译） */
     private final String description;

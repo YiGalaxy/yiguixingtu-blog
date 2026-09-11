@@ -54,5 +54,14 @@ public enum AuditTarget {
      * 到这里 F5 的四个内容模块已经有三个进了审计（LINK / PROJECT / FAVORITE），
      * 每个模块在这个枚举里就是一行 —— 这正是把"操作对象类型"单独拆成枚举的价值。
      */
-    FAVORITE
+    FAVORITE,
+
+    /**
+     * 关于页。
+     *
+     * 【它和另外三个内容模块的一个差别】友链 / 项目 / 收藏的 target_id 是"某一条数据的 id"，
+     * 而关于页只有一份数据，target_id 恒为 1 —— 所以按 target_type = 'ABOUT' 查
+     * 就能直接得到"关于页被谁改过几次"的完整历史（连 id 条件都不用加）。
+     */
+    ABOUT
 }

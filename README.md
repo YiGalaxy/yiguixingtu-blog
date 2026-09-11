@@ -215,6 +215,31 @@
   （`CREATE_FAVORITE` / `UPDATE_FAVORITE` / `DELETE_FAVORITE`，对象类型 `FAVORITE`）、
   前台列表走 Redis 缓存并共用内容缓存版本号
 
+**关于**
+- 关于页信息 `GET /about`（游客可访问）：昵称 / 头像 / 自我介绍（Markdown 原文）/
+  邮箱 / GitHub / 微信 / QQ，走 Redis 缓存
+- 后台只有**一个**接口 `PUT /admin/about`（类级管理员）：它是全站唯一一份单条数据，
+  所以**没有新建、没有删除、路径上也没有 `{id}`** —— 只有一个能改的对象，
+  留一个 id 参数只会多一处"传错 id"的可能。**POST /admin/about 是真 405**，
+  说明"只有一份数据"这件事在接口形状上是真的（不是靠文档约定）
+- **全站唯一一张只有一行、且没有 `deleted` 的业务表**（`operation_log` 也没有逻辑删除，
+  但理由正相反：审计是"不许抹掉痕迹"，这里是"删掉关于页"这个需求不存在）。
+  只有 `update_time`、没有 `create_time`：单条记录没有"创建"的语义
+- **那一行由迁移脚本插好**（`id = 1`）：空库启动之后前台第一次访问就能拿到结构完整的对象。
+  迁移里不编造内容（只填了 NOT NULL 的昵称），编一段假的自我介绍上线后第一件事就是删掉它
+- ⚠️ **万一那一行被人手工删了，系统会自己撑住**：`GET /about` 仍然返回 **200 +
+  一个内容为空的壳**（前台关于页照常打开，而不是变成一个错误页），
+  后台点一次"保存"会把它**写回来**（不会出现第二行）。这是对"单条只改不建"的
+  一处**有意放宽**，两半都有用例守着（`AboutTest` ⑫）——
+  公开页面的可用性优先于"把数据缺失变成显式错误"，而"保存成功却什么都没发生"
+  是最糟的一种失败
+- 校验按"字段会不会被浏览器解释"分档：`avatar` / `github` 走 URL 白名单
+  （它们会进 `<img src>` / `<a href>`）、`email` 校验格式（它会进 `mailto:`），
+  而 `nickname` / `wechat` / `qq` **只卡长度不做格式校验** ——
+  微信号可以带下划线、QQ 栏里有人填邮箱或昵称，加规则只会挡住正当输入
+- 保存进操作审计（`UPDATE_ABOUT`，对象类型 `ABOUT`，`target_id` 恒为 1）：
+  按 `target_type = 'ABOUT'` 查就能得到"关于页被谁改过几次"的完整历史
+
 **基础设施**
 - 统一返回 `{code, message, data}`
 - 全局异常处理（业务异常 / 参数校验 / 认证失败 / 账号禁用 / 权限不足 / 兜底）
@@ -225,15 +250,15 @@
   被限流返回 **429** —— 两层的分工与数值理由见「部署」章节
 - **操作审计**：文章的增 / 改 / 发布下架 / 删除，用户的启用禁用 / 改角色 /
   重置密码 / 删除，标签的增 / 改 / 删，评论的审核 / 删除，分类的增 / 改 / 删，
-  友链的增 / 改 / 删，项目、收藏的增 / 改 / 删
-  —— 共 25 类管理动作全部留痕（操作人、来源 IP、traceId、改动内容快照）；
+  友链的增 / 改 / 删，项目、收藏的增 / 改 / 删，关于页的保存
+  —— 共 26 类管理动作全部留痕（操作人、来源 IP、traceId、改动内容快照）；
   **业务提交之后才异步落库**，回滚掉的操作不会被记下来 —— 见「操作审计」
 - **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
 - **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
   图片存服务器本地磁盘，并用**具名卷**持久化
-- 集成测试 **34 个类 352 个用例**，行覆盖率 **91.0%**
+- 集成测试 **35 个类 369 个用例**，行覆盖率 **91.2%**
 
 ### 🚧 规划中
 
@@ -285,7 +310,7 @@ com.yigalaxy.yiguixingtu
 ├── audit
 │   ├── OperationLog                # 审计记录实体（对应 operation_log 表，刻意没有逻辑删除）
 │   ├── OperationAction             # 操作类型枚举（CREATE_ARTICLE / DELETE_USER …）
-│   ├── AuditTarget                 # 操作对象类型（ARTICLE / USER / TAG / COMMENT / CATEGORY / LINK / PROJECT / FAVORITE）
+│   ├── AuditTarget                 # 操作对象类型（ARTICLE / USER / TAG / COMMENT / CATEGORY / LINK / PROJECT / FAVORITE / ABOUT）
 │   ├── OperationLogEvent           # 事件对象（带上用户 / IP / traceId 的快照）
 │   ├── OperationLogRecorder        # 业务代码只调它一行：抄上下文 + 发事件
 │   ├── OperationLogListener        # @Async + AFTER_COMMIT：业务提交后才落库
@@ -356,6 +381,13 @@ com.yigalaxy.yiguixingtu
     ├── entity/Favorite                  # ⚠️ category 是自由文本分组名，不是 category 表的 id
     ├── mapper/FavoriteMapper
     └── dto/                             # FavoriteForm / FavoriteVO
+└── about
+    ├── AboutController                  # 前台：关于页信息（公开，单条对象、不是数组）
+    ├── AdminAboutController             # 后台：只有 PUT /admin/about（没有新建/删除）
+    ├── service/AboutService(+Impl)      # 单条记录：缺行时读返回空壳、保存时自愈写回
+    ├── entity/About                     # 全站唯一没有 @TableLogic / create_time 的业务表
+    ├── mapper/AboutMapper
+    └── dto/                             # AboutForm / AboutVO
 
 src/main/resources
 ├── application.properties
@@ -369,7 +401,8 @@ src/main/resources
     ├── V6__create_comment_table.sql     # comment（回到逻辑删除：它没有唯一索引）
     ├── V7__create_friend_link_table.sql # friend_link（友链；同样是逻辑删除）
     ├── V8__create_project_table.sql     # project（项目；url 与 repo 至少填一个，见脚本内说明）
-    └── V9__create_favorite_table.sql    # favorite（收藏；category 是自由文本分组名，见脚本内说明）
+    ├── V9__create_favorite_table.sql    # favorite（收藏；category 是自由文本分组名，见脚本内说明）
+    └── V10__create_about_table.sql      # about（关于页；只有一行，插入语句就在脚本里）
 
 src/test/java/com/yigalaxy/yiguixingtu
 ├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
@@ -396,12 +429,13 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── FriendLinkTest                  # 友链：前台只含显示中的 + 排序稳定 + 后台增删改（逻辑删除）+ 缓存命中与失效
 ├── ProjectTest                     # 项目：同上 + ⚠️ url 与 repo 至少填一个（两个都空被拒、只填一个合法、编辑时清空也拒且不动旧值）
 ├── FavoriteTest                    # 收藏：同上 + ⚠️ category 是自由文本分组（斜杠合法、可重复、空串归一化成 NULL、只卡长度）
+├── AboutTest                       # 关于页：单条记录的不变量（永远一行 / 缺行时读给空壳且保存能写回 / POST 是真 405）+ 校验边界 + 权限 + 缓存
 ├── UploadAdminTest                 # 封面上传（类型/大小校验、权限）
 ├── LogoutTokenTest                 # 登出后旧 token 立即失效（jti 黑名单）
 ├── SecurityHeadersTest             # 四个安全响应头
 ├── MetricsEndpointTest             # 指标端点与自定义业务指标
 ├── TracingTest                     # 链路追踪：traceId 进日志 + 进响应头
-├── OperationLogTest                # 操作审计：25 类写操作都留痕 / IP 取真实客户端 / 回滚与失败不记账
+├── OperationLogTest                # 操作审计：26 类写操作都留痕 / IP 取真实客户端 / 回滚与失败不记账
 ├── PaginationLimitTest             # 分页全局上限（从 Mapper 层验证插件兜底）
 ├── ProfileDevConfigTest            # dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单
 ├── ProfileProdConfigTest           # prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量
@@ -953,7 +987,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 ## 接口列表
 
-共 **51 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
+共 **53 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
 具体到角色见下方「接口 × 角色权限矩阵」。
 
 | # | 方法 | 路径 | 说明 | 是否需要登录 |
@@ -1009,19 +1043,21 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 49 | POST | `/admin/favorite` | 新建收藏 | 是（ADMIN） |
 | 50 | PUT | `/admin/favorite/{id}` | 编辑收藏（标题 / 地址 / 备注 / 分组 / 排序 / 显示状态） | 是（ADMIN） |
 | 51 | DELETE | `/admin/favorite/{id}` | 删除收藏（逻辑删除） | 是（ADMIN） |
+| 52 | GET | `/about` | 关于页信息（单条对象；**只含一行**，走 Redis 缓存） | 否 |
+| 53 | PUT | `/admin/about` | 保存关于页信息（**单条更新，没有新建/删除**） | 是（ADMIN） |
 
-**共 51 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
+**共 53 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
 用本地磁盘存储时，上传的图片通过 `GET /uploads/**` 公开读取（无需登录）。
 
 ## 接口 × 角色权限矩阵
 
 三种访问身份：**游客**（不带 token）、**普通用户**（GUEST + 合法 token）、**管理员**（ADMIN + 合法 token）。
 
-> **这张表应当覆盖上面全部 51 个接口**，账是这么对的：**15 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
-> `GET /article/page` `stats` `archive` `rss` `{id}`、`GET /category/list` `tag/list` `comment/list` `link/list` `project/list` `favorite/list`、`POST /comment`）
-> **+ 1 个只需登录**（`GET /auth/me`）**+ 35 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
+> **这张表应当覆盖上面全部 53 个接口**，账是这么对的：**16 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
+> `GET /article/page` `stats` `archive` `rss` `{id}`、`GET /category/list` `tag/list` `comment/list` `link/list` `project/list` `favorite/list` `about`、`POST /comment`）
+> **+ 1 个只需登录**（`GET /auth/me`）**+ 36 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
 > `/admin/tag/**` 4 + `/admin/comment/**` 3 + `/admin/category/**` 4 + `/admin/link/**` 4 +
-> `/admin/project/**` 4 + `/admin/favorite/**` 4 + `POST /upload` 1）= 51。
+> `/admin/project/**` 4 + `/admin/favorite/**` 4 + `/admin/about` 1 + `POST /upload` 1）= 53。
 > 以后加接口时这两处要一起改 —— 少一行不会有任何报错，只会让人在这张表里找不到那个接口的权限。
 
 | 接口 | 游客 | GUEST | ADMIN |
@@ -1037,6 +1073,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `GET /link/list` | ✅ | ✅ | ✅ |
 | `GET /project/list` | ✅ | ✅ | ✅ |
 | `GET /favorite/list` | ✅ | ✅ | ✅ |
+| `GET /about` | ✅ | ✅ | ✅ |
 | `GET /article/archive` | ✅ | ✅ | ✅ |
 | `GET /article/rss` | ✅ | ✅ | ✅ |
 | `GET /comment/list`（已通过） | ✅ | ✅ | ✅ |
@@ -1051,6 +1088,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `/admin/link/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/project/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/favorite/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
+| `PUT /admin/about` （只有这一个） | ❌ 401 | ❌ 403 | ✅ |
 | `POST /upload` | ❌ 401 | ❌ 403 | ✅ |
 | `GET /uploads/**`（本地存储的图片） | ✅ | ✅ | ✅ |
 
@@ -1411,6 +1449,7 @@ verify(spyArticleMapper, times(1)).selectById(articleId);   // 12 个线程 -> �
 | 友链 | 新建 / 编辑 / 删除 | `CREATE_LINK`、`UPDATE_LINK`、`DELETE_LINK` |
 | 项目 | 新建 / 编辑 / 删除 | `CREATE_PROJECT`、`UPDATE_PROJECT`、`DELETE_PROJECT` |
 | 收藏 | 新建 / 编辑 / 删除 | `CREATE_FAVORITE`、`UPDATE_FAVORITE`、`DELETE_FAVORITE` |
+| 关于页 | 保存（只有这一种） | `UPDATE_ABOUT`（`target_id` 恒为 1） |
 
 ### 每条记录有哪些字段，为什么
 
@@ -1497,6 +1536,7 @@ operation_log 表（异步完成，请求早就返回了）
 | `friend_link` | 友情链接（含显示/隐藏） | `idx_status_sort(status, sort)` | Flyway `V7__create_friend_link_table.sql` |
 | `project` | 项目展示（含显示/隐藏、技术栈） | `idx_status_sort(status, sort)` | Flyway `V8__create_project_table.sql` |
 | `favorite` | 收藏（含分组、显示/隐藏） | `idx_status_sort(status, sort)` | Flyway `V9__create_favorite_table.sql` |
+| `about` | 关于页信息（**全表只有一行，`id` 恒为 1**） | 主键 `id`（不需要别的索引） | Flyway `V10__create_about_table.sql`（含那一行的 INSERT） |
 | `flyway_schema_history` | Flyway 自己的迁移记录表 | —— | Flyway 自动创建 |
 
 > `article` 上四个索引看着多，其实每个都有明确的归属，缺了会有可量化的退化：
@@ -1533,6 +1573,11 @@ operation_log 表（异步完成，请求早就返回了）
 > 那张表是"博客文章的栏目"（有唯一索引、删之前要数文章），
 > 若收藏去引用它，删掉一个只被收藏用到的分组之后，收藏的分组名就变成查不到的 id。
 > 完整推导写在 `V9__create_favorite_table.sql` 里。
+>
+> `about`（关于页，V10）是**另一类**：它只有一行、没有 `deleted`、没有 `create_time`。
+> 它是全站唯一一张"删掉某一行的需求不存在"的表（不要了就清空字段），
+> 所以不需要"逻辑删除"这个概念本身；代价与兜底是
+> **缺行时读返回空壳、保存时自愈写回**（见 `AboutServiceImpl` 与 `AboutTest` ⑫）。
 >
 > `project`（项目，V8）与 `friend_link` 完全同类：没有唯一索引（项目名不需要唯一）、
 > 用逻辑删除。它的 `tech`（技术栈）是**逗号分隔的字符串而不是关联表** ——
@@ -2478,10 +2523,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 352 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 369 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**34 个测试类，352 个用例，全部通过：**
+**35 个测试类，369 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -2514,12 +2559,13 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleTagTest` | 12 | 文章打标签与按标签筛选：覆盖式语义（换标签旧的不留）、**校验先于写入**（失败不动原有标签）、去重、草稿不泄漏、标签不存在返回空页、列表带标签、删文章清关联、打标签后标签云计数立刻 +1 |
 | `CommentTest` | 17 | 评论：游客可发但**默认待审核**、传 `status=0` 也拿不到待审核内容、审核通过才可见、草稿不能评论、XSS 转义、**常见符号（→ — … ©）不被转义**、**极端输入先转义再截断不报 500**、响应里带 `createTime`、公开响应体不含邮箱与 IP、后台带邮箱/IP/文章标题、审核参数校验、逻辑删除（原生 SQL 验物理行）、权限、限流 429、正序与分页 |
 | `CategoryAdminTest` | 11 | 分类：新建/编辑/改名后前台立刻生效、重名与空格、**分类下有文章时拒绝删除**、**删掉后同名分类能重建**（名字被释放）、**文章逻辑删除后分类就能删**（守"手写 COUNT 要自己加 deleted=0"）、权限、前台仍公开 |
-| `OperationLogTest` | 17 | 操作审计：管理动作都留痕（含标签、评论、分类、友链、项目、收藏的增删改）、发表评论**不**记、回滚与失败不记账、审计行不含明文密码 |
+| `OperationLogTest` | 18 | 操作审计：管理动作都留痕（含标签、评论、分类、友链、项目、收藏的增删改，以及关于页的保存）、发表评论**不**记、回滚与失败不记账、审计行不含明文密码 |
 | `FriendLinkTest` | 20 | 友链：前台只含"显示"的（隐藏的不出现）、排序 sort + id 双段稳定、后台增删改（**清空可选字段真的写成 NULL**）、非法 URL（含 `javascript:`）与非法状态 400、逻辑删除（原生 SQL 验物理行与 deleted）、权限 401/403、缓存命中 / 写操作推进版本号 / key 带版本号且有 TTL |
 | `ProjectTest` | 23 | 项目：同友链那一整套，外加**本项目特有**的"在线地址与仓库地址至少填一个"（两个都空被拒、只填一个合法、编辑时把两个都清空被拒**且库里的旧值分毫未动**）、封面与简介与技术栈的长度边界 |
 | `FavoriteTest` | 21 | 收藏：同友链那一整套，外加 **`category` 是自由文本分组名**的语义（带斜杠合法、同一分组可多条、空串归一化成 NULL、只卡长度 50）、地址必填与格式白名单、备注与标题的长度边界 |
+| `AboutTest` | 16 | 关于页：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 返回空壳且保存能写回 / POST 是真 405）、迁移脚本已插好那一行、昵称与头像与 GitHub 与邮箱与长文本的长度与格式边界、一次性清空全部可选字段真的写成 NULL、权限 401/403、缓存命中与保存后失效 |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **352** | |
+| **合计** | **369** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

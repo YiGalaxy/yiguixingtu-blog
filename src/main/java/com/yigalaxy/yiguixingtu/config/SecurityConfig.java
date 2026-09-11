@@ -213,6 +213,9 @@ public class SecurityConfig {
                             "/project/list",
                             // 收藏列表：前台"收藏"页要用。同样只返回 status = 1 的那些
                             "/favorite/list",
+                            // 关于页信息：前台关于页 / 导航栏要用。它是单条对象（不是列表），
+                            // 所以路径就是 /about 本身，没有 /list 后缀
+                            "/about",
                             "/comment/list"      // 评论列表（只返回【已通过】的评论，状态在 Service 里写死）
                     ).permitAll();
 

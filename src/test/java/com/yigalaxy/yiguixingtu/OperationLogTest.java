@@ -19,6 +19,7 @@ import com.yigalaxy.yiguixingtu.music.entity.Music;
 import com.yigalaxy.yiguixingtu.music.mapper.MusicMapper;
 import com.yigalaxy.yiguixingtu.project.entity.Project;
 import com.yigalaxy.yiguixingtu.project.mapper.ProjectMapper;
+import com.yigalaxy.yiguixingtu.setting.entity.SiteSetting;
 import com.yigalaxy.yiguixingtu.tag.entity.Tag;
 import com.yigalaxy.yiguixingtu.tag.mapper.TagMapper;
 import com.yigalaxy.yiguixingtu.user.entity.User;
@@ -864,6 +865,36 @@ class OperationLogTest extends AbstractIntegrationTest {
         //    所以这条记录也不能被当成"文件已被清理"的凭据。
         assertTrue(deleteLog.getDetail().contains(secondTitle),
                 "删除记录里必须保留曲名快照，实际=" + deleteLog.getDetail());
+    }
+
+    @Test
+    @DisplayName("⑳ 站点设置的保存会留痕：对象类型 SETTING、target_id 恒为 1，且 detail 里带上了评论开关")
+    void settingUpdate_shouldBeAudited() throws Exception {
+        String siteName = mark + "-审计站点名";
+
+        // 特意在这次保存里【把评论关掉】：这个动作影响所有访客，
+        // 而事后翻审计时最需要一眼看出"那次保存有没有顺手关掉评论"
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"siteName\":\"" + siteName + "\",\"commentEnabled\":false,\"pageSize\":10}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog log = awaitLog("UPDATE_SETTING", SiteSetting.SINGLE_ROW_ID);
+        assertNotNull(log, "保存站点设置应当留下 UPDATE_SETTING 审计");
+
+        // 【与 ⑱ 关于页同一个用法】站点设置也是"只有一行"，
+        // 所以按 target_type = 'SETTING' 查就能得到完整历史，连 id 条件都不用加
+        assertEquals("SETTING", log.getTargetType(), "对象类型应当是 SETTING");
+        assertEquals(SiteSetting.SINGLE_ROW_ID, log.getTargetId(), "单条记录的 target_id 恒为 1");
+        assertEquals(admin.getUsername(), log.getUsername(), "要记下是谁保存的");
+        // detail 里记站点名（最能指认"这是哪个站的设置"）与评论开关的状态
+        assertTrue(log.getDetail().contains(siteName),
+                "detail 里应当有站点名，实际=" + log.getDetail());
+        assertTrue(log.getDetail().contains("评论关闭"),
+                "detail 里应当写明评论被关掉了 —— 它是会影响到所有访客的开关，"
+                        + "只记站点名的话事后看不出这次保存改变了什么。实际=" + log.getDetail());
     }
 
     // ================================================================

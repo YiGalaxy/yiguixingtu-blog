@@ -185,6 +185,24 @@ public class RedisConfig {
     public static final String CACHE_MUSIC_LIST = "music:list";
 
     /**
+     * 站点设置的缓存名。
+     *
+     * 【为什么它值得缓存 —— 它的读法比前面任何一个模块都频繁】
+     *   其余模块的缓存是"某个页面要用"（音乐页、友链页各读各的），
+     *   而这份数据驱动的是【整站的外壳】：页眉的站点名、页脚的版权与备案号、
+     *   首页的公告与每页条数、文章页的评论开关 ——
+     *   也就是【每一次页面渲染都要读它】，包括错误页和 404 页。
+     *   而它只在管理员手工改的时候才变，典型的"读多写极少"。
+     *
+     * 【key 仍然只用版本号】这份数据只有一份、没有参数（和 about:detail 一样）；
+     *   保存会推进版本号，所以"改完立刻生效"同样成立。
+     *   它与友链 / 项目 / 收藏 / 关于 / 音乐共用 ContentCacheVersion 那一个计数器
+     *   （共用的取舍见 ContentCacheVersion 的类注释：宁可多作废一次，
+     *    也不多养一套要维护、要清理、要写测试的状态）。
+     */
+    public static final String CACHE_SITE_SETTING = "setting:detail";
+
+    /**
      * 统计结果的缓存时长：60 秒。
      * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
      * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
@@ -343,6 +361,8 @@ public class RedisConfig {
                 .withCacheConfiguration(CACHE_ABOUT, baseConfig)
                 // 音乐列表也是列表，TTL 与序列化规则和上面几个完全一样，所以同样走 baseConfig
                 .withCacheConfiguration(CACHE_MUSIC_LIST, baseConfig)
+                // 站点设置是单条对象（和 about:detail 一样），TTL 与序列化规则也没有差异
+                .withCacheConfiguration(CACHE_SITE_SETTING, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_ARCHIVE, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_RSS, baseConfig)
                 .build();

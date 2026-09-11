@@ -876,8 +876,9 @@ class OperationLogTest extends AbstractIntegrationTest {
         // 音乐是【逻辑删除】：行虽然还在表里，但所有走 Mapper 的查询都看不到了
         // （@TableLogic 会自动加 deleted = 0）——"删掉的是哪一首"这个问题，
         // 在不专门去翻原生 SQL 的情况下，只有这条审计记录能回答。
-        // ⚠️ 另注：删除【不】删磁盘上的音频文件（见 Music 实体注释），
-        //    所以这条记录也不能被当成"文件已被清理"的凭据。
+        // ⚠️ 另注：磁盘上的音频文件是删还是不删，取决于"有没有别处还在引用它"
+        //    （见 MusicServiceImpl.delete），所以这条记录只说明"这首歌被删了"，
+        //    不能当成"文件已被清理"的凭据 —— 那件事由 MusicFileCleanupTest 覆盖。
         assertTrue(deleteLog.getDetail().contains(secondTitle),
                 "删除记录里必须保留曲名快照，实际=" + deleteLog.getDetail());
     }

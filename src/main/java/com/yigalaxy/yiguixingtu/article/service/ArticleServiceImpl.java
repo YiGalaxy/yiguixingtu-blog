@@ -27,14 +27,13 @@ import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
 import com.yigalaxy.yiguixingtu.config.RedisConfig;
+import com.yigalaxy.yiguixingtu.music.mapper.MusicMapper;
 import com.yigalaxy.yiguixingtu.upload.UploadProperties;
 import com.yigalaxy.yiguixingtu.upload.UploadedFileCleaner;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -128,6 +127,17 @@ public class ArticleServiceImpl implements ArticleService {
      */
     private final UploadProperties uploadProperties;
 
+    /**
+     * 音乐 Mapper：级联删文件时用来问"这个上传文件还有没有【还在的曲目】在用"。
+     *
+     * 【为什么文章模块要碰音乐的表】音频与图片都在同一个静态目录下
+     * （uploads/music/ 与 uploads/cover/），而文章正文里可以嵌音频地址 ——
+     * 那这个文件就不只属于音乐了。详见 referencedByOtherArticles 的注释。
+     * 跨模块用对方的 Mapper 查一次在本项目有先例（本类就注入 CategoryMapper 取分类名），
+     * 比为此再造一层"跨模块服务"直白得多（SQL 本身写在 MusicMapper 上，归属清楚）。
+     */
+    private final MusicMapper musicMapper;
+
     /** 浏览量计数器：详情页只写它（Redis），落库交给 ViewCountSyncTask */
     private final ArticleViewCounter viewCounter;
 
@@ -161,6 +171,7 @@ public class ArticleServiceImpl implements ArticleService {
                               ArticleAttachmentMapper articleAttachmentMapper,
                               UploadedFileCleaner uploadedFileCleaner,
                               UploadProperties uploadProperties,
+                              MusicMapper musicMapper,
                               com.yigalaxy.yiguixingtu.tag.service.TagService tagService) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
@@ -171,6 +182,7 @@ public class ArticleServiceImpl implements ArticleService {
         this.articleAttachmentMapper = articleAttachmentMapper;
         this.uploadedFileCleaner = uploadedFileCleaner;
         this.uploadProperties = uploadProperties;
+        this.musicMapper = musicMapper;
         this.tagService = tagService;
     }
 
@@ -665,12 +677,15 @@ public class ArticleServiceImpl implements ArticleService {
      *
      * 二、★ 怎么判断"一张图还有没有别的文章在用"（这是全篇的核心）
      *   把 URL 里 {@code /uploads/} 之后的那一段取出来（叫它 key，
-     *   形如 {@code cover/2026/09/3f2b....png}），然后去问两件事：
+     *   形如 {@code cover/2026/09/3f2b....png}），然后去问三件事：
      *     · article 表里（deleted = 0 且 id <> 本文）还有没有别的行的
      *       cover 或 content 里出现这段 key？
      *     · article_attachment 表里（article_id <> 本文）还有没有别的行的
      *       url 里出现这段 key？
-     *   两个计数都为 0，才认为"这个文件是这篇文章独占的"，可以删。
+     *     · music 表里（deleted = 0）还有没有别的曲目的 url 里出现这段 key？
+     *       （音频与图片同在 /uploads/ 下，文章正文里可以嵌音频地址 —— 见
+     *        referencedByOtherArticles 的注释里那条真实会踩的坑）
+     *   三个计数都为 0，才认为"这个文件是这篇文章独占的"，可以删。
      *
      *   为什么比对 key 而不是整条 URL：正文里的地址可能是绝对形式，
      *   也可能是相对形式（取决于当时 app.upload.base-url 的配置），
@@ -702,12 +717,15 @@ public class ArticleServiceImpl implements ArticleService {
      *   ④ 删附件行、逻辑删除文章、清标签关联、失效缓存、记审计（都在事务里）
      *   ⑤ 事务提交后再删文件（见第三点）
      *
-     * 五、与 music 模块的差别（免得读者以为是漏了）
-     *   music 删歌时【刻意不删】磁盘上的 mp3（见 Music 实体注释），
-     *   理由同样是"文件可能被共用 + 删除不可逆"。附件这里反过来做，
-     *   是因为附件的文件是【一次性】的（UUID 命名，只由那次上传产生），
-     *   而"不断编辑 + 100MB 量级"会让磁盘只涨不落 ——
-     *   但前提仍然是"先确认没有别人在用"，也就是上面第二点。
+     * 五、与 music 模块的关系（两边现在是同一套规则，这里免得读者以为是漏了）
+     *   music 删歌时【也】会清磁盘上的 mp3 —— 而且查的是同样这三张表
+     *   （曾经相反：那时它只标记数据库行、文件留着不删；2026-09 改了，
+     *    推导见 MusicServiceImpl.delete 的长注释）。
+     *   两侧一致之后，"从哪一侧删会坏、从另一侧删不会坏"这种要靠运气的问题
+     *   就不存在了 —— 引用检查必须覆盖【所有可能引用上传文件的表】，
+     *   而这三张表就是全部（article / article_attachment / music）。
+     *   ⚠️ 差别只剩一处：music 的 url 允许 http(s) 外链，而附件的 url 必须在本站
+     *   上传目录内，所以那边多一个"不是我们的地址就跳过"的分支。
      * =====================================================================
      */
     @Override
@@ -955,13 +973,23 @@ public class ArticleServiceImpl implements ArticleService {
     }
 
     /**
-     * 这个文件还有没有【别的文章】在用？
+     * 这个上传文件还有没有【别处在用】？
      *
-     * 两张表各查一次（文章的正文/封面 +文章的附件），
-     * 任何一个计数大于 0 就算"还有人用"。
-     * 两条 SQL 的写法、为什么用 LOCATE、为什么比对 key 而不是整条 URL，
-     * 都写在 ArticleMapper.countOthersReferencing 与
-     * ArticleAttachmentMapper.countOthersReferencing 上。
+     * 【三张表各查一次，任何一个计数大于 0 就算"还有人用"】
+     *   ① article             —— 别的文章的正文/封面（ArticleMapper.countOthersReferencing）
+     *   ② article_attachment  —— 别的文章的附件行（ArticleAttachmentMapper.countOthersReferencing）
+     *   ③ music               —— 还在的曲目（MusicMapper.countReferencing）
+     *
+     * 【③ 是 2026-09 补上的，它对应的坑值得记一笔】
+     *   音频地址是同源的 {@code /uploads/music/...}，站长完全可能既把它录进音乐列表、
+     *   又在某篇文章正文里嵌一段 {@code <audio src="...">}（从音乐列表复制地址最自然）。
+     *   只查文章那两张表的话，删这篇文章会得出"没人用这个文件"的结论 ——
+     *   然后把音乐列表里那首歌的音频删掉：歌还在、点开播不了，文件还回不来。
+     *   而删歌那边（MusicServiceImpl）查的是同样这三张表，两侧规则对称，
+     *   才不会出现"从哪一侧删会坏、从另一侧删不会坏"这种要靠运气的问题。
+     *
+     * 三条 SQL 的写法、为什么用 LOCATE、为什么比对 key 而不是整条 URL，
+     * 都写在各自 Mapper 的方法上（SQL 放在"它读的那张表"对应的 Mapper 里）。
      *
      * ⚠️ 判断偏保守（宁可认为"还有人用"）：任何形态的字符串包含都算引用。
      *   理由见 remove 的长注释第二点 —— 误删不可逆，而多留一个文件只是浪费磁盘。
@@ -970,66 +998,30 @@ public class ArticleServiceImpl implements ArticleService {
      * @param articleId 当前正在处理的文章 id（它自己不算"别人"）
      */
     private boolean referencedByOtherArticles(String key, Long articleId) {
-        long inArticles = articleMapper.countOthersReferencing(articleId, key);
-        if (inArticles > 0) {
+        if (articleMapper.countOthersReferencing(articleId, key) > 0) {
             return true;
         }
-        return articleAttachmentMapper.countOthersReferencing(articleId, key) > 0;
+        if (articleAttachmentMapper.countOthersReferencing(articleId, key) > 0) {
+            return true;
+        }
+        // 曲目表：它没有"要撇开的那篇文章"这个概念，所以是另一个不带排除参数的方法
+        return musicMapper.countReferencing(key) > 0;
     }
 
     /**
      * 在【当前事务提交之后】删除这些物理文件；没有事务时立刻删。
      *
-     * 【为什么要等提交】见 remove 的长注释第三点：
-     *   删除文件不可逆，而数据库事务可能回滚。先提交、再删文件，
-     *   最坏的结果只是"留下一个没被引用的文件"（日志里有记录、可以人工清理）；
-     *   反过来则可能出现"文章还在、图却没了"的裂图，而且无法恢复。
-     *
-     * 【为什么用 TransactionSynchronizationManager 而不是 @TransactionalEventListener】
-     *   项目里的操作审计用的是"发事件 + @TransactionalEventListener(AFTER_COMMIT)"
-     *   （见 audit 包），那套更解耦，但它有两个这里不需要的属性：
-     *     ① 它是异步的（@Async）：审计晚几毫秒没关系，但文件删除要的是
-     *        "确定发生过"，同步执行才好断言、出错也好记日志
-     *     ② 事件的接收方是按类型广播的：这里只是"提交后干一件事"，
-     *        没必要为此定义事件类型 + 监听器两个类
-     *   TransactionSynchronization 是 Spring 提供的同一个机制的更轻形式，
-     *   语义完全一致（提交后回调），代码就在调用点旁边，读起来是连贯的。
-     *
-     * 【为什么有"没有事务就立刻删"这个分支】
-     *   本类的 create/update/remove 都标了 @Transactional，正常不会走到它。
-     *   但"方法被非事务地调用"是完全可能的（将来有人把注解去掉、
-     *   或者有别的入口直接调 Service）。如果没有这个分支，
-     *   那种情况下文件就永远不会被删，而且是【静默】的 ——
-     *   判断标准很简单：有事务同步就注册（事务语义优先），
-     *   没有就当场做（总比什么都不做强）。
-     *
-     * 【失败了会怎样】uploadedFileCleaner.deleteAll 会逐个 try-catch，
-     *   删不掉的只记日志、不往上抛：这时候事务已经提交、接口也已经返回，
-     *   抛出去没有任何人能补救，只会把一次成功的操作变成 500
-     *   （用户以为没删成功，重试一次收到"文章不存在"）。
+     * 【实现搬到了 UploadedFileCleaner.deleteAfterCommit】
+     *   因为"什么时候才允许动磁盘"这条规则不只文章用：删歌曲
+     *   （MusicServiceImpl.delete）需要完全一样的时机判断，
+     *   而判断错的方向是不可逆的（文件删了就回不来）。
+     *   收在 upload 包里之后，各调用点只表达"把这些文件清理掉"，
+     *   完整推导（为什么必须等提交、为什么不用事件、没有事务时怎么办）写在那边。
      *
      * @param objectKeys 要删除的对象 key（可为空/为 null，方法会自己兜住）
      */
     private void deleteFilesAfterCommit(Collection<String> objectKeys) {
-        if (objectKeys == null || objectKeys.isEmpty()) {
-            return;
-        }
-        // 复制一份：回调是在事务提交那一刻执行的，那时入参列表可能已经被复用/清空。
-        // 这个列表是本地变量、不会跨请求共享，但"传给异步/延迟执行的代码前先复制"
-        // 是一条值得坚持的习惯（项目里 IdempotencyService 也是同样的处理）
-        List<String> snapshot = List.copyOf(objectKeys);
-
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    uploadedFileCleaner.deleteAll(snapshot);
-                }
-            });
-        } else {
-            log.info("当前没有活动事务，立即删除文件（本次共 {} 个）", snapshot.size());
-            uploadedFileCleaner.deleteAll(snapshot);
-        }
+        uploadedFileCleaner.deleteAfterCommit(objectKeys);
     }
 
     // =================================================================

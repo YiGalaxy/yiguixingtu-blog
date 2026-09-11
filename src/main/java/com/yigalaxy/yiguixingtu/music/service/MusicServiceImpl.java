@@ -2,6 +2,8 @@ package com.yigalaxy.yiguixingtu.music.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.yigalaxy.yiguixingtu.article.mapper.ArticleAttachmentMapper;
+import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
 import com.yigalaxy.yiguixingtu.audit.AuditTarget;
 import com.yigalaxy.yiguixingtu.audit.OperationAction;
 import com.yigalaxy.yiguixingtu.audit.OperationLogRecorder;
@@ -13,6 +15,7 @@ import com.yigalaxy.yiguixingtu.music.dto.MusicForm;
 import com.yigalaxy.yiguixingtu.music.dto.MusicVO;
 import com.yigalaxy.yiguixingtu.music.entity.Music;
 import com.yigalaxy.yiguixingtu.music.mapper.MusicMapper;
+import com.yigalaxy.yiguixingtu.upload.UploadedFileCleaner;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
@@ -39,9 +42,10 @@ import java.util.stream.Collectors;
  *    为什么不限得更死（比如 2000 字）：一份带逐句时间戳的 LRC 很容易超过 2000 字，
  *    卡在那里会让正当的输入被拒，而它只被当文本存与渲染。
  *
- * ③ ⚠️ 删除【不】删磁盘上的音频文件
- *    逻辑删除只标记数据库行。为什么不去删文件，见 Music 实体的注释
- *    （一句话：同一个文件可能被多条记录引用，而删文件不可逆 —— 猜错的代价太大）。
+ * ③ ⚠️ 删除时【会】把磁盘上的音频文件清掉 —— 但只在确认没有别人引用它之后
+ *    这条在 2026-09 之前是反过来的（当时刻意不删文件、只标记数据库行）。
+ *    改掉的原因与判断依据见 delete 方法的长注释（一句话：音乐的文件实际上
+ *    与记录一一对应，而"只标记不删"会让 uploads/music/ 只涨不落）。
  *
  * 【其余逐行同构】排序与状态缺省（新建给默认值、编辑保持原值）、
  * LambdaUpdateWrapper 显式 SET（保证"清空"真的写成 NULL）、
@@ -81,12 +85,46 @@ public class MusicServiceImpl implements MusicService {
     /** 操作审计：后台的增删改都要留痕 */
     private final OperationLogRecorder operationLogRecorder;
 
+    /**
+     * 「已上传文件」这一侧的工具：把 url 翻译成对象 key、按 key 删文件、
+     * 并且保证删除发生在【事务提交之后】（见 UploadedFileCleaner.deleteAfterCommit）。
+     * 它属于 upload 包：音乐模块只说"这个地址对应的文件要不要清掉"，
+     * 字符串处理与磁盘操作不在业务代码里。
+     */
+    private final UploadedFileCleaner uploadedFileCleaner;
+
+    /**
+     * 文章 Mapper：用来问"有没有文章的正文/封面引用了这个音频地址"。
+     *
+     * 【为什么音乐模块要碰文章的表】音频地址是同源的 {@code /uploads/music/...}，
+     *   而文章正文是一段 Markdown —— 站长完全可以在里面嵌一段
+     *   {@code <audio src="/uploads/music/xxx.mp3">}（本站上传的音频、
+     *   本站的静态映射，嵌进去就能播）。那这条音频文件就不再是"音乐专属"的了。
+     *   跨模块直接用对方 Mapper 查询在本项目里有先例：ArticleServiceImpl 就注入
+     *   CategoryMapper 来取分类名 —— 单体的一个应用里，这比再造一层"跨模块服务"
+     *   要直白得多（SQL 本身写在 ArticleMapper 上，归属仍然清楚）。
+     */
+    private final ArticleMapper articleMapper;
+
+    /**
+     * 附件 Mapper：用来问"有没有文章的【附件行】引用了这个音频地址"。
+     * 附件的地址只要求落在本站上传目录之内、没有强制在 attachment/ 子目录，
+     * 所以理论上可以指向 music/ 下的文件 —— 见 ArticleAttachmentMapper.countReferencing。
+     */
+    private final ArticleAttachmentMapper articleAttachmentMapper;
+
     public MusicServiceImpl(MusicMapper musicMapper,
                             ContentCacheVersion contentCacheVersion,
-                            OperationLogRecorder operationLogRecorder) {
+                            OperationLogRecorder operationLogRecorder,
+                            UploadedFileCleaner uploadedFileCleaner,
+                            ArticleMapper articleMapper,
+                            ArticleAttachmentMapper articleAttachmentMapper) {
         this.musicMapper = musicMapper;
         this.contentCacheVersion = contentCacheVersion;
         this.operationLogRecorder = operationLogRecorder;
+        this.uploadedFileCleaner = uploadedFileCleaner;
+        this.articleMapper = articleMapper;
+        this.articleAttachmentMapper = articleAttachmentMapper;
     }
 
     // =================================================================
@@ -192,6 +230,53 @@ public class MusicServiceImpl implements MusicService {
         log.info("编辑音乐: id={}, {} -> {}", id, exist.getTitle(), title);
     }
 
+    /**
+     * 删除音乐（逻辑删除数据库行），并顺手清掉它独占的音频文件。
+     *
+     * =====================================================================
+     * 【2026-09 的行为变化：原来"删歌不删文件"，现在会删】
+     *
+     * 一、为什么改（原来那条理由为什么不再站得住）
+     *   原来不删的理由是"同一个文件可能被多条记录引用，而删文件不可逆"
+     *   （见旧版本的 Music 实体注释）。但对着代码看，这个风险其实是可控的：
+     *     · 音乐的 url 由站长手动填，两条记录共用同一个地址只可能来自
+     *       "复制一条改名字忘了换地址"这类手滑，不是正常流程；
+     *     · 而"只标记不删"的代价是确定的：uploads/music/ 只涨不落，
+     *       反复试听、换歌就会不断堆积几百 KB～20MB 的孤儿文件，
+     *       而它们是【没有任何入口能再访问到】的死数据。
+     *   ⇒ 所以改成"能判断就判断，判断完再删"：把不可逆的那部分风险，
+     *     用一次引用检查消掉，而不是用"永远不删"来回避。
+     *
+     * 二、★ 删之前必须问清的三件事（任何一件为真就不删文件）
+     *   ① 还有别的【曲目】用着这个文件吗？—— music 表内查（MusicMapper.countOthersReferencing）
+     *   ② 有【文章】在正文或封面里引用了这个地址吗？—— 正文可以嵌
+     *      {@code <audio src="/uploads/music/...">}（ArticleMapper.countReferencing）
+     *   ③ 有【文章的附件行】指向这个地址吗？—— 附件的地址只要求"在本站上传目录内"
+     *      （ArticleAttachmentMapper.countReferencing）
+     *   三处都问完、都为零，才认为这个文件是这一首歌独占的。
+     *   判断偏保守：多认一次引用只是少删一个文件（浪费点磁盘），
+     *   漏认一次就是删掉别人正在用的资源、而且【不可恢复】—— 两个方向的代价不对称。
+     *
+     * 三、url 是外链时怎么办
+     *   {@code music.url} 走的是 MEDIA_URL 白名单，允许 http(s) 外链
+     *   （音频放在自己的对象存储 / CDN 上是常见做法）。那种地址
+     *   {@code toObjectKey} 会返回 null，我们【一个字节都不碰】——
+     *   去"删"一个不属于自己的地址，轻则删错路径，重则删到别的东西上。
+     *
+     * 四、删除的时机：事务提交之后
+     *   见 UploadedFileCleaner.deleteAfterCommit 的注释：删文件不可逆、
+     *   而事务可能回滚，所以先让"数据库这一步"落地成功再动磁盘。
+     *   最坏的结果只是"行没了、文件没删掉"（留个垃圾文件 + 一条日志），
+     *   而不是"行还在、文件没了"（前台一个播不出来的曲目，且找不回文件）。
+     *
+     * 五、数据库行仍然是【逻辑删除】（deleted = 1），没有改成物理删除
+     *   两点考虑：① 审计表之外还留着一份"这首歌当时叫什么"的快照；
+     *   ② 万一站长手工恢复那一行（目前唯一的恢复方式是直接改库），
+     *      只要那个文件没被别人接手，就仍然能播 —— 这也是"引用检查"
+     *      要排除【已删除】行的原因：已删除的行不算"还有人要用"
+     *      （那首歌自己都不显示了），否则文件会永远清理不掉。
+     * =====================================================================
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void delete(Long id) {
@@ -206,8 +291,54 @@ public class MusicServiceImpl implements MusicService {
         operationLogRecorder.record(OperationAction.DELETE_MUSIC, AuditTarget.MUSIC, id,
                 "音乐=" + exist.getTitle());
 
-        log.info("删除音乐: id={}, title={}（磁盘上的音频文件不删，见 Music 实体注释）",
-                id, exist.getTitle());
+        // ---- 清理这个文件（如果它是本站的、而且没人再用）----
+        String objectKey = uploadedFileCleaner.toObjectKey(exist.getUrl());
+        if (objectKey == null) {
+            // 外链（或任何不是本项目上传目录的地址）：不碰任何文件。
+            // 这不是"漏了"，而是正确的边界 —— 我们只清理自己生成的文件
+            log.info("删除音乐: id={}, title={}（url 不是本项目的上传地址，不删除任何文件）",
+                    id, exist.getTitle());
+            return;
+        }
+
+        if (referencedByOthers(objectKey, id)) {
+            // 日志把 key 也带上：将来站长问"为什么删了歌磁盘没变小"，
+            // 这行日志能直接回答"它当时还被谁用着"
+            log.info("删除音乐: id={}, title={}（文件仍被别处引用，跳过删除）objectKey={}",
+                    id, exist.getTitle(), objectKey);
+            return;
+        }
+
+        log.info("删除音乐: id={}, title={}（音频文件将在事务提交后删除）objectKey={}",
+                id, exist.getTitle(), objectKey);
+        uploadedFileCleaner.deleteAfterCommit(List.of(objectKey));
+    }
+
+    /**
+     * 这个上传文件还有没有别的地方在用？（曲目 / 文章正文与封面 / 文章附件，三处都查）
+     *
+     * 【为什么三处都要查】见 delete 的长注释第二点。三处的 SQL 各自写在自己那张表的
+     * Mapper 上（MusicMapper / ArticleMapper / ArticleAttachmentMapper），
+     * 这里只负责把结论合起来 —— 判断规则集中在这一个方法里，读的人不用跳三个文件。
+     *
+     * 【⚠️ 与 ArticleServiceImpl.remove 里那段逻辑的关系】
+     *   那边也有一份"这个文件还有没有别人在用"的判断，但两边的"自己"不同
+     *   （那边要排除"正在删的这篇文章"，这边要排除"正在删的这首歌"），
+     *   而且查的表也不完全一样（那边不查 music 表，这边要查）。
+     *   强行抽一个共用组件就得传"我是谁、我在哪张表"这样的参数，
+     *   为一个只有几行的判断引入一层间接、反而更难读 —— 所以各自写清楚。
+     *
+     * @param objectKey 上传目录里的对象 key
+     * @param musicId   正在删除的曲目 id（它自己不算"别人"）
+     */
+    private boolean referencedByOthers(String objectKey, Long musicId) {
+        if (musicMapper.countOthersReferencing(musicId, objectKey) > 0) {
+            return true;
+        }
+        if (articleMapper.countReferencing(objectKey) > 0) {
+            return true;
+        }
+        return articleAttachmentMapper.countReferencing(objectKey) > 0;
     }
 
     // =================================================================

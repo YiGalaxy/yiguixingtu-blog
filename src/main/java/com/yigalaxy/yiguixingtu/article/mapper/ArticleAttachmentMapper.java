@@ -73,4 +73,30 @@ public interface ArticleAttachmentMapper extends BaseMapper<ArticleAttachment> {
               AND LOCATE(#{key}, url) > 0
             """)
     long countOthersReferencing(@Param("articleId") Long articleId, @Param("key") String key);
+
+    /**
+     * 数一数"有几条【附件行】引用了这个上传文件"（没有"要撇开谁"这一说）。
+     *
+     * 【它和上面那条的区别：没有 articleId 参数】
+     *   道理与 ArticleMapper.countReferencing 一样：这条的调用方是音乐模块
+     *   （删歌时判断"这个文件还有没有别人在用"），那里没有"我自己这篇文章"要排除。
+     *
+     * 【为什么删歌要去查附件表】
+     *   附件的地址只要求"落在本项目上传目录之内"（见 ArticleServiceImpl.validateAttachments），
+     *   并没有强制必须在 attachment/ 子目录里 —— 所以一条附件行的 url 理论上可以指向
+     *   {@code /uploads/music/xxx.mp3}（有人手工构造请求就能提交出这种数据）。
+     *   查一遍的成本是小表上的一条 COUNT，换来的是"删歌不会把某篇文章的附件删成 404"。
+     *   这与全局的取舍是同一条：宁可多认一次引用，不可漏认（漏认的代价不可逆）。
+     *
+     * 【为什么不用写 deleted = 0】这张表没有 deleted 列（物理删除，见 V14）。
+     *
+     * @param key 上传目录里的对象 key（不含 base-url 与 /uploads/ 前缀）
+     * @return 有几条附件行在用这个文件（0 表示附件这边没人用）
+     */
+    @Select("""
+            SELECT COUNT(*)
+            FROM article_attachment
+            WHERE LOCATE(#{key}, url) > 0
+            """)
+    long countReferencing(@Param("key") String key);
 }

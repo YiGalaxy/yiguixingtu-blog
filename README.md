@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-457%20passing-success)
+![Tests](https://img.shields.io/badge/tests-462%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-91%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **457 个集成测试全部通过**（覆盖行 91.1%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **462 个集成测试全部通过**（覆盖行 91.1%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -95,10 +95,12 @@
     代价是"传了没保存"的文件留在磁盘上，只能按目录清理 —— 比库里出现
     "指向不存在文章的附件行"要好处理得多（判断过程见 V14 迁移脚本的注释）
   - **删文章时级联清理文件**：附件行 + 物理文件、正文引用的图片、封面图都会清掉，
-    但**删之前先查"还有没有别的文章在用"**（正文 / 封面 / 附件表三处都查），
-    共用的**一律不动** —— 同一张图完全可能被两篇文章用，无脑删会把另一篇删成裂图，
+    但**删之前先查"还有没有别处还在用这个文件"**（其余文章的正文/封面、其余文章的附件行、
+    还在的曲目 —— 三张表都查），共用的**一律不动** —— 同一张图完全可能被两篇文章用，
+    音频也可能既在音乐列表里、又被某篇文章正文嵌着，无脑删会把对方删成裂图/哑巴，
     而文件删除不可逆。判定逻辑与删除时机见 `ArticleServiceImpl.remove` 的长注释，
-    用例见 `ArticleAttachmentTest` ⑬（★ 共用图不误删 + 独占图确实被删，两个方向都断言）
+    用例见 `ArticleAttachmentTest` ⑬⑭（★ 共用图不误删 + 独占图确实被删，两个方向都断言）
+    与 `MusicFileCleanupTest` ⑤（★ 反向：歌还在时删文章也不会误删）
 
 **分类**
 - 分类列表（游客可访问，走 Redis 缓存 —— 首页 SSR 每次都要用它，而它只在分类被改时才变）
@@ -274,9 +276,15 @@
   （http(s) 外链 / `/` 开头的站内路径 / 空串放行），但语义不同 ——
   用 `IMAGE_URL` 会让后来的人以为"音频地址被限制成了图片"。
   为什么不合并成一个常量，见 `common/validation/UrlPatterns` 的注释
-- ⚠️ **删除只删数据库里的那一行，磁盘上的 mp3 不删**（逻辑删除）：
-  同一个文件可能被多条记录引用，而删文件不可逆 —— 猜错的代价太大。
-  磁盘上的 `uploads/music/` 会随删除慢慢积累，需要时按目录手工清理
+- ⚠️ **删除会连带清掉磁盘上的 mp3 —— 但先确认没有别人在用**（数据库行仍是逻辑删除）：
+  删歌时按顺序问三处：① 还有别的曲目用同一个文件吗（`music.url` 没有唯一约束，
+  同一份音源被两条记录共用是可能的）② 有文章在正文/封面里引用了这个地址吗
+  （音频与图片同在 `/uploads/` 下，正文里嵌一段 `<audio src="...">` 是同源可达的）
+  ③ 有文章的附件行指向这个地址吗。三处都为零才删文件。
+  ⚠️ `url` 是 http(s) 外链时（音源放在自己的对象存储/CDN 上）不属于本站上传目录，
+  **一个字节都不碰**。判错的代价不对称：多留一个文件只是浪费磁盘，
+  漏认一次就是删掉别人正在用的资源且不可恢复 —— 所以宁可保守。
+  用例见 `MusicFileCleanupTest`（每一条都带反向断言：该留的留、该删的真的删了）
 - ⚠️ **迁移里刻意不插任何种子数据**：库里一首都没有是**正常状态** ——
   前端在列表为空时会回落成内置的那一首（`static-media/bg-music.mp3`）。
   看到 `music` 表是空的时候不要去"补数据"，也不要把空列表当成接口坏了
@@ -348,7 +356,7 @@
   文件存服务器本地磁盘，并用**具名卷**持久化。
   ⚠️ 附件响应强制 `Content-Disposition: attachment` + `nosniff`，白名单里也没有
   html / svg / xml / js —— 两道防线挡的是"在自家域名下执行脚本"（见「文件上传」章节）
-- 集成测试 **40 个类 457 个用例**，行覆盖率 **91.1%**
+- 集成测试 **41 个类 462 个用例**，行覆盖率 **91.1%**
 
 ### 🚧 规划中
 
@@ -487,9 +495,9 @@ com.yigalaxy.yiguixingtu
 └── music
     ├── MusicController                  # 前台：音乐列表（公开，只含显示中的；列表为空返回空数组）
     ├── AdminMusicController             # 后台：音乐增删改查（ADMIN）
-    ├── service/MusicService(+Impl)      # ⚠️ 删除只逻辑删库里的行，磁盘上的音频文件不删（见实体注释）
+    ├── service/MusicService(+Impl)      # ⚠️ 删歌会清音频文件，但先查三处引用（别的曲目 / 文章正文封面 / 文章附件）；外链不碰
     ├── entity/Music                     # lyrics 是 LRC 原文（TEXT），不是文件路径
-    ├── mapper/MusicMapper
+    ├── mapper/MusicMapper                # 含一条手写 COUNT（删歌时问"还有没有别的曲目用同一个文件"，要自己写 deleted = 0）
     └── dto/                             # MusicForm / MusicVO
 
 src/main/resources
@@ -538,6 +546,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── FavoriteTest                    # 收藏：同上 + ⚠️ category 是自由文本分组（斜杠合法、可重复、空串归一化成 NULL、只卡长度）
 ├── AboutTest                       # 关于页：单条记录的不变量（永远一行 / 缺行时读给空壳且保存能写回 / POST 是真 405）+ 校验边界 + 权限 + 缓存
 ├── MusicTest                       # 音乐：排序两段稳定（sort 同则按 id）/ 音频地址白名单 / 长歌词原样存取 / 空列表返回空数组 / 增删改与权限 / 缓存命中与失效
+├── MusicFileCleanupTest            # 删歌时的音频文件清理：外链不碰 / 独占的删掉 / ★ 共用的留在最后一个引用者离开 / ★ 文章引用时两侧都不误删（每条都带反向断言）
 ├── UploadAdminTest                 # 上传（图片 + 音频两套规则、大小按 type 分流、权限）
 ├── ArticleAttachmentTest           # 文章附件：白名单（拒 html/svg/js）、单文件与总容量两道闸、整体替换、详情带 attachments、级联删文件、★ 共用的图不误删、附件强制下载
 ├── LogoutTokenTest                 # 登出后旧 token 立即失效（jti 黑名单）
@@ -978,6 +987,12 @@ spring.servlet.multipart.max-request-size=110MB
 > （超了根本走不到业务代码，报的是框架异常），`UploadService` 管"这一类允许多大"。
 > 所以框架层按最大的那一类（附件 100MB，取 105MB 留余量）设，
 > 图片的 10MB 与音频的 20MB 由业务层按 `type` 拦下。
+>
+> ⚠️ **反向代理那一层还有第三道体积闸门**：Nginx 的 `client_max_body_size`
+> **默认只有 1MB**。不显式放开的话，三种上传都会在**边缘**被 413 拒掉，
+> 而后端日志里一个字都不会有（请求根本没进来）—— 这属于"上传失败，
+> 但服务端什么都没记"那类最难查的故障。站点配置里已写成 `110m`
+> （与 `max-request-size` 对齐），见「部署」章节与上线核对清单第 23 条。
 
 ##### 附件白名单里为什么**绝不能**出现 html / svg / xml / js / css
 
@@ -1026,9 +1041,12 @@ MySQL 写不进 redo/binlog、Redis 的 AOF 写不进去、应用日志也写不
   这道闸的目的是别让磁盘爆掉，不是把每一字节都算准
 - 用例见 `ArticleAttachmentTest` ⑤（把上限调小到 6KB 来测，不真写 5GB）
 
-**这里的文件是怎么被删掉的**：删文章（或编辑时移除附件）会连带清理**这篇文章独占的**
-物理文件，但**先查有没有别的文章还在用**（正文引用 / 封面 / 附件表三处都查），
-共用的一律不动 —— 完整推导见下文「文章附件」一节，用例见 `ArticleAttachmentTest` ⑬（★）。
+**这里的文件是怎么被删掉的**：文章与曲目的删除都会连带清理**它们独占的**物理文件，
+但**先查有没有别人还在用这个文件**（文章的正文/封面、文章的附件行、还在的曲目 ——
+三处都为零才删），共用的一律不动。删除动作一律安排在**事务提交之后**（删文件不可逆，
+而事务可能回滚；先提交再删文件，最坏只是留下一个没被引用的文件 + 一条日志）。
+完整推导见下文「文章附件」与「音乐」两节，用例见 `ArticleAttachmentTest` ⑬⑭（★ 共用图不误删）
+与 `MusicFileCleanupTest`。
 
 **本项目用本地磁盘存封面图、音频与附件，不用对象存储。** 理由很简单：单台 ECS +
 个人博客的量级，本地磁盘完全够用，**少一个外部依赖就少一处会失败的地方**
@@ -1282,7 +1300,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 55 | GET | `/admin/music/list` | 音乐列表（后台，**含隐藏的、不走缓存**） | 是（ADMIN） |
 | 56 | POST | `/admin/music` | 新建音乐（`url` 来自 `POST /upload?type=audio`） | 是（ADMIN） |
 | 57 | PUT | `/admin/music/{id}` | 编辑音乐（曲名 / 歌手 / 音频地址 / 封面 / 歌词 / 排序 / 显示状态） | 是（ADMIN） |
-| 58 | DELETE | `/admin/music/{id}` | 删除音乐（逻辑删除；**磁盘上的音频文件不删**） | 是（ADMIN） |
+| 58 | DELETE | `/admin/music/{id}` | 删除音乐（逻辑删除；**音频文件在确认无人引用后一并清掉**，外链不碰） | 是（ADMIN） |
 | 59 | GET | `/setting` | 站点设置（单条对象；站点名 / 首页公告 / 评论总开关 / 页脚版权与两个备案号（`icpNumber` / `policeNumber`）/ 每页文章条数，**走 Redis 缓存**） | 否 |
 | 60 | PUT | `/admin/setting` | 保存站点设置（**单条更新，没有新建/删除**；`pageSize` 上限跟文章接口同为 50） | 是（ADMIN） |
 
@@ -1847,11 +1865,13 @@ operation_log 表（异步完成，请求早就返回了）
 > （理由写在 V8 迁移脚本里）。
 >
 > `music`（音乐，V11）同样没有唯一索引（曲名当然可以重复）、用逻辑删除。
-> 它值得单独记一笔的是**两件"看着像漏了其实是有意的"**：
+> 它值得单独记一笔的是**两件容易误判的事**：
 > ① **迁移里不插任何种子数据** —— 库里一首都没有是正常状态，前端在列表为空时
 >    会回落成内置的那一首（`static-media/bg-music.mp3`）；看到空表不要去"补数据"
-> ② **删除只标记数据库行、不删磁盘上的 mp3** —— 同一个文件可能被多条记录引用，
->    而删文件不可逆。磁盘上的 `uploads/music/` 会随删除慢慢积累，需要时手工按目录清理
+> ② **删歌连不连磁盘上的 mp3，是 2026-09 变过一次的**：现在是"先查三处引用
+>    （别的曲目 / 文章正文与封面 / 文章附件），都为零才删"；外链地址不碰。
+>    旧行为是只标记数据库行、文件留着不删（靠人工按目录清）。
+>    为什么改、以及为什么"引用检查"要覆盖文章那两张表，见 `MusicServiceImpl.delete` 的长注释
 > 索引比 V7–V9 多带一个 `id`：那条查询的排序是 `sort ASC, id ASC` 两段，
 > 把 id 放进索引才能完全消掉 filesort（理由写在 V11 迁移脚本里）。
 >
@@ -2603,6 +2623,25 @@ server {
     ssl_certificate_key /etc/nginx/ssl/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
 
+    # ---- 请求体大小：上传功能必须自己放开，默认只有 1MB ----
+    #
+    # 【为什么这一行不能省】Nginx 的 client_max_body_size 默认是 **1m**。
+    #   不改的话，超过它的请求会在【边缘】就被拒掉（413），
+    #   而且后端一行日志都不会有 —— 表现是"上传失败，但服务端什么都没记"，
+    #   排查时容易一路怀疑到业务代码，其实请求压根没进来。
+    #   这个坑对三种上传都成立：图片（10MB）、音频（20MB）、附件（100MB）。
+    #   本机演练时只传过一张几十 KB 的封面，所以从来没触发过它。
+    #
+    # 【110m 是怎么来的】== 后端 spring.servlet.multipart.max-request-size（110MB）。
+    #   两层的关系与"框架层 / 业务层"完全一样：Nginx 管"请求能不能进来"，
+    #   Spring 管 multipart 解析，业务层再按 type 判"这一类允许多大"。
+    #   ⚠️ 改后端那两个限额时，这里要一起改 —— 只改后端的话，
+    #      超过 110m 的上传仍然死在这一行上。
+    #   ⚠️ Nginx 默认会把整个请求体先缓冲到磁盘（client_body_temp_path）再转发，
+    #      所以一次 100MB 的上传会额外占用 100MB 临时空间 —— 上传目录那 5GB
+    #      的预算是另一回事（见「文件上传」章节）。
+    client_max_body_size 110m;
+
     # 前端（Nuxt 容器）
     #
     # 【⚠️ /sitemap.xml、/robots.txt、/feed.xml 必须走这里，不能配成静态文件】
@@ -2789,6 +2828,8 @@ scp yiguixingtu-web/static-media/* root@服务器IP:/var/www/media/
 | 20 | **磁盘不会被日志写满** | `df -h` 看水位；`docker system df` 看镜像/卷/构建缓存占比。容器日志已配轮转（每容器上限 30MB），应用日志文件有 15 天 + 2GB 双重上限（见「备份与恢复」后面那节），但**构建缓存**会随每次 `--build` 增长，定期 `docker builder prune` 清一下 |
 | 21 | **日志文件确实写在卷里（升级后还能查）** | `docker exec yiguixingtu-prod-backend ls -l /app/logs` 应当能看到 `yiguixingtu.log` 且属主是 `app`；再 `docker compose -f docker-compose.prod.yaml up -d --force-recreate backend` → 文件仍在（守 `LOG_DIR` 指向挂载点 —— 指错的话日志会写进容器可写层，**重建即丢，而且没有任何提示**） |
 | 22 | **归档页把全部文章的内链放进了服务端 HTML** | `curl -s https://你的域名/archive \| grep -c 'href="/article/'` 应当**等于已发布文章的篇数**（后端上限 500），并且源码里能看到「20xx 年 x 月」这样的分组标题与「共 N 篇」—— 归档页是 SSR 的，它存在的意义就是"一次拿到全部内链"（爬虫不用执行 JS、站内 Ctrl+F 也能用）；只看到 `<div id="__nuxt"></div>` 说明 SSR 没生效。这一条同时守两件事：**前端真的按年月把 `GET /article/archive` 的分组渲染出来了**，以及**这个页面没有被 Nginx 配成静态文件**（和 sitemap / robots / feed.xml 一样，它属于前端的运行时路由，必须由 `location /` 转发给前端容器） |
+| 23 | **大文件上传真的穿得过 Nginx** | 后台上传一个 **>1MB** 的文件（例如 5MB 的附件）应当成功。<br>⚠️ 守的是 `client_max_body_size`：Nginx 默认只有 **1m**，不改的话图片（10MB）/ 音频（20MB）/ 附件（100MB）都会在边缘被 **413** 拒掉，而后端日志里一条都查不到。上面站点配置里已写成 `110m`（与后端 `spring.servlet.multipart.max-request-size` 对齐）—— **改后端那两个限额时要一起改这里** |
+| 24 | **附件点开是下载、图片仍然内联** | 传一个 PDF 当文章附件 → 前台点它应当是**下载**而不是在标签页里打开（响应头 `Content-Disposition: attachment`）；同时封面图要**正常显示**（不能变成下载按钮）。守的是 `UploadResponseHeaderFilter`：附件必须下载（html/svg 那类一旦被就地打开就是在自家域名下执行脚本），图片/音频必须保持内联 |
 
 #### 这份清单在本机演练过一遍（不是纸面清单）
 
@@ -2991,10 +3032,10 @@ mvn test
 
 | 维度 | 覆盖率 |
 |------|:---:|
-| 行覆盖 | **91.1%**（2,405 / 2,641） |
-| 方法覆盖 | **97.0%**（460 / 474） |
-| 指令覆盖 | **90.2%**（10,609 / 11,760） |
-| 分支覆盖 | 71.0%（670 / 944） |
+| 行覆盖 | **91.1%**（2,427 / 2,663） |
+| 方法覆盖 | **97.1%**（462 / 476） |
+| 指令覆盖 | **90.3%**（10,716 / 11,868） |
+| 分支覆盖 | 71.2%（681 / 956） |
 
 > 分支覆盖率明显低于行覆盖率，是因为大量的**参数校验分支、异常兜底分支、
 > 空值判断分支**不会被每个用例都走到——这是正常的，不必为了刷数字硬凑用例。
@@ -3008,7 +3049,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 457 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 462 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -3020,14 +3061,14 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 457 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 462 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**41 个测试类文件（其中 40 个含用例，另 1 个是无用例的基类 `AbstractIntegrationTest`），457 个用例，全部通过：**
+**42 个测试类文件（其中 41 个含用例，另 1 个是无用例的基类 `AbstractIntegrationTest`），462 个用例，全部通过：**
 
 > 统计口径（这一行别改错）：下表**每个测试类文件一行**（基类也占一行，用例数记 0），
-> 所以**行数 = `src/test/java/com/yigalaxy/yiguixingtu/` 下的 .java 文件数（41）**，
-> **各行用例数之和 = 总数（457）**。新加测试类时必须同时改这三处：
+> 所以**行数 = `src/test/java/com/yigalaxy/yiguixingtu/` 下的 .java 文件数（42）**，
+> **各行用例数之和 = 总数（462）**。新加测试类时必须同时改这三处：
 > 加一行、把该行数字填对、把「合计」与上面那句总数改掉 ——
 > 少改一处的表现是"文档里的数字和 CI 报的不一样"，而不会有任何测试变红。
 
@@ -3070,11 +3111,12 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `FavoriteTest` | 21 | 收藏：同友链那一整套，外加 **`category` 是自由文本分组名**的语义（带斜杠合法、同一分组可多条、空串归一化成 NULL、只卡长度 50）、地址必填与格式白名单、备注与标题的长度边界 |
 | `AboutTest` | 16 | 关于页：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 返回空壳且保存能写回 / POST 是真 405）、迁移脚本已插好那一行、昵称与头像与 GitHub 与邮箱与长文本的长度与格式边界、一次性清空全部可选字段真的写成 NULL、权限 401/403、缓存命中与保存后失效 |
 | `MusicTest` | 23 | 音乐：前台只含"显示"的（隐藏的不出现）、**排序两段稳定（sort 升序、sort 相同按 id 升序）**、列表为空返回空数组而不是 404、响应字段齐全（歌词是 LRC 原文、换行不丢）、**音频地址两种形态都合法（`/uploads/music/…` 与 http(s) 外链）而 `javascript:` 被拒**、曲名/歌手/歌词/地址/状态的长度与格式边界、约 5000 字歌词原样存取（守 TEXT 列不被改成短列）、增删改与逻辑删除（原生 SQL 验物理行与 deleted）、清空歌手与封面与歌词真的写成 NULL、权限 401/403、缓存命中 / 写操作推进版本号 / key 带版本号且 TTL 落在 300~360 秒（含抖动） |
+| `MusicFileCleanupTest` | 5 | 删歌时的音频文件清理：**外链地址不碰任何本地文件**（且不报错）、**独占的文件真的被删**（数据库行仍是逻辑删除 `deleted = 1`）、**★ 两首歌共用一个 mp3：删一首文件还在、删到最后一首才真删**、**★ 文章正文引用该 mp3 时删歌不删文件**（文章删掉后才清）、**★ 反向：歌还在时删文章不能删掉这个文件**（同时断言文章独占的封面确实被清，证明清理真的跑了而不是没执行） |
 | `SiteSettingTest` | 22 | 站点设置：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 给默认值且保存能写回 / POST 是真 405）、**迁移种子值读脚本原文核对**（守"上线这个功能本身不改变站点外观"）、七个字段逐个"能改、能读到、能清空"、**公安网安备案号（V13 新列）**：库里真有这一列（`information_schema` 查类型 / 可空 / 紧跟 `icp_number`）、脚本里**没有任何种子值**、能填能读能清空、50 字收下 51 被拒、保存后前台立刻读到新值（缓存 bump）、缺行兜底里是 `null`（展示类字段不编值）、**每页条数上限跟文章接口同为 50**（超了会变成"保存成功但不生效"）、**评论开关 0/1 与布尔的转换两个方向都断言**、**⑰ 评论总开关在后端真的生效**（关掉后 `POST /comment` 返回 code 403，且库里没有多出记录；再打开又能发）、权限 401/403、缓存命中与保存后失效 |
 | `DeploymentMemoryBudgetTest` | 9 | 部署配置契约（**读 `docker-compose.prod.yaml` 与 `Dockerfile`，不起 Spring 上下文**）：四个服务都必须有 `mem_limit`、上限之和要给宿主机留余量、**Dockerfile 的 ENTRYPOINT 不许带 JVM 参数**（带了会静默覆盖 `JAVA_TOOL_OPTIONS`）、三个硬上限之和必须小于 `mem_limit`、堆转储与 GC 日志必须落在挂了卷的目录里、redis 必须是 `volatile-lru`（`allkeys-lru` 会淘汰没有 TTL 的浏览量增量 = 真丢数据）、mysql 必须关 `performance_schema` 且缓冲池是 128M 的整数倍（否则被静默取整成 256M）、**数据服务的镜像必须钉住小版本**（浮动 `mysql:8` 实测拉到了四年前的 8.0.27）、YAML 开启重复键检查 |
 | `ActuatorExposureContractTest` | 4 | 管理端点的暴露面契约（`/actuator/prometheus` 在应用层是**放行**的，只能靠部署挡住）：`location /api/` 必须剥掉前缀（这也是 `/api/actuator/` 会命中后端根路径的根因）、必须有把 `/api/actuator/` 返回 404 的 location、mysql/redis 不发布任何端口且 backend/frontend 只绑 `127.0.0.1`、上线核对清单里这一项必须写出**可判定的**预期结果（404） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **457** | |
+| **合计** | **462** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

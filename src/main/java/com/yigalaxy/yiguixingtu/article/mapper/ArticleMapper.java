@@ -103,4 +103,32 @@ public interface ArticleMapper extends BaseMapper<Article> {
               AND (LOCATE(#{key}, cover) > 0 OR LOCATE(#{key}, content) > 0)
             """)
     long countOthersReferencing(@Param("articleId") Long articleId, @Param("key") String key);
+
+    /**
+     * 数一数"有几篇【未删除】的文章引用了这个上传文件"（没有"要撇开谁"这一说）。
+     *
+     * 【它和上面那条的唯一区别：没有 articleId 参数】
+     *   {@code countOthersReferencing} 是"删文章"时用的 —— 调用方本身就是一篇文章，
+     *   必须把自己排除掉（它马上就要没了，不能算成"还有人在用"）。
+     *   而这条的调用方是音乐模块：删一首歌时要问"有没有文章的正文/封面引用了这个 mp3"
+     *   （站长完全可能在正文里嵌一段
+     *   {@code <audio src="/uploads/music/xxx.mp3">} —— 那是同源可达的）。
+     *   那里没有"我自己这篇文章"要排除，所以不能复用上面那条
+     *   （给它塞一个 -1 之类的假 id 是能跑，但那是把一个"没有要排除的人"的语义
+     *    表达成魔法值，读代码的人永远不知道那个 -1 是什么意思）。
+     *
+     * 【⚠️ 同样必须手写 deleted = 0（见类注释里那条最容易踩的坑）】
+     *   @TableLogic 只注入到 MyBatis-Plus 自己生成的 SQL 里。漏掉它的表现是：
+     *   已经删掉的文章被算成"还有人在用"，于是文件永远清理不掉，而且没有任何报错。
+     *
+     * @param key 上传目录里的对象 key（不含 base-url 与 /uploads/ 前缀）
+     * @return 有几篇未删除的文章在用这个文件（0 表示文章这边没人用）
+     */
+    @Select("""
+            SELECT COUNT(*)
+            FROM article
+            WHERE deleted = 0
+              AND (LOCATE(#{key}, cover) > 0 OR LOCATE(#{key}, content) > 0)
+            """)
+    long countReferencing(@Param("key") String key);
 }

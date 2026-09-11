@@ -64,7 +64,15 @@ public class AdminMusicController {
         return Result.success();
     }
 
-    @Operation(summary = "删除音乐（逻辑删除，磁盘上的音频文件保留）")
+    /**
+     * 删除歌曲（逻辑删除数据库行）。
+     *
+     * 【磁盘上的 mp3 也会被清掉 —— 但先确认没有别人在用】
+     *   三处引用各查一次（别的曲目行 / 文章正文与封面 / 文章附件行），
+     *   全都为零才删文件；url 是 http(s) 外链时不属于本站上传目录，不碰任何文件。
+     *   为什么这么改、以及"宁可多认不可漏认"的取舍，见 MusicServiceImpl.delete 的长注释。
+     */
+    @Operation(summary = "删除音乐（逻辑删除；音频文件在确认无人引用后一并清掉）")
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable Long id) {
         musicService.delete(id);

@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # JDK 版本必须和 pom.xml 里的 <java.version>17</java.version> 一致，
       # 否则会出现"本机没问题、CI 编译不过"这种最难查的差异

@@ -1905,7 +1905,7 @@ docker exec yiguixingtu-mysql cat /var/lib/mysql/slow.log
 | 端点 | 谁能访问 | 用途 |
 |------|---------|------|
 | `/actuator/health` | 所有人（匿名） | 容器健康检查、负载均衡探活。只返回 `{"status":"UP"}`，不带数据库/Redis 细节 |
-| `/actuator/prometheus` | 匿名可达，但**只绑在 127.0.0.1** | Prometheus 抓取指标 |
+| `/actuator/prometheus` | 匿名可达，但**只绑在 127.0.0.1**，且 Nginx 把 `/api/actuator/` 挡成 404 | Prometheus 抓取指标 |
 
 **其余端点一律没开**（`beans` / `env` / `mappings` / `heapdump` …）。
 它们会把内部结构甚至内存内容吐出来，对一个公网服务来说没必要。
@@ -2009,8 +2009,20 @@ curl -s http://127.0.0.1:8082/actuator/prometheus | head -20
 > | 护栏 | 在哪 |
 > |------|------|
 > | 后端端口只绑 `127.0.0.1` | `docker-compose.prod.yaml` 里的 `"127.0.0.1:8082:8082"` |
-> | Nginx 只反代 `/api/` | README「Nginx 反向代理」那段的配置，没有 `/actuator` 的 location |
+> | **Nginx 显式把 `/api/actuator/` 返回 404** | README「Nginx 反向代理」那段里的 `location /api/actuator/ { return 404; }` |
 > | 云服务器安全组不开 8082 | 阿里云控制台 |
+>
+> ⚠️ **中间那一行是【必须的】，而且它的原因很容易想反——这里原来就写错了，留个记录：**
+>   原文写的是"Nginx 只反代 `/api/`，没有 `/actuator` 的 location"，
+>   并把它当成"所以从域名访问不到"。**这个推论是反的**：
+>   `location /api/ { proxy_pass http://127.0.0.1:8082/; }` 结尾那个 `/`
+>   表示"把匹配到的 `/api/` 前缀替换成 `/`"，也就是把剩下的部分拼到后端根路径上。
+>   于是 `/api/actuator/prometheus` 正好映射到后端那个匿名放行的 `/actuator/prometheus`。
+>   请求走的一直是 `/api/` 那一条，它根本不需要任何 `/actuator` 的 location。
+>   ⇒ 也就是说：**上面这张表原来列的三道护栏，实际只有两道在起作用。**
+>     现在补上第三道，并让 `ActuatorExposureContractTest` 盯着它别再被删掉
+>     （那个测试只能证明"文档里有这一段"，服务器上真的配了没有，
+>      仍然要靠上线核对清单第 9 条实际 curl 一次）。
 >
 > 为什么不用 JWT 保护它：抓取指标的是 Prometheus，它没有也不该有我们的 token。
 > 要求登录的实际结果只有两种 —— 要么抓不到，要么为了能抓配一个长期不过期的 token，
@@ -2346,6 +2358,33 @@ server {
         limit_req_status 429;
     }
 
+    # ---- 管理端点（/actuator/**）：必须显式挡掉 ----
+    #
+    # 【⚠️ 这一段是【必须的】，不是"多一层保险"—— 而且原因很容易想反】
+    #   上面那句 `location /api/ { proxy_pass http://127.0.0.1:8082/; }` 里，
+    #   proxy_pass 结尾的那个 `/` 表示"把匹配到的 /api/ 前缀【替换】成 /"，
+    #   也就是把剩下的部分拼到后端的【根路径】上。于是：
+    #       https://你的域名/api/actuator/prometheus  →  后端 /actuator/prometheus
+    #   而后端那个端点对匿名请求是【放行】的（抓指标的是 Prometheus，
+    #   它没有也不该有我们的 JWT，见 SecurityConfig 里那段说明）。
+    #   ⇒ 不写这一段，上面那个地址就能从公网读到接口路径、调用量、连接池占用、
+    #     JVM 内存等内部信息。
+    #
+    #   ⚠️ 这里曾经有一个想当然的推论，一共【三处】都写错了，记下来免得再犯：
+    #      "Nginx 里没有 /actuator 这个 location，所以从域名访问不到它。"
+    #      这是【反的】：请求走的一直是 /api/ 那一条，它根本不需要一个
+    #      /actuator 的 location —— 前缀被替换掉之后才拼成 /actuator/...。
+    #      （原来这句同时出现在 SecurityConfig 的注释、「可观测」章节那张
+    #        "安全护栏"表和下面核对清单第 9 条里，现已全部改正。）
+    #
+    # 这个 location 比 /api/ 更具体，Nginx 按"前缀取最长"会优先匹配它
+    # （和上面那两个 location 是同一个机制，与书写顺序无关）。
+    # 直接 return 404 而不是"反代过去再让后端拒绝"：既省一次转发，
+    # 也不给这个端点留下任何被误放行的机会。
+    location /api/actuator/ {
+        return 404;
+    }
+
     # ---- 上传的封面图：单独一段，两个"必须" ----
     # 这个 location 比 /api/ 更具体，Nginx 会优先匹配它（前缀匹配取最长）。
     location /api/uploads/ {
@@ -2451,7 +2490,7 @@ scp yiguixingtu-web/static-media/* root@服务器IP:/var/www/media/
 | 6 | 换掉引导管理员的初始密码 | 后台 → 用户管理 → 重置密码 |
 | 7 | 数据库每天自动备份 | 见下面「备份与恢复」 |
 | 8 | 后端/前端端口只绑回环，没有对公网开放 | 在服务器外 `telnet 服务器IP 8082` 与 `telnet 服务器IP 3000` 都应当连不上（`docker-compose.prod.yaml` 里已写成 `127.0.0.1:` 前缀） |
-| 9 | `/actuator/prometheus` 没有被公网看到 | 访问 `https://你的域名/api/actuator/prometheus` 应当拿不到指标（Nginx 只反代 `/api/`，正常情况打不到） |
+| 9 | `/actuator/prometheus` 没有被公网看到 | `curl -i https://你的域名/api/actuator/prometheus` 应当返回 **404**（由 Nginx 里那条 `location /api/actuator/ { return 404; }` 挡掉）。<br>⚠️ 这一项原来写的是"Nginx 只反代 `/api/`，正常情况打不到"——**那是错的**：`location /api/` 的 `proxy_pass` 结尾带 `/`，会把 `/api/actuator/...` 拼到后端根路径上，正好命中那个匿名放行的端点。所以这一条必须真的 curl 一次，不能靠"按道理应该打不到" |
 | 10 | **上传的图片在容器重建后还在** | 后台上传一张封面 → `docker compose -f docker-compose.prod.yaml up -d --force-recreate backend` → 再打开那篇文章，图片应当还能显示（守"上传目录有没有真的挂到卷上"） |
 | 11 | 图片地址是外网可访问的 | 右键封面图「复制图片地址」，在无痕窗口打开应当能看到图（守 `UPLOAD_BASE_URL` 填的是浏览器能访问到的地址） |
 | 12 | **背景视频/音乐能播** | `curl -I https://你的域名/media/bg-music.mp3` 应当返回 **200**（守"前端仓库 `static-media/` 里的文件真的传到了 `/var/www/media/`"——它们不在构建产物里，忘了传就只有 404） |

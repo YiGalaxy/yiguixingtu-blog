@@ -152,21 +152,43 @@ public class SecurityConfig {
                     // 那放行它安全吗？取决于谁能访问到它。这里的护栏不在代码里，而在部署上：
                     //   ① docker-compose.prod.yaml 里后端端口是【只绑到 127.0.0.1】的
                     //      （"127.0.0.1:8082:8082"），公网根本连不到这个端口；
-                    //   ② Nginx 只反代 /api/ 前缀，没有 /actuator 的 location，
-                    //      所以从域名访问不到它。
+                    //   ② Nginx 里必须【显式写一条】把 /api/actuator/ 返回 404 的 location
+                    //      （见 README 部署章节那份 server 块里的 location /api/actuator/）。
                     //   也就是：只有宿主机上和容器内网里能拿到它 ——
                     //   而这正是 Prometheus 所在的位置。
                     //
-                    // ⚠️ 所以这两件事必须【一起】改：谁要是把 compose 里的
-                    //    "127.0.0.1:" 前缀去掉、或者给 Nginx 加上 location /actuator/，
+                    // ⚠️⚠️ 【第 ② 条以前是错的，原文与结论都留在这里，免得再犯】
+                    //   这里原来写的是"Nginx 只反代 /api/ 前缀，没有 /actuator 的 location，
+                    //   所以从域名访问不到它"—— 这个推论是【反的】，而且后果是
+                    //   "以为有保护、其实没有"（最糟的一种错误注释：它会让下一个人
+                    //   安心地把这条防护删掉）。
+                    //   Nginx 里那句是：
+                    //       location /api/ { proxy_pass http://127.0.0.1:8082/; }
+                    //   proxy_pass 结尾带 / 的含义是"把匹配到的 /api/ 前缀【替换】成 /"，
+                    //   也就是把剩下的部分拼到后端的【根路径】上。于是：
+                    //       /api/actuator/prometheus  →  后端 /actuator/prometheus
+                    //   这恰恰就是这里放行的那个端点。
+                    //   "没有 /actuator 的 location"保护不了任何东西 ——
+                    //   请求走的一直是 /api/ 那一条，它根本不需要一个 /actuator 的 location。
+                    //   ⇒ 所以 Nginx 那一条是【必须的】，不是"多一层保险"。
+                    //     README 的核对清单第 9 条当时也是照着这个错误推论写的
+                    //     （"正常情况打不到"），已一并改正为"必须实测，应当返回 404"。
+                    //
+                    // ⚠️ 所以这几件事必须【一起】改：谁要是把 compose 里的
+                    //    "127.0.0.1:" 前缀去掉、或者删掉 Nginx 里那条 /api/actuator/，
                     //    这个端点就暴露到公网了（里面能看到接口路径、调用量、
                     //    连接池占用、JVM 内存等内部信息）。
-                    //    MetricsEndpointTest 只断言"端点能用"，
-                    //    拦不住这种部署上的改动 —— 这一条靠 README 的核对清单兜底。
+                    //    MetricsEndpointTest 断言的是"端点匿名可用"（即它确实是放行的），
+                    //    管的是应用层；部署侧那两半由 ActuatorExposureContractTest 盯着。
                     //
                     // 更严格的方案（不做，但要知道）：设置 management.server.port=8081，
                     //   把管理端点挪到另一个端口，主端口上根本没有 /actuator。
                     //   没采用的原因见 TECH_ROADMAP §9 M5 的 5.7 备注。
+                    //   顺带说一句：那个方案同时也是这个问题的【根治】——
+                    //   管理端口只绑回环，Nginx 怎么配都碰不到它，
+                    //   于是"记不记得写那条 location"就不再是安全前提了。
+                    //   现在的做法是把风险交给"文档 + 一个契约测试"，
+                    //   如果哪天觉得这层依赖太软，就该上这个方案。
                     auth.requestMatchers("/actuator/prometheus").permitAll();
 
                     // 【接口文档的路径：只在文档开着的时候才放行】

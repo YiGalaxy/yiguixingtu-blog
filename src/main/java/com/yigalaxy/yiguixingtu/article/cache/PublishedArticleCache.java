@@ -1,7 +1,11 @@
 package com.yigalaxy.yiguixingtu.article.cache;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleAttachmentVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
+import com.yigalaxy.yiguixingtu.article.entity.ArticleAttachment;
+import com.yigalaxy.yiguixingtu.article.mapper.ArticleAttachmentMapper;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
 import com.yigalaxy.yiguixingtu.category.entity.Category;
 import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
@@ -10,6 +14,8 @@ import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
 import com.yigalaxy.yiguixingtu.config.RedisConfig;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
 
 /**
  * =====================================================================
@@ -75,11 +81,26 @@ public class PublishedArticleCache {
      */
     private final com.yigalaxy.yiguixingtu.tag.service.TagService tagService;
 
+    /**
+     * 附件 Mapper：前台详情也要带 attachments（前端文章页要渲染下载列表）。
+     *
+     * 【为什么附件放在缓存【里面】，而不是像浏览量那样在外面合并】
+     *   与标签同理（见上面 tagService 的注释）：附件只在"保存文章"时变，
+     *   而那次操作会推进详情缓存的版本号，所以缓存里的附件不会变脏。
+     *   放进缓存里，一次未命中查一次；放在外面就是每次请求都多一次查询 ——
+     *   详情是访问量最大的接口，这个差别不小。
+     *   （对照：浏览量每次访问都变，所以它必须在缓存外面合并，
+     *    否则命中缓存的请求连 INCR 都不执行了 —— 见类注释。）
+     */
+    private final ArticleAttachmentMapper articleAttachmentMapper;
+
     public PublishedArticleCache(ArticleMapper articleMapper,
                                  CategoryMapper categoryMapper,
+                                 ArticleAttachmentMapper articleAttachmentMapper,
                                  com.yigalaxy.yiguixingtu.tag.service.TagService tagService) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
+        this.articleAttachmentMapper = articleAttachmentMapper;
         this.tagService = tagService;
     }
 
@@ -154,6 +175,18 @@ public class PublishedArticleCache {
         if (tags != null) {
             vo.setTags(tags);
         }
+
+        // 附件：详情只有一篇文章，所以"按文章查一次"就是最优的写法
+        // （不像标签那样需要"整页一次 IN 查询 + 内存分组"——附件根本不进列表接口）。
+        // 转换用 ArticleAttachmentVO.fromEntities：与后台详情的 toVO 共用同一份映射，
+        // 避免出现"前台有附件、后台没有"的不一致（那种不一致在整体替换语义下
+        // 会变成"编辑界面看不见附件 → 保存时全部清空"的静默数据丢失）。
+        List<ArticleAttachment> attachments = articleAttachmentMapper.selectList(
+                new LambdaQueryWrapper<ArticleAttachment>()
+                        .eq(ArticleAttachment::getArticleId, article.getId())
+                        .orderByAsc(ArticleAttachment::getId));
+        vo.setAttachments(ArticleAttachmentVO.fromEntities(attachments));
+
         return vo;
     }
 }

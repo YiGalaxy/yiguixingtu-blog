@@ -10,6 +10,8 @@ import com.yigalaxy.yiguixingtu.audit.OperationAction;
 import com.yigalaxy.yiguixingtu.audit.OperationLogRecorder;
 import com.yigalaxy.yiguixingtu.article.cache.PublishedArticleCache;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleArchiveVO;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleAttachmentForm;
+import com.yigalaxy.yiguixingtu.article.dto.ArticleAttachmentVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleRssVO;
@@ -17,21 +19,29 @@ import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
 import com.yigalaxy.yiguixingtu.article.cache.ArticleViewCounter;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
+import com.yigalaxy.yiguixingtu.article.entity.ArticleAttachment;
+import com.yigalaxy.yiguixingtu.article.mapper.ArticleAttachmentMapper;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
 import com.yigalaxy.yiguixingtu.category.entity.Category;
 import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
 import com.yigalaxy.yiguixingtu.config.RedisConfig;
+import com.yigalaxy.yiguixingtu.upload.UploadProperties;
+import com.yigalaxy.yiguixingtu.upload.UploadedFileCleaner;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -97,6 +107,27 @@ public class ArticleServiceImpl implements ArticleService {
     private final CategoryMapper categoryMapper;
     private final ArticleCacheVersion articleCacheVersion;
 
+    /**
+     * 附件 Mapper：附件表的读写。
+     * 附件不单独落库（保存文章时才写，见 V14 迁移脚本里"为什么不在上传时插一行"），
+     * 所以它的入口只有本类里的"整体替换"与"级联删除"两处。
+     */
+    private final ArticleAttachmentMapper articleAttachmentMapper;
+
+    /**
+     * "已上传文件"这一侧的工具（URL ↔ 对象 key、从正文里找出引用的文件、按 key 删除）。
+     * ⚠️ 它属于 upload 模块：文章的级联逻辑只表达业务语义
+     * （"这个文件还有没有别人在用"），字符串处理与磁盘操作都在那个类里。
+     */
+    private final UploadedFileCleaner uploadedFileCleaner;
+
+    /**
+     * 上传配置：校验附件 URL 是否落在本项目的上传地址之内、附件大小上限，都要读它。
+     * （base-url 与 attachment-max-size 都是可配置的，所以这类判断只可能在 Service 里，
+     *   注解表达不了"跟着配置走"的规则 —— 见 ArticleAttachmentForm 的类注释。）
+     */
+    private final UploadProperties uploadProperties;
+
     /** 浏览量计数器：详情页只写它（Redis），落库交给 ViewCountSyncTask */
     private final ArticleViewCounter viewCounter;
 
@@ -127,6 +158,9 @@ public class ArticleServiceImpl implements ArticleService {
                               ArticleCacheVersion articleCacheVersion,
                               PublishedArticleCache publishedArticleCache,
                               OperationLogRecorder operationLogRecorder,
+                              ArticleAttachmentMapper articleAttachmentMapper,
+                              UploadedFileCleaner uploadedFileCleaner,
+                              UploadProperties uploadProperties,
                               com.yigalaxy.yiguixingtu.tag.service.TagService tagService) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
@@ -134,6 +168,9 @@ public class ArticleServiceImpl implements ArticleService {
         this.articleCacheVersion = articleCacheVersion;
         this.publishedArticleCache = publishedArticleCache;
         this.operationLogRecorder = operationLogRecorder;
+        this.articleAttachmentMapper = articleAttachmentMapper;
+        this.uploadedFileCleaner = uploadedFileCleaner;
+        this.uploadProperties = uploadProperties;
         this.tagService = tagService;
     }
 
@@ -290,8 +327,24 @@ public class ArticleServiceImpl implements ArticleService {
         if (article == null) {
             throw new BusinessException(ResultCode.ARTICLE_NOT_FOUND);
         }
-        // 后台详情（含草稿）也带上标签：管理员的编辑界面要用它回显多选框
-        return withTags(toVO(article, getCategoryName(article.getCategoryId())));
+        // 后台详情（含草稿）也带上标签与附件：
+        // 管理员的编辑界面要用标签回显多选框，用附件回显那份可下载文件列表。
+        // ⚠️ 附件只在这里填 —— 列表接口的 toVOList 刻意不填（N+1 且列表用不到，
+        //    理由见 ArticleVO.attachments 的注释）
+        return withAttachments(withTags(toVO(article, getCategoryName(article.getCategoryId()))));
+    }
+
+    /**
+     * 给单个 VO 补上附件。
+     *
+     * 【为什么只给"单个"用】列表页要的是"一次 IN 查询把整页的标签取回来"
+     * （见 toVOList），而附件只在详情里出现，所以只需要"按一篇文章查一次"。
+     * 真要哪天列表也要显示附件，做法是仿照标签加一个批量方法，
+     * 而不是在这里循环调用（那正是 N+1）。
+     */
+    private ArticleVO withAttachments(ArticleVO vo) {
+        vo.setAttachments(ArticleAttachmentVO.fromEntities(listAttachments(vo.getId())));
+        return vo;
     }
 
     /**
@@ -466,6 +519,11 @@ public class ArticleServiceImpl implements ArticleService {
 
         checkCategory(form.getCategoryId());
 
+        // 【附件先校验，再写入】与标签同一个原则（见 TagServiceImpl.replaceArticleTags）：
+        // 校验跑在任何写库动作之前，"保存失败"就不会留下半成品。
+        // 这里拿到的是一个已经归一化好的列表（null → 空列表），下面直接用。
+        List<ArticleAttachmentForm> attachments = validateAttachments(form.getAttachments());
+
         Article article = new Article();
         article.setTitle(form.getTitle().trim());
         article.setContent(form.getContent());
@@ -484,6 +542,10 @@ public class ArticleServiceImpl implements ArticleService {
         // 回填到 article 对象里，关联表的 article_id 要用它。
         // 同一个事务里，所以"文章建了、标签没写上"这种半成品不会出现。
         tagService.replaceArticleTags(article.getId(), form.getTagIds());
+
+        // 【写附件】同样必须在 insert 之后：附件的 article_id 要用刚刚回填的自增主键。
+        // 新建时没有"旧附件"，所以这次替换实际只是"插入"（不需要删任何文件）。
+        replaceAttachments(article.getId(), attachments);
 
         // 【让列表缓存失效】把版本号 +1，之前缓存的列表瞬间全部作废
         // （为什么不是 @CacheEvict(allEntries = true)，见 ArticleCacheVersion 的类注释）
@@ -513,6 +575,12 @@ public class ArticleServiceImpl implements ArticleService {
 
         checkCategory(form.getCategoryId());
 
+        // 【附件同样先校验】顺序与 create 一致：所有能提前判的都在写库之前判掉。
+        // 这里多一层意义 —— 编辑时的"整体替换"会先删掉旧附件行，
+        // 如果校验放到删除之后，一次不合法的提交就成了"先破坏再检查"
+        // （虽然事务会回滚，但代码读起来就是那个意思，将来有人去掉事务注解就是真丢数据）
+        List<ArticleAttachmentForm> attachments = validateAttachments(form.getAttachments());
+
         // 2. 逐字段显式 SET，而不是用 updateById。
         //
         // 【为什么不用 updateById？】
@@ -540,6 +608,11 @@ public class ArticleServiceImpl implements ArticleService {
         //    让用户丢掉原有标签；再加上同一个事务，内容改动也会一起撤销 ——
         //    不会出现"标题改了、标签没改"的半成品。
         tagService.replaceArticleTags(id, form.getTagIds());
+
+        // 4. 覆盖式地重写附件（整体替换：库里剩下的必须正好等于这次提交的那些）。
+        //    与标签那一步是同一套语义，区别只在于附件还要顺带把
+        //    "这次没再提交的文件"从磁盘上删掉 —— 那段推理在 replaceAttachments 里。
+        replaceAttachments(id, attachments);
 
         // 记一笔审计。detail 里带上"改成了什么标题"——
         // 只记"谁在什么时候改了哪篇"的话，事后想查"标题是被谁改成这样的"还是得去翻日志
@@ -572,12 +645,113 @@ public class ArticleServiceImpl implements ArticleService {
                 status == 1 ? "发布" : "下架");
     }
 
+    /**
+     * 删除文章（逻辑删除），并级联清理它"独占"的文件。
+     *
+     * =====================================================================
+     * 【这一段是本类里最微妙的一段逻辑，逐步说明为什么这么做】
+     *
+     * 一、要清理的东西有三类，它们的"归属"完全不同
+     *   ① 附件行 + 附件的物理文件 —— 附件是"这篇文章的表的一部分"
+     *      （存在 article_attachment 里，靠 article_id 归属），
+     *      文章删了，这些行留着没有任何意义（谁也查不到它们了），
+     *      行对应的文件也就成了永远没人能再访问到的垃圾。
+     *   ② 正文里引用的图片（Markdown 里的 {@code ![](地址)}）——
+     *      它们不在任何表里，唯一的"引用证据"就是正文那串 Markdown。
+     *   ③ 封面图（article.cover）—— 是文章的一个字段。
+     *   ②③ 与 ① 的本质区别：**同一个文件可能被别的文章共用**。
+     *   站长为两篇文章选同一张封面、或者把同一张配图放进两篇文章，
+     *   都是完全正常的事。所以 ②③ 属于"可能共享"，删之前必须先查清楚。
+     *
+     * 二、★ 怎么判断"一张图还有没有别的文章在用"（这是全篇的核心）
+     *   把 URL 里 {@code /uploads/} 之后的那一段取出来（叫它 key，
+     *   形如 {@code cover/2026/09/3f2b....png}），然后去问两件事：
+     *     · article 表里（deleted = 0 且 id <> 本文）还有没有别的行的
+     *       cover 或 content 里出现这段 key？
+     *     · article_attachment 表里（article_id <> 本文）还有没有别的行的
+     *       url 里出现这段 key？
+     *   两个计数都为 0，才认为"这个文件是这篇文章独占的"，可以删。
+     *
+     *   为什么比对 key 而不是整条 URL：正文里的地址可能是绝对形式，
+     *   也可能是相对形式（取决于当时 app.upload.base-url 的配置），
+     *   用整条 URL 比会在两种形式混用时得出"没人引用"的结论 —— 然后误删。
+     *   为什么用 LOCATE 而不是 LIKE：LIKE 的匹配串里 % 和 _ 是通配符，
+     *   而 URL 里出现下划线很正常，那会让判断变得不准确。
+     *   两条 SQL 分别在 ArticleMapper 与 ArticleAttachmentMapper 上，注释更细。
+     *
+     *   为什么"宁可多认、不可漏认"：判断错的代价是不对称的 ——
+     *   多认一次引用 = 少删一个文件（浪费点磁盘，谁都发现不了），
+     *   漏认一次 = 把别人文章里正在用的图删掉（页面裂图，文件不可恢复）。
+     *   所以两处都用"任何形态的字符串包含"来判定，宁可保守。
+     *
+     * 三、为什么物理文件要在【事务提交之后】才删
+     *   删除文件是【不可逆】的，而数据库事务可能回滚 ——
+     *   如果把删文件写在事务里面，一次后面的写入失败（比如审计、标签清理出错）
+     *   就会让文章"回来了"、图却没了：文章页上留着一堆裂图，
+     *   而磁盘上再也找不回那些文件。反过来，先让事务提交成功、
+     *   再删文件，最坏的结果只是"提交成功但文件没删掉"（留个垃圾文件，
+     *   日志里有记录），两害相权取轻。
+     *   实现见 deleteFilesAfterCommit：有事务就注册 afterCommit 回调，
+     *   没有事务（方法被非事务地调用）就立刻删。
+     *
+     * 四、删除顺序（为什么是这个顺序）
+     *   ① 先查文章 → 不存在直接报 404（不往下走任何清理）
+     *   ② 先算出"这篇文章涉及哪些文件"（附件 + 正文图片 + 封面），
+     *      ⚠️ 必须在删附件行【之前】查出来 —— 行删了就查不到 url 了
+     *   ③ 逐个判断引用关系，收集"可以删的文件"
+     *   ④ 删附件行、逻辑删除文章、清标签关联、失效缓存、记审计（都在事务里）
+     *   ⑤ 事务提交后再删文件（见第三点）
+     *
+     * 五、与 music 模块的差别（免得读者以为是漏了）
+     *   music 删歌时【刻意不删】磁盘上的 mp3（见 Music 实体注释），
+     *   理由同样是"文件可能被共用 + 删除不可逆"。附件这里反过来做，
+     *   是因为附件的文件是【一次性】的（UUID 命名，只由那次上传产生），
+     *   而"不断编辑 + 100MB 量级"会让磁盘只涨不落 ——
+     *   但前提仍然是"先确认没有别人在用"，也就是上面第二点。
+     * =====================================================================
+     */
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void remove(Long id) {
         Article exist = articleMapper.selectById(id);
         if (exist == null) {
             throw new BusinessException(ResultCode.ARTICLE_NOT_FOUND);
         }
+
+        // ---- 第一步：把"这篇文章可能独占的文件"都收集起来 ----
+        // 用 LinkedHashSet 去重（同一张图既是封面又在正文里是常态），
+        // 顺序稳定方便排查。
+        // ⚠️ 附件的 url 必须现在读出来：下面删完行就再也拿不到了
+        List<ArticleAttachment> attachments = listAttachments(id);
+
+        Set<String> candidateKeys = new LinkedHashSet<>();
+        candidateKeys.addAll(uploadedFileCleaner.extractObjectKeys(exist.getContent()));
+        String coverKey = uploadedFileCleaner.toObjectKey(exist.getCover());
+        if (coverKey != null) {
+            candidateKeys.add(coverKey);
+        }
+        for (ArticleAttachment attachment : attachments) {
+            String key = uploadedFileCleaner.toObjectKey(attachment.getUrl());
+            if (key != null) {
+                candidateKeys.add(key);
+            }
+        }
+
+        // ---- 第二步：逐个判断"还有没有别的文章在用"，只留下独占的 ----
+        List<String> removableKeys = new ArrayList<>();
+        for (String key : candidateKeys) {
+            if (!referencedByOtherArticles(key, id)) {
+                removableKeys.add(key);
+            } else {
+                // 留下来是有意为之，不是漏删 —— 日志要能证明这一点，
+                // 否则将来站长问"为什么删了文章磁盘没变小"时无从回答
+                log.info("文件仍被其它文章引用，跳过删除: key={}, 被删文章id={}", key, id);
+            }
+        }
+
+        // ---- 第三步：删附件行（物理删除：这张表没有逻辑删除，理由见 V14）----
+        deleteAttachments(id);
+
         // @TableLogic 会把它变成 UPDATE article SET deleted = 1 WHERE id = ?
         // （不是真的 DELETE，历史数据还在，误删可以人工恢复）
         articleMapper.deleteById(id);
@@ -596,7 +770,266 @@ public class ArticleServiceImpl implements ArticleService {
         // 记一笔审计。detail 里把标题也记下来：
         // 文章被逻辑删除之后，按 id 已经查不到标题了，只有快照能追溯"删的是哪一篇"
         operationLogRecorder.record(OperationAction.DELETE_ARTICLE, AuditTarget.ARTICLE, id,
-                "标题=" + exist.getTitle());
+                "标题=" + exist.getTitle() + attachmentAuditSuffix(attachments));
+
+        // ---- 第四步：提交之后再删物理文件（时机与理由见上面第三点）----
+        deleteFilesAfterCommit(removableKeys);
+    }
+
+    /** 审计 detail 的附件片段：让"删掉的文章带了几个附件"也留在审计里（没有附件时为空串） */
+    private String attachmentAuditSuffix(List<ArticleAttachment> attachments) {
+        return attachments.isEmpty() ? "" : "，附件数=" + attachments.size();
+    }
+
+    // =================================================================
+    //  附件（article_attachment）—— 校验 / 整体替换 / 查询 / 级联清理
+    // =================================================================
+
+    /**
+     * 校验表单里的附件列表，并归一化成"可以直接写库"的列表。
+     *
+     * 【为什么要归一化（null → 空列表）】表单里不传 attachments 与传空数组
+     * 在业务上是同一件事（这篇文章没有附件，见 ArticleForm.attachments 的注释），
+     * 在调用处统一成"一个可能为空的列表"，后面的代码就只需要处理一种情况。
+     *
+     * 【三条规则的判断依据，逐条说明为什么不在 DTO 注解里做】
+     *   ① 数量 ≤ 20：这条其实注解里也写了（@Size(max = 20)，为了让 Swagger
+     *      与前端能看到限制、也为了在 Controller 那一层就失败），这里【再判一次】
+     *      是因为 Service 是"所有调用路径的必经之地" —— 将来若有脚本/导入工具
+     *      直接调 Service，注解那一层就绕过去了（项目里对"至少填一个地址"
+     *      那条规则用的是同一个理由，见 ProjectServiceImpl）。
+     *   ② size ≤ app.upload.attachment-max-size：必须读配置，
+     *      注解是编译期常量，写死就会与配置变成两处真相（详见 ArticleAttachmentForm 注释）。
+     *   ③ url 必须落在本项目的上传地址前缀之内：同样依赖配置（base-url）。
+     *      ⚠️ 这条是安全规则，不是格式校验：不判的话，任何人都能把
+     *      {@code https://别人的站/x.exe} 填成"本站文章的附件"，
+     *      它会以前台文章的名义展示给读者 —— 等于拿我们的域名替对方背书。
+     *      实现直接复用 UploadedFileCleaner.toObjectKey：它对"是不是本项目的
+     *      上传地址"的判断规则（绝对地址以 base-url 开头 / 站内相对地址）与上传时
+     *      完全一致，两处只留一份规则就不会出现"上传不进去、却能保存成功"的怪状态。
+     *
+     * 【为什么一条不合法就整份拒绝，而不是"跳过坏的那条"】
+     *   跳过的话，用户看到的是"保存成功、但附件少了一个" ——
+     *   这种"部分成功"最难排查（用户不知道是哪个、为什么）。
+     *   整份拒绝 + 明确提示"第几个附件哪里不对"，用户改一下就能过。
+     *   错误信息里带上序号，是因为一次提交最多 20 条，只说"附件地址不合法"
+     *   用户要自己一条条对。
+     *
+     * @param attachments 表单里的附件列表（可为 null）
+     * @return 归一化后的列表（不可为 null；顺序保持提交顺序 —— 前端列表的顺序就是用户看到的顺序）
+     * @throws BusinessException 任何一条不合法时（PARAM_ERROR，HTTP 200 + body.code = 400）
+     */
+    private List<ArticleAttachmentForm> validateAttachments(List<ArticleAttachmentForm> attachments) {
+        if (attachments == null || attachments.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        final int maxCount = 20;
+        if (attachments.size() > maxCount) {
+            throw new BusinessException(ResultCode.PARAM_ERROR,
+                    "附件最多 " + maxCount + " 个，当前 " + attachments.size() + " 个");
+        }
+
+        long maxSize = uploadProperties.getAttachmentMaxSize().toBytes();
+
+        for (int i = 0; i < attachments.size(); i++) {
+            ArticleAttachmentForm item = attachments.get(i);
+            // 注解校验（@Valid 的嵌套校验）先跑过了一遍，但 Service 被直接调用时没有那一层，
+            // 所以这里对 null 也兜一手：不然下面读 item.getUrl() 会 NPE（500，
+            // 而正确答案是 400 "第 N 个附件不合法"）
+            if (item == null) {
+                throw new BusinessException(ResultCode.PARAM_ERROR, "第 " + (i + 1) + " 个附件不合法");
+            }
+
+            if (!StringUtils.hasText(item.getName()) || item.getName().trim().length() > 100) {
+                throw new BusinessException(ResultCode.PARAM_ERROR,
+                        "第 " + (i + 1) + " 个附件的名称不能为空且最长 100 字");
+            }
+
+            if (item.getSize() == null || item.getSize() < 0) {
+                throw new BusinessException(ResultCode.PARAM_ERROR,
+                        "第 " + (i + 1) + " 个附件的大小不合法");
+            }
+            if (item.getSize() > maxSize) {
+                throw new BusinessException(ResultCode.PARAM_ERROR,
+                        "第 " + (i + 1) + " 个附件超过大小上限（"
+                                + uploadProperties.getAttachmentMaxSize().toMegabytes() + "MB）");
+            }
+
+            if (uploadedFileCleaner.toObjectKey(item.getUrl()) == null) {
+                throw new BusinessException(ResultCode.PARAM_ERROR,
+                        "第 " + (i + 1) + " 个附件的地址不是本项目的上传地址，请先通过上传接口获取");
+            }
+        }
+
+        return attachments;
+    }
+
+    /** 查一篇文章的附件（按 id 升序 = 提交顺序，因为 id 是自增的） */
+    private List<ArticleAttachment> listAttachments(Long articleId) {
+        return articleAttachmentMapper.selectList(new LambdaQueryWrapper<ArticleAttachment>()
+                .eq(ArticleAttachment::getArticleId, articleId)
+                .orderByAsc(ArticleAttachment::getId));
+    }
+
+    /** 删掉一篇文章的全部附件行（物理删除，理由见 V14 与 ArticleAttachment 的注释） */
+    private void deleteAttachments(Long articleId) {
+        articleAttachmentMapper.delete(new LambdaQueryWrapper<ArticleAttachment>()
+                .eq(ArticleAttachment::getArticleId, articleId));
+    }
+
+    /**
+     * 【整体替换】一篇文章的附件：库里剩下的 = 这次提交的那些。
+     *
+     * 【为什么是"先全删再全插"，而不是"对比差异后增删改"】
+     *   与标签的覆盖式语义同一条理由（见 ArticleForm.attachments 的注释）：
+     *   用户看到的列表就是最终状态，最不容易出错。
+     *   而且附件这一行【没有任何字段是可改的】：name/url/size 三个值都来自
+     *   那一次上传，改了任何一个都意味着"换了一个文件"——
+     *   所以"差异对比"在这里根本没有意义：能对比的只有 url 是否相同，
+     *   而 url 相同就意味着整行相同。既然如此，全删全插反而更简单、更不会有 bug。
+     *   （代价是每次保存都会换一批 id。附件的 id 不对外暴露 —— VO 里没有它，
+     *   所以外部看不到任何变化。）
+     *
+     * 【被移除的文件什么时候删、怎么判】见方法末尾那一段与 remove 的长注释。
+     *
+     * @param articleId   文章 id
+     * @param attachments 已经过 validateAttachments 的列表（不可为 null）
+     */
+    private void replaceAttachments(Long articleId, List<ArticleAttachmentForm> attachments) {
+
+        // ---- 第一步：先把旧行读出来 ----
+        // ⚠️ 必须【先读后删】：等删完行，那些 url 就查不出来了，
+        // 也就无法判断"哪个文件这次没再提交、可以删掉"——
+        // 那样每次编辑都会在磁盘上留下一份没人引用的旧附件（100MB 量级，很痛）
+        List<ArticleAttachment> oldAttachments = listAttachments(articleId);
+        List<String> oldKeys = new ArrayList<>();
+        for (ArticleAttachment old : oldAttachments) {
+            String key = uploadedFileCleaner.toObjectKey(old.getUrl());
+            if (key != null) {
+                oldKeys.add(key);
+            }
+        }
+
+        // ---- 第二步：删旧行、插新行（同一个事务里，不会出现"半份附件列表"）----
+        deleteAttachments(articleId);
+        for (ArticleAttachmentForm item : attachments) {
+            ArticleAttachment entity = new ArticleAttachment();
+            entity.setArticleId(articleId);
+            // 名字再 trim 一次：校验放行了"前后有空格"的名字（长度判断用的就是 trim 后的长度），
+            // 存进库里也应当是 trim 后的 —— 否则前端显示时会出现看不见的空格缩进
+            entity.setName(item.getName().trim());
+            entity.setUrl(item.getUrl());
+            entity.setSize(item.getSize());
+            // createTime 不赋值：数据库列有 DEFAULT CURRENT_TIMESTAMP，
+            // 而 MyBatis-Plus 默认不把 null 字段写进 INSERT，默认值就会生效
+            articleAttachmentMapper.insert(entity);
+        }
+
+        // ---- 第三步：算出"这次没再提交的旧文件"，确认没人共用后删掉 ----
+        Set<String> newKeys = new LinkedHashSet<>();
+        for (ArticleAttachmentForm item : attachments) {
+            String key = uploadedFileCleaner.toObjectKey(item.getUrl());
+            if (key != null) {
+                newKeys.add(key);
+            }
+        }
+
+        List<String> removableKeys = new ArrayList<>();
+        for (String oldKey : new LinkedHashSet<>(oldKeys)) {
+            // 这次仍然提交了的：留着（用户只是保存了一次，附件没动）
+            if (newKeys.contains(oldKey)) {
+                continue;
+            }
+            // 别的文章还在用同一个文件：绝不能删（比如两篇文章共用了同一个附件）
+            if (referencedByOtherArticles(oldKey, articleId)) {
+                log.info("被移除的附件仍被其它文章引用，跳过删除: key={}, 文章id={}", oldKey, articleId);
+                continue;
+            }
+            removableKeys.add(oldKey);
+        }
+
+        // 删除时机与 remove 里完全一致：事务提交之后才动磁盘
+        // （理由见 remove 的长注释第三点：删除不可逆，而事务可能回滚）
+        deleteFilesAfterCommit(removableKeys);
+    }
+
+    /**
+     * 这个文件还有没有【别的文章】在用？
+     *
+     * 两张表各查一次（文章的正文/封面 +文章的附件），
+     * 任何一个计数大于 0 就算"还有人用"。
+     * 两条 SQL 的写法、为什么用 LOCATE、为什么比对 key 而不是整条 URL，
+     * 都写在 ArticleMapper.countOthersReferencing 与
+     * ArticleAttachmentMapper.countOthersReferencing 上。
+     *
+     * ⚠️ 判断偏保守（宁可认为"还有人用"）：任何形态的字符串包含都算引用。
+     *   理由见 remove 的长注释第二点 —— 误删不可逆，而多留一个文件只是浪费磁盘。
+     *
+     * @param key       上传目录里的对象 key（不含 base-url 与 /uploads/ 前缀）
+     * @param articleId 当前正在处理的文章 id（它自己不算"别人"）
+     */
+    private boolean referencedByOtherArticles(String key, Long articleId) {
+        long inArticles = articleMapper.countOthersReferencing(articleId, key);
+        if (inArticles > 0) {
+            return true;
+        }
+        return articleAttachmentMapper.countOthersReferencing(articleId, key) > 0;
+    }
+
+    /**
+     * 在【当前事务提交之后】删除这些物理文件；没有事务时立刻删。
+     *
+     * 【为什么要等提交】见 remove 的长注释第三点：
+     *   删除文件不可逆，而数据库事务可能回滚。先提交、再删文件，
+     *   最坏的结果只是"留下一个没被引用的文件"（日志里有记录、可以人工清理）；
+     *   反过来则可能出现"文章还在、图却没了"的裂图，而且无法恢复。
+     *
+     * 【为什么用 TransactionSynchronizationManager 而不是 @TransactionalEventListener】
+     *   项目里的操作审计用的是"发事件 + @TransactionalEventListener(AFTER_COMMIT)"
+     *   （见 audit 包），那套更解耦，但它有两个这里不需要的属性：
+     *     ① 它是异步的（@Async）：审计晚几毫秒没关系，但文件删除要的是
+     *        "确定发生过"，同步执行才好断言、出错也好记日志
+     *     ② 事件的接收方是按类型广播的：这里只是"提交后干一件事"，
+     *        没必要为此定义事件类型 + 监听器两个类
+     *   TransactionSynchronization 是 Spring 提供的同一个机制的更轻形式，
+     *   语义完全一致（提交后回调），代码就在调用点旁边，读起来是连贯的。
+     *
+     * 【为什么有"没有事务就立刻删"这个分支】
+     *   本类的 create/update/remove 都标了 @Transactional，正常不会走到它。
+     *   但"方法被非事务地调用"是完全可能的（将来有人把注解去掉、
+     *   或者有别的入口直接调 Service）。如果没有这个分支，
+     *   那种情况下文件就永远不会被删，而且是【静默】的 ——
+     *   判断标准很简单：有事务同步就注册（事务语义优先），
+     *   没有就当场做（总比什么都不做强）。
+     *
+     * 【失败了会怎样】uploadedFileCleaner.deleteAll 会逐个 try-catch，
+     *   删不掉的只记日志、不往上抛：这时候事务已经提交、接口也已经返回，
+     *   抛出去没有任何人能补救，只会把一次成功的操作变成 500
+     *   （用户以为没删成功，重试一次收到"文章不存在"）。
+     *
+     * @param objectKeys 要删除的对象 key（可为空/为 null，方法会自己兜住）
+     */
+    private void deleteFilesAfterCommit(Collection<String> objectKeys) {
+        if (objectKeys == null || objectKeys.isEmpty()) {
+            return;
+        }
+        // 复制一份：回调是在事务提交那一刻执行的，那时入参列表可能已经被复用/清空。
+        // 这个列表是本地变量、不会跨请求共享，但"传给异步/延迟执行的代码前先复制"
+        // 是一条值得坚持的习惯（项目里 IdempotencyService 也是同样的处理）
+        List<String> snapshot = List.copyOf(objectKeys);
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    uploadedFileCleaner.deleteAll(snapshot);
+                }
+            });
+        } else {
+            log.info("当前没有活动事务，立即删除文件（本次共 {} 个）", snapshot.size());
+            uploadedFileCleaner.deleteAll(snapshot);
+        }
     }
 
     // =================================================================

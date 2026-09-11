@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-285%20passing-success)
-![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen)
+![Tests](https://img.shields.io/badge/tests-457%20passing-success)
+![Coverage](https://img.shields.io/badge/coverage-91%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **285 个集成测试全部通过**（覆盖行 90.5%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **457 个集成测试全部通过**（覆盖行 91.1%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -42,7 +42,7 @@
 | 限流 | Resilience4j 2.4.0（`resilience4j-spring-boot4`）—— 注解式限流，**不写自研切面**；与 Nginx `limit_req` 组成两层，见「部署」章节 |
 | 链路追踪 | Micrometer Tracing + Brave（traceId 进日志 + 响应头 `X-Trace-Id`），见「可观测」 |
 | 操作审计 | Spring 事件机制（`@TransactionalEventListener` + `@Async`）+ 自建 `operation_log` 表，**不写自研切面**，见「操作审计」 |
-| 文件存储 | 图片与音频都存服务器本地磁盘 + 具名卷持久化；**不接对象存储**（理由与"将来怎么换"见「文件上传」章节） |
+| 文件存储 | 图片、音频与**文章附件**都存服务器本地磁盘 + 具名卷持久化（上传目录有 5GB 总量护栏）；**不接对象存储**（理由与"将来怎么换"见「文件上传」章节） |
 | 工具库 | Lombok |
 | 测试 | JUnit 5 + MockMvc（`spring-boot-starter-webmvc-test`）+ **Testcontainers 2.0.5** |
 | 代码覆盖率 | JaCoCo 0.8.13 |
@@ -83,6 +83,22 @@
   而不是让前端拿 id 逐篇去查——那样是 20 次请求）。**XML 由前端拼**（站点域名、
   feed 标题只有前端知道，和 sitemap.xml 同一个做法）；正文给的是 Markdown 源码，
   转 HTML 交给前端的渲染器，避免"同一份 Markdown 两套渲染规则"
+- **文章附件**（`attachments`）：每篇文章可以挂最多 **20 个**可下载文件
+  （PDF / 压缩包 / Office 文档 / 文本 / mp3 / mp4，单个 ≤ 100MB，
+  走 `POST /upload?type=attachment`）。⚠️ 白名单里**绝不能有 html / svg / xml / js**，
+  且附件响应强制下载 —— 这两件事合起来挡的是"在自己域名下执行脚本"的存储型 XSS，
+  详见「文件上传」章节
+  - ⚠️ **附件不单独落库**：它随表单提交、保存文章时**整体替换**
+    （与 `tagIds` 完全一致的语义：前端提交什么，库里就是什么）。
+    不在上传时就插一行，是因为**新建文章那一刻还没有 article_id**，
+    那样会产生一堆没人认领的悬空记录；用户传完不保存也一样。
+    代价是"传了没保存"的文件留在磁盘上，只能按目录清理 —— 比库里出现
+    "指向不存在文章的附件行"要好处理得多（判断过程见 V14 迁移脚本的注释）
+  - **删文章时级联清理文件**：附件行 + 物理文件、正文引用的图片、封面图都会清掉，
+    但**删之前先查"还有没有别的文章在用"**（正文 / 封面 / 附件表三处都查），
+    共用的**一律不动** —— 同一张图完全可能被两篇文章用，无脑删会把另一篇删成裂图，
+    而文件删除不可逆。判定逻辑与删除时机见 `ArticleServiceImpl.remove` 的长注释，
+    用例见 `ArticleAttachmentTest` ⑬（★ 共用图不误删 + 独占图确实被删，两个方向都断言）
 
 **分类**
 - 分类列表（游客可访问，走 Redis 缓存 —— 首页 SSR 每次都要用它，而它只在分类被改时才变）
@@ -324,11 +340,15 @@
 - **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
-- **文件上传（图片 + 音频两套规则）**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
-  图片走 `type=image`（默认，5MB，存 `uploads/cover/`），音频走 `type=audio`
-  （mp3，20MB，存 `uploads/music/`）—— 两套规则**互不放宽**，各有用例钉住；
-  文件存服务器本地磁盘，并用**具名卷**持久化
-- 集成测试 **39 个类 439 个用例**，行覆盖率 **91.2%**
+- **文件上传（图片 + 音频 + 附件三套规则）**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
+  图片走 `type=image`（默认，**10MB**，存 `uploads/cover/`），音频走 `type=audio`
+  （mp3，20MB，存 `uploads/music/`），附件走 `type=attachment`
+  （16 种文档与媒体格式，**100MB**，存 `uploads/attachment/`）—— 三套规则**互不放宽**，
+  各有用例钉住；上传目录另有 **5GB 总容量护栏**（超过就拒绝并提示清理）；
+  文件存服务器本地磁盘，并用**具名卷**持久化。
+  ⚠️ 附件响应强制 `Content-Disposition: attachment` + `nosniff`，白名单里也没有
+  html / svg / xml / js —— 两道防线挡的是"在自家域名下执行脚本"（见「文件上传」章节）
+- 集成测试 **40 个类 457 个用例**，行覆盖率 **91.1%**
 
 ### 🚧 规划中
 
@@ -361,7 +381,8 @@ com.yigalaxy.yiguixingtu
 │   ├── RedisConfig                 # @EnableCaching + Jackson（注册 JavaTimeModule，否则 LocalDateTime 序列化报错）
 │   ├── MybatisPlusConfig           # 分页插件（全局上限 100 兜底）
 │   ├── SecurityConfig              # Spring Security 过滤链 + JWT + CORS + 401/403 JSON + 安全响应头
-│   ├── WebMvcConfig                # /uploads/** 映射到本地存储目录
+│   ├── WebMvcConfig                # /uploads/** 映射到本地存储目录 + 注册附件下载头过滤器
+│   ├── UploadResponseHeaderFilter  # /uploads/** 的响应头：附件强制下载（防 XSS/钓鱼）、图片音频仍内联
 │   ├── SchedulingConfig            # @EnableScheduling（浏览量定时落库要用）
 │   ├── TraceResponseHeaderFilter   # 把当前请求的 traceId 写进响应头 X-Trace-Id
 │   ├── AsyncConfig                 # @EnableAsync + 审计落库线程池的拒绝策略（CallerRunsPolicy）
@@ -394,20 +415,25 @@ com.yigalaxy.yiguixingtu
 ├── article
 │   ├── controller/ArticleController       # 前台：列表 / 详情（公开）
 │   ├── controller/AdminArticleController  # 后台：增删改查（ADMIN）
-│   ├── service/ArticleService(+Impl)
+│   ├── service/ArticleService(+Impl)      # ⚠️ 附件的整体替换 + 删文章时的级联清理（判断"文件还有没有别人在用"）
 │   ├── entity/Article
+│   ├── entity/ArticleAttachment           # 文章附件（⚠️ 没有 @TableLogic：整表物理删除，见 V14）
 │   ├── mapper/ArticleMapper
+│   ├── mapper/ArticleAttachmentMapper     # 含一条手写 COUNT（"这个文件还有没有别的附件在用"）
 │   ├── cache/ArticleViewCounter    # 浏览量 Redis 计数器（详情页只 INCR，不写库）
-│   ├── cache/PublishedArticleCache # 详情页那份库数据的可缓存读取（防击穿）
+│   ├── cache/PublishedArticleCache # 详情页那份库数据的可缓存读取（防击穿；详情带 tags + attachments）
 │   ├── cache/ArticleCacheVersion   # 缓存版本号（列表与详情各一个，写操作一起推进）
 │   ├── task/ViewCountSyncTask      # 定时把 Redis 增量批量落库
-│   └── dto/                        # ArticleForm / ArticleQuery / ArticleVO / ArticleStatsVO / ArticleArchiveVO / ArticleRssVO
+│   └── dto/                        # ArticleForm / ArticleQuery / ArticleVO / ArticleStatsVO / ArticleArchiveVO / ArticleRssVO / ArticleAttachmentVO / ArticleAttachmentForm
 ├── upload
-│   ├── controller/UploadController # POST /upload（ADMIN）
-│   ├── service/UploadService       # 类型白名单 + UUID 重命名 + 按日期分目录
-│   ├── FileStorage                 # 存储接口（依赖倒置：将来换对象存储时 UploadService 不用改）
+│   ├── controller/UploadController # POST /upload（ADMIN；返回 {url, name, size}）
+│   ├── service/UploadService       # 三种类型各自的白名单与上限 + 总容量护栏 + UUID 重命名 + 按日期分目录
+│   ├── UploadType                  # 上传种类（image / audio / attachment，规则互不放宽）
+│   ├── FileStorage                 # 存储接口（存 / 删 / 统计占用；将来换对象存储时上传逻辑不用改）
 │   ├── LocalFileStorage            # 本地磁盘（唯一实现，见「文件上传」章节）
-│   └── UploadProperties            # 上传配置绑定
+│   ├── UploadedFileCleaner         # URL ↔ 对象 key、从正文里找出引用的文件、按 key 删除
+│   ├── UploadResult                # 上传返回体 {url, name, size}
+│   └── UploadProperties            # 上传配置绑定（含附件那一套与 maxTotalSize）
 ├── category
 │   ├── CategoryController                 # 分类列表（公开）
 │   ├── AdminCategoryController            # 后台：增删改（删时会检查是否还有文章在用）
@@ -482,7 +508,8 @@ src/main/resources
     ├── V10__create_about_table.sql      # about（关于页；只有一行，插入语句就在脚本里）
     ├── V11__create_music_table.sql      # music（音乐；**刻意不插种子数据**，见脚本内说明）
     ├── V12__create_site_setting_table.sql # site_setting（站点设置；同样只有一行，种子值等于前端原本写死的值）
-    └── V13__add_police_number_to_site_setting.sql # site_setting 加公安网安备案号列（**刻意不写种子值**，见脚本内说明）
+    ├── V13__add_police_number_to_site_setting.sql # site_setting 加公安网安备案号列（**刻意不写种子值**，见脚本内说明）
+    └── V14__create_article_attachment_table.sql # article_attachment（文章附件；**物理删除、不做逻辑删除**，为什么不在上传时插行见脚本内说明）
 
 src/test/java/com/yigalaxy/yiguixingtu
 ├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
@@ -512,6 +539,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── AboutTest                       # 关于页：单条记录的不变量（永远一行 / 缺行时读给空壳且保存能写回 / POST 是真 405）+ 校验边界 + 权限 + 缓存
 ├── MusicTest                       # 音乐：排序两段稳定（sort 同则按 id）/ 音频地址白名单 / 长歌词原样存取 / 空列表返回空数组 / 增删改与权限 / 缓存命中与失效
 ├── UploadAdminTest                 # 上传（图片 + 音频两套规则、大小按 type 分流、权限）
+├── ArticleAttachmentTest           # 文章附件：白名单（拒 html/svg/js）、单文件与总容量两道闸、整体替换、详情带 attachments、级联删文件、★ 共用的图不误删、附件强制下载
 ├── LogoutTokenTest                 # 登出后旧 token 立即失效（jti 黑名单）
 ├── SecurityHeadersTest             # 四个安全响应头
 ├── MetricsEndpointTest             # 指标端点与自定义业务指标
@@ -890,7 +918,7 @@ spring.datasource.hikari.max-lifetime=1800000
 | `connection-timeout` | 3000 ms | Hikari 默认 30 秒 —— 数据库出问题时请求要挂 30 秒才报错（用户早关页面了），这期间还一直占着 Tomcat 工作线程。实测 P99 才 135ms，3 秒足够覆盖正常排队，超过就是不正常，应当立刻失败 |
 | `max-lifetime` | 1800000 ms（30 分钟） | MySQL 的 `wait_timeout` 默认 8 小时，超时会被服务端单方面关连接。池里的连接若活得比它久，就会拿到一条"其实已经死了"的连接，报出 `Communications link failure` 这种与真实原因无关的错。30 分钟 ≪ 8 小时；**将来调小 MySQL 的 `wait_timeout`，这个值必须跟着调小** |
 
-#### 文件上传（封面图与音频都存在服务器磁盘上）
+#### 文件上传（封面图、音频与文章附件都存在服务器磁盘上）
 
 ```properties
 # ---- 图片：POST /upload（不传 type，或 type=image）----
@@ -898,41 +926,111 @@ app.upload.local-dir=${UPLOAD_LOCAL_DIR:./uploads}
 app.upload.base-url=${UPLOAD_BASE_URL:http://localhost:8082}
 app.upload.allowed-extensions=jpg,jpeg,png,gif,webp
 app.upload.key-prefix=${UPLOAD_KEY_PREFIX:cover}
-app.upload.max-size=5MB
+app.upload.max-size=10MB
 # ---- 音频：POST /upload?type=audio ----
 app.upload.audio-allowed-extensions=mp3
 app.upload.audio-max-size=20MB
 app.upload.audio-key-prefix=${UPLOAD_AUDIO_KEY_PREFIX:music}
+# ---- 附件：POST /upload?type=attachment（文章附件用它）----
+app.upload.attachment-allowed-extensions=pdf,zip,7z,rar,doc,docx,xls,xlsx,ppt,pptx,txt,md,csv,json,mp3,mp4
+app.upload.attachment-max-size=100MB
+app.upload.attachment-key-prefix=${UPLOAD_ATTACHMENT_KEY_PREFIX:attachment}
+# ---- 整个上传目录的总量护栏（单文件上限之外的第二道闸）----
+app.upload.max-total-size=5GB
 # ---- multipart 的框架层闸门：按【最大的那一类】设，业务层再按 type 细分 ----
-spring.servlet.multipart.max-file-size=20MB
-spring.servlet.multipart.max-request-size=25MB
+spring.servlet.multipart.max-file-size=105MB
+spring.servlet.multipart.max-request-size=110MB
 ```
 
-**两种上传各自一套规则，互不放宽**（完整推导见 `upload/UploadType` 的类注释）：
+**三种上传各自一套规则，互不放宽**（完整推导见 `upload/UploadType` 的类注释）：
 
-| | 图片（默认 / `type=image`） | 音频（`type=audio`） |
-|---|---|---|
-| 扩展名 | `jpg` `jpeg` `png` `gif` `webp` | `mp3` |
-| 大小上限 | 5MB | **20MB** |
-| 存储目录 | `uploads/cover/yyyy/MM/` | `uploads/music/yyyy/MM/` |
-| 返回 | `{"url": "..."}`（**两者结构完全一样**，前端上传组件不用改） | 同左 |
+| | 图片（默认 / `type=image`） | 音频（`type=audio`） | 附件（`type=attachment`） |
+|---|---|---|---|
+| 扩展名 | `jpg` `jpeg` `png` `gif` `webp` | `mp3` | `pdf` `zip` `7z` `rar` `doc` `docx` `xls` `xlsx` `ppt` `pptx` `txt` `md` `csv` `json` `mp3` `mp4`（共 16 项） |
+| 单文件上限 | **10MB** | 20MB | **100MB** |
+| 存储目录 | `uploads/cover/yyyy/MM/` | `uploads/music/yyyy/MM/` | `uploads/attachment/yyyy/MM/` |
+| 访问行为 | 内联展示（前台卡片直接渲染） | 内联播放（`<audio>`） | **强制下载**（`Content-Disposition: attachment`） |
+| 返回 | `{"url", "name", "size"}`（**三者结构完全一样**） | 同左 | 同左 |
 
-> **20MB 这个数字的依据（不是拍的）**：主流音乐平台的高质量档约 320kbps（≈40KB/s），
+> **图片上限 5MB → 10MB 的依据（2026-09 调整）**：原来那个 5MB 是"网页时代的压缩
+> 封面图"量级，而现在封面图的来源大多是**手机直出照片（一张 3~8MB）**或
+> **设计稿导出的 PNG（2~6MB）** —— 5MB 会开始频繁拒绝正常尺寸的图，而站长能收到的
+> 只是一句"不能超过 5MB"，只能自己先找工具压一遍。10MB 覆盖这两类来源并留了余量，
+> 同时仍然远小于附件那一套的 100MB：封面图是**要在列表里直接渲染**的资源，
+> 不该是几 MB 的巨物。
+>
+> **附件 100MB 的依据**：论文 PDF / PPT / 数据包几十 MB，1 小时录音约 60MB，
+> 几分钟的屏幕录制就在 50~100MB。再往上就该走网盘/对象存储，而不是博客附件。
+>
+> **音频 20MB 的依据（没有变）**：主流音乐平台高质量档约 320kbps（≈40KB/s），
 > 一首 5 分钟的歌 = 320kbps × 300s ÷ 8 ≈ **12MB**，取 20MB 足以覆盖 320kbps 下
 > 8 分钟以内的曲目。音频天然比图片大一个量级（它有时间维度），
-> 所以两套上限分开写、各自有依据，而不是"统一调大到 20MB"。
+> 所以三套上限分开写、各自有依据，而不是"统一调大到某个数"。
 >
-> **为什么另起三项配置，而不是把 `mp3` 加进图片白名单、把上限改成 20MB**：
-> 那是两行就能改完的做法，但会**悄悄放宽图片的规则** —— 图片从此能传 20MB、
-> 也能传 mp3，而且不会有任何报错。所以按 `type` 分流，
-> 并且**两个方向各有一条用例钉住**（`UploadAdminTest` ⑭ = 音频接口拒 png、
-> ⑮ = 默认接口拒 mp3，⑰ = 同一份 1.5KB 内容作为图片被拒、作为音频被接受）。
+> **为什么另起几项配置，而不是把 `mp3`/`pdf` 加进图片白名单、把上限统一调大**：
+> 那是几行就能改完的做法，但会**悄悄放宽图片的规则** —— 图片从此能传 100MB、
+> 也能传 pdf，而且不会有任何报错。所以按 `type` 分流，并且**三个方向都有用例钉住**
+> （`UploadAdminTest` ⑭ = 音频接口拒 png、⑮ = 默认接口拒 mp3、⑰ = 同一份 1.5KB
+> 内容作为图片被拒、作为音频被接受；`ArticleAttachmentTest` ⑥ = 附件接口拒图片、
+> 图片与音频接口都拒 pdf、未知 type 仍然报错）。
 >
 > **两层限额的分工**：`spring.servlet.multipart.max-file-size` 管"请求能不能进来"
 > （超了根本走不到业务代码，报的是框架异常），`UploadService` 管"这一类允许多大"。
-> 所以框架层按最大的那一类（音频 20MB）设，图片的 5MB 由业务层按 `type` 拦下。
+> 所以框架层按最大的那一类（附件 100MB，取 105MB 留余量）设，
+> 图片的 10MB 与音频的 20MB 由业务层按 `type` 拦下。
 
-**本项目用本地磁盘存封面图与音频，不用对象存储。** 理由很简单：单台 ECS +
+##### 附件白名单里为什么**绝不能**出现 html / svg / xml / js / css
+
+附件由后端 `/uploads/**` 静态提供（见 `config/WebMvcConfig`），而这个前缀与前台**同源**。
+于是：
+
+- 一个 `.html` / `.svg` / `.xml` 附件被**就地打开**时，浏览器把它当**本站的页面**解析，
+  里面的 `<script>` 会真的执行 —— 它读得到 localStorage 里的 token、能带着 cookie
+  发请求、能改写这个页面上的一切。这就是**存储型 XSS**，前端做过的所有转义防护
+  在这一步全部作废（攻击者的用法很省事：把文件传上去，再把它的 URL 发给别人）
+- 一个 `.pdf`（或任何能被渲染的东西）可以被伪造成"您的登录已过期，请重新登录"的假页面，
+  而**地址栏显示的是我们自己的域名** —— 这是钓鱼最有效的一种形态
+
+所以做了**两道各自独立的防线**：
+
+1. **白名单**（`app.upload.attachment-allowed-extensions`）：只放行 16 种确定安全的
+   格式，`html` / `htm` / `svg` / `xml` / `js` / `mjs` / `css` **一个都不在里面**
+   （黑名单永远列不全 —— `.jsp` / `.xhtml` / `.svgz` ……，白名单才是安全的默认值）
+2. **强制下载**（`config/UploadResponseHeaderFilter`）：`/uploads/**` 的响应按
+   **文件所在目录**判断 —— 附件目录里的一律带 `Content-Disposition: attachment`
+   与 `X-Content-Type-Options: nosniff`，浏览器只下载、不就地打开；
+   图片与音频（封面、曲目）**保持内联**，否则前台几十张卡片全会变成"下载按钮"
+
+> **为什么"要不要下载"按目录判断，而不是按扩展名**：附件白名单里也有 `mp3` / `mp4`，
+> 它们本身是"可以内联"的媒体格式。但一个放在附件目录里的录音是**要下载的资料**，
+> 不是背景音乐。而**它放在哪个目录**是上传时由我们自己决定的，比扩展名更可靠。
+> 扩展名只用来兜住第二种情况：不在附件目录、扩展名又不在"图片/音频"白名单里的
+> 文件（比如有人手工放进目录的），一律按最保守的方式处理 —— 强制下载。
+
+##### 上传目录的总容量护栏（5GB）
+
+单文件 100MB **挡不住**"几十个附件把磁盘写满"：40 个各 100MB 的附件（每个都合法）
+就能填满一台 40GB 的 ECS。而磁盘写满的后果比"某次上传失败"严重得多 ——
+MySQL 写不进 redo/binlog、Redis 的 AOF 写不进去、应用日志也写不进去，
+表现是**整个站点一起挂**，日志里只有一堆不相干的写入错误。
+
+所以在上传前还会量一遍上传目录的占用：**已用 + 本次 > `app.upload.max-total-size`（默认 5GB）
+就拒绝**，并给出明确提示（"上传空间不足：已用 x，上限 y，请先删除不再需要的旧附件"）。
+
+- **统计的是"目录里所有文件加起来"，不是"数据库里记录的附件"** —— 磁盘是真的会满的，
+  而库里的记录不一定对得上（删文章会删文件、用户传了没保存会留下孤儿文件、
+  有人手工往目录里放过东西）。直接量目录才是"磁盘还剩多少"这个问题的答案
+- **是"尽力而为"而不是强一致**：两个人同时上传时可能各自看到"还装得下"，
+  于是略微超出上限（不超过"并发数 × 单文件上限"）。要对齐到字节就得上分布式锁，
+  那个锁的代价（等待、超时、Redis 故障时上传全挂）远大于"偶尔超几十 MB" ——
+  这道闸的目的是别让磁盘爆掉，不是把每一字节都算准
+- 用例见 `ArticleAttachmentTest` ⑤（把上限调小到 6KB 来测，不真写 5GB）
+
+**这里的文件是怎么被删掉的**：删文章（或编辑时移除附件）会连带清理**这篇文章独占的**
+物理文件，但**先查有没有别的文章还在用**（正文引用 / 封面 / 附件表三处都查），
+共用的一律不动 —— 完整推导见下文「文章附件」一节，用例见 `ArticleAttachmentTest` ⑬（★）。
+
+**本项目用本地磁盘存封面图、音频与附件，不用对象存储。** 理由很简单：单台 ECS +
 个人博客的量级，本地磁盘完全够用，**少一个外部依赖就少一处会失败的地方**
 （网络抖动、密钥过期、配额限制、还要多付一份钱）。
 
@@ -965,11 +1063,21 @@ spring.servlet.multipart.max-request-size=25MB
 {UPLOAD_BASE_URL}/uploads/music/2026/09/{uuid}.mp3   ← 直接塞进 <audio src>
 ```
 
+附件再到 `attachment`：
+
+```
+{UPLOAD_BASE_URL}/uploads/attachment/2026/09/{uuid}.pdf   ← 点它一定【下载】，不会就地打开
+```
+
 - **按年月分目录**：单目录里堆几万个文件，`ls`/备份/排查都会变得很难受
 - **UUID 重命名**：用原名会撞名、还会把用户的文件名暴露在 URL 里 ——
-  音频这一点更明显（"周杰伦 - 夜曲 (Live).mp3" 这种名字直接进 URL 只会给编码找麻烦）
-- **两类分开目录**：图片是"文章封面"、音频是"曲目文件"，量与生命周期都不同，
-  备份 / 清理 / 排查（"这个 mp3 是谁传的"）时按目录一眼分得开
+  音频这一点更明显（"周杰伦 - 夜曲 (Live).mp3" 这种名字直接进 URL 只会给编码找麻烦）；
+  附件同理（"毕业论文（终稿）.pdf" 这种名字会让 URL 编码很难受），
+  而**附件在页面上的显示名**来自数据库（`article_attachment.name`）——
+  用户看到的仍然是原始文件名，URL 里那个 UUID 他永远看不到
+- **三类分开目录**：图片是"文章封面"、音频是"曲目文件"、附件是"可下载的资料"，
+  量与生命周期都不同，备份 / 清理 / 排查（"这个 mp3 是谁传的"）时按目录一眼分得开；
+  ⚠️ 而且**目录还是"要不要强制下载"的判断依据**（见上面那两道防线）
 
 > ⚠️ **部署时最容易踩的一个坑：上传目录必须挂到卷上**
 >
@@ -1122,7 +1230,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 3 | POST | `/auth/logout` | 退出登录（把当前 token 拉黑，幂等） | 否 |
 | 4 | GET | `/auth/me` | 获取当前登录用户 | 是 |
 | 5 | GET | `/article/page` | 前台文章分页列表（仅已发布，**走 Redis 缓存 + 限流**；支持 `tagId` 标签筛选） | 否 |
-| 6 | GET | `/article/{id}` | 前台文章详情（仅已发布，返回里带 `tags`） | 否 |
+| 6 | GET | `/article/{id}` | 前台文章详情（仅已发布，返回里带 `tags` 与 `attachments`） | 否 |
 | 7 | GET | `/article/stats` | 站点统计：文章数 / 总浏览量 / 分类数（首页那三个数字，**只算已发布**） | 否 |
 | 8 | GET | `/article/archive` | 归档：已发布文章**按年月分组**（最新的月份在前），走 Redis 缓存 | 否 |
 | 9 | GET | `/article/rss` | RSS 数据：最近 20 篇已发布文章的正文（前端用它拼 `feed.xml`），走 Redis 缓存 | 否 |
@@ -1136,9 +1244,9 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 17 | PUT | `/user/{id}/password` | 重置用户密码 | 是（ADMIN） |
 | 18 | DELETE | `/user/{id}` | 删除用户（逻辑删除） | 是（ADMIN） |
 | 19 | GET | `/admin/article/page` | 后台文章分页（含草稿，多条件筛选） | 是（ADMIN） |
-| 20 | GET | `/admin/article/{id}` | 后台文章详情（含正文） | 是（ADMIN） |
-| 21 | POST | `/admin/article` | 新增文章（可带 `tagIds` 打标签；**可选 `Idempotency-Key` 请求头防重复提交**） | 是（ADMIN） |
-| 22 | PUT | `/admin/article/{id}` | 编辑文章（`tagIds` 是**覆盖式**语义） | 是（ADMIN） |
+| 20 | GET | `/admin/article/{id}` | 后台文章详情（含正文；带 `tags` 与 `attachments`） | 是（ADMIN） |
+| 21 | POST | `/admin/article` | 新增文章（可带 `tagIds` 打标签、`attachments` 提交附件；**可选 `Idempotency-Key` 请求头防重复提交**） | 是（ADMIN） |
+| 22 | PUT | `/admin/article/{id}` | 编辑文章（`tagIds` 与 `attachments` 都是**覆盖式**语义） | 是（ADMIN） |
 | 23 | PUT | `/admin/article/{id}/status` | 发布 / 下架文章 | 是（ADMIN） |
 | 24 | DELETE | `/admin/article/{id}` | 删除文章（逻辑删除） | 是（ADMIN） |
 | 25 | GET | `/admin/tag/list` | 标签列表（后台，**不走缓存**：刚建完就要看得见） | 是（ADMIN） |
@@ -1152,7 +1260,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 33 | POST | `/admin/category` | 新建分类 | 是（ADMIN） |
 | 34 | PUT | `/admin/category/{id}` | 编辑分类（改名 / 描述 / 排序） | 是（ADMIN） |
 | 35 | DELETE | `/admin/category/{id}` | 删除分类（**分类下有文章时会被拒绝**） | 是（ADMIN） |
-| 36 | POST | `/upload` | 上传文件（**不传 `type` 或 `type=image` → 图片，5MB；`type=audio` → 音频，mp3 / 20MB**），返回可访问 URL | 是（ADMIN） |
+| 36 | POST | `/upload` | 上传文件（**不传 `type` 或 `type=image` → 图片，10MB；`type=audio` → 音频，mp3 / 20MB；`type=attachment` → 文章附件，16 种格式 / 100MB**），返回可访问地址 `{url, name, size}` | 是（ADMIN） |
 | 37 | GET | `/link/list` | 友链列表（**只含"显示"的**，按 `sort` 升序；走 Redis 缓存） | 否 |
 | 38 | GET | `/admin/link/list` | 友链列表（后台，**含隐藏的、不走缓存**） | 是（ADMIN） |
 | 39 | POST | `/admin/link` | 新建友链 | 是（ADMIN） |
@@ -1179,8 +1287,21 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 60 | PUT | `/admin/setting` | 保存站点设置（**单条更新，没有新建/删除**；`pageSize` 上限跟文章接口同为 50） | 是（ADMIN） |
 
 **共 60 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
-用本地磁盘存储时，上传的图片与音频都通过 `GET /uploads/**` 公开读取（无需登录）——
-图片在 `uploads/cover/`，音频在 `uploads/music/`，同一个静态映射覆盖子目录，不需要额外配置。
+用本地磁盘存储时，上传的图片、音频与附件都通过 `GET /uploads/**` 公开读取（无需登录）——
+图片在 `uploads/cover/`，音频在 `uploads/music/`，附件在 `uploads/attachment/`，
+同一个静态映射覆盖子目录，不需要额外配置。
+⚠️ 三种文件的**响应头不同**：图片与音频内联展示/播放，附件强制
+`Content-Disposition: attachment` 下载（见「文件上传」章节里那两道防线）。
+
+**文章附件的接口形状**（前端已按它实现）：
+
+```
+保存文章（POST /admin/article、PUT /admin/article/{id}）请求体里新增：
+  "attachments": [ { "name": "毕业论文.pdf", "url": "http://.../uploads/attachment/2026/09/x.pdf", "size": 1258291 } ]
+  → 后端【整体替换】：先删掉这篇文章原有的全部附件行（以及其中被移除的文件），再按提交的列表插入
+  → 校验：最多 20 条 / name ≤ 100 字 / size ≤ 附件上限（默认 100MB）/ url 必须落在本站上传地址前缀之内
+读取文章（GET /article/{id}、GET /admin/article/{id}）返回的 data 里带 attachments 数组（name / url / size）
+```
 
 ## 接口 × 角色权限矩阵
 
@@ -1227,8 +1348,8 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `/admin/music/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
 | `PUT /admin/about` （只有这一个） | ❌ 401 | ❌ 403 | ✅ |
 | `PUT /admin/setting` （只有这一个） | ❌ 401 | ❌ 403 | ✅ |
-| `POST /upload`（图片与音频都是它） | ❌ 401 | ❌ 403 | ✅ |
-| `GET /uploads/**`（本地存储的图片与音频） | ✅ | ✅ | ✅ |
+| `POST /upload`（图片 / 音频 / 附件都是它） | ❌ 401 | ❌ 403 | ✅ |
+| `GET /uploads/**`（本地存储的图片、音频与附件） | ✅ | ✅ | ✅ |
 
 **几个刻意的设计决定：**
 
@@ -2144,7 +2265,7 @@ curl -s http://127.0.0.1:8082/actuator/prometheus | head -20
 | 数据库账号 | compose 里单独建 `yiguixingtu` 业务账号，**不让应用用 root**（最小权限） |
 | Redis | 设 `requirepass`，**内网也设** —— 默认无密码时，只要容器网络可达就等于公开 |
 | JWT 密钥 | 必须用环境变量覆盖，且 prod 配置里**不给默认值**（忘配就启动失败） |
-| 上传的文件 | 图片与音频都存在服务器磁盘上（具名卷 uploads_data），不用对象存储；/uploads/** 只放行 GET（图片在 cover/、音频在 music/，同一个映射覆盖子目录） |
+| 上传的文件 | 图片、音频与文章附件都存在服务器磁盘上（具名卷 uploads_data），不用对象存储；/uploads/** 只放行 GET（图片在 cover/、音频在 music/、附件在 attachment/，同一个映射覆盖子目录）；**附件响应强制下载 + nosniff**（uploads/attachment/ 里的东西绝不能被浏览器当页面执行） |
 | 依赖漏洞 | `.github/dependabot.yml` 每周检查 maven 与 github-actions 依赖，自动开 PR |
 | 接口文档 | prod 下 Swagger 真的关掉（不只设开关，还从放行名单里移除，见「配置」章节） |
 
@@ -2870,10 +2991,10 @@ mvn test
 
 | 维度 | 覆盖率 |
 |------|:---:|
-| 行覆盖 | **90.5%**（1,504 / 1,662） |
-| 方法覆盖 | **97.1%**（300 / 309） |
-| 指令覆盖 | **90.7%**（6,593 / 7,273） |
-| 分支覆盖 | 68.4%（373 / 545） |
+| 行覆盖 | **91.1%**（2,405 / 2,641） |
+| 方法覆盖 | **97.0%**（460 / 474） |
+| 指令覆盖 | **90.2%**（10,609 / 11,760） |
+| 分支覆盖 | 71.0%（670 / 944） |
 
 > 分支覆盖率明显低于行覆盖率，是因为大量的**参数校验分支、异常兜底分支、
 > 空值判断分支**不会被每个用例都走到——这是正常的，不必为了刷数字硬凑用例。
@@ -2887,7 +3008,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 439 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 457 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -2899,10 +3020,16 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 439 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 457 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**39 个测试类，439 个用例，全部通过：**
+**41 个测试类文件（其中 40 个含用例，另 1 个是无用例的基类 `AbstractIntegrationTest`），457 个用例，全部通过：**
+
+> 统计口径（这一行别改错）：下表**每个测试类文件一行**（基类也占一行，用例数记 0），
+> 所以**行数 = `src/test/java/com/yigalaxy/yiguixingtu/` 下的 .java 文件数（41）**，
+> **各行用例数之和 = 总数（457）**。新加测试类时必须同时改这三处：
+> 加一行、把该行数字填对、把「合计」与上面那句总数改掉 ——
+> 少改一处的表现是"文档里的数字和 CI 报的不一样"，而不会有任何测试变红。
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -2921,7 +3048,9 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleDetailCacheTest` | 11 | 详情缓存：走缓存、**浏览量不被冻住**、写操作后立刻更新、下架即 404、自愈重建、**12 线程并发只查库 1 次（防击穿）**、TTL 有效 |
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
-| `UploadAdminTest` | 22 | 上传的**两套规则**：图片（类型/大小白名单、UUID 重命名、非管理员 403）；音频（`type=audio` 传 mp3 成功且**文件真的落盘、返回的 url 能匿名取到**、音频接口拒 png、默认接口拒 mp3、**大小上限按 type 分流**、超音频上限被拒、未知 type 被拒、音频同样只有管理员能传、`type` 大小写与空格容错、两个前缀各自取自配置）；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
+| `UploadAdminTest` | 22 | 上传的**图片与音频两套规则**：图片（类型/大小白名单、UUID 重命名、非管理员 403）；音频（`type=audio` 传 mp3 成功且**文件真的落盘、返回的 url 能匿名取到**、音频接口拒 png、默认接口拒 mp3、**大小上限按 type 分流**、超音频上限被拒、未知 type 被拒、音频同样只有管理员能传、`type` 大小写与空格容错、两个前缀各自取自配置）；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
+| `ArticleAttachmentTest` | 18 | 文章附件：**上传**（16 种白名单、返回 `{url,name,size}`、名字清洗与截断、超单文件上限被拒且不落盘、**html/htm/svg/xml/js/mjs/css 逐个被拒 + 白名单本身也不许出现它们**）、**数字钉死**（读 `application.properties` 原文核对 10MB / 100MB / 5GB / multipart 105MB）、**总容量护栏**（调成 6KB：压满后再传 1 字节也被拒，且提示里带"已用"）、**三套规则互不放宽**（图片/音频都拒 pdf、未知 type 报错）、**保存**（随表单落库、详情带 attachments、空数组 = 清空）、**整体替换**（旧行消失、新行出现、**被移除的文件真的被删**）、**校验**（数量 20 / 名字 100 字 / size 上限 / url 必须是本站地址，且**校验先于写入**：失败时原附件分毫未动）、**级联删除**（删文章 → 附件行 + 附件文件 + 封面 + 正文图全清；文章行仍是逻辑删除）、**★ 共用的图不误删**（两篇共用正文图与封面，删一篇后共用的留着、独占的删掉、另一篇仍打不开得开）、**共用附件同理**、**下载头**（附件强制 `Content-Disposition: attachment` + `nosniff`；图片与音频仍内联，附件目录里的 mp3 也强制下载） |
+| `AbstractIntegrationTest` | 0 | **基类（没有用例，占一行是为了让"行数 = 测试类文件数"这条能对账）**：singleton 容器模式起 MySQL/Redis、`@DynamicPropertySource` 注入连接、每个用例前重置限流器、`@Transactional` 自动回滚 |
 | `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |
 | `SecurityHeadersTest` | 7 | 四个安全响应头，含 401 与上传响应两条易漏路径 |
 | `MetricsEndpointTest` | 8 | 指标端点：Prometheus 格式与内容、未开放的端点确实不可达、登录/登出/浏览量落库指标真的会涨 |
@@ -2945,7 +3074,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `DeploymentMemoryBudgetTest` | 9 | 部署配置契约（**读 `docker-compose.prod.yaml` 与 `Dockerfile`，不起 Spring 上下文**）：四个服务都必须有 `mem_limit`、上限之和要给宿主机留余量、**Dockerfile 的 ENTRYPOINT 不许带 JVM 参数**（带了会静默覆盖 `JAVA_TOOL_OPTIONS`）、三个硬上限之和必须小于 `mem_limit`、堆转储与 GC 日志必须落在挂了卷的目录里、redis 必须是 `volatile-lru`（`allkeys-lru` 会淘汰没有 TTL 的浏览量增量 = 真丢数据）、mysql 必须关 `performance_schema` 且缓冲池是 128M 的整数倍（否则被静默取整成 256M）、**数据服务的镜像必须钉住小版本**（浮动 `mysql:8` 实测拉到了四年前的 8.0.27）、YAML 开启重复键检查 |
 | `ActuatorExposureContractTest` | 4 | 管理端点的暴露面契约（`/actuator/prometheus` 在应用层是**放行**的，只能靠部署挡住）：`location /api/` 必须剥掉前缀（这也是 `/api/actuator/` 会命中后端根路径的根因）、必须有把 `/api/actuator/` 返回 404 的 location、mysql/redis 不发布任何端口且 backend/frontend 只绑 `127.0.0.1`、上线核对清单里这一项必须写出**可判定的**预期结果（404） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **439** | |
+| **合计** | **457** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

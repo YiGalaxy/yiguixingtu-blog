@@ -54,7 +54,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @TestPropertySource(properties = {
         // 上传目录指到临时路径，避免在项目目录里留下测试垃圾文件
         "app.upload.local-dir=${java.io.tmpdir}/ygt-upload-test",
-        // 上限设小一点，这样"超大文件"用例不用真的造一个 5MB 的数组
+        // 上限设小一点，这样"超大文件"用例不用真的造一个 10MB 的数组
+        // （图片上限 2026-09 从 5MB 提到 10MB；本类只关心"按 type 分流"，数值本身
+        //   由 ArticleAttachmentTest ④ 读 application.properties 原文钉住）
         "app.upload.max-size=1KB",
         // 音频的上限也设小（2MB），理由同上：不必为了测"超限"真的造一个 21MB 的数组。
         // ⚠️ 它【必须大于】图片的 1KB —— 下面有一条用例专门证明

@@ -60,6 +60,32 @@ public class ArticleVO {
     @Schema(description = "标签列表（没有标签时是空数组）")
     private java.util.List<com.yigalaxy.yiguixingtu.tag.dto.TagVO> tags = new java.util.ArrayList<>();
 
+    /**
+     * 这篇文章的附件（name / url / size），没有附件时是空数组。
+     *
+     * 【只有【详情】接口才填它，列表接口恒为空数组】
+     *   与正文（content）同一个考虑：列表页一次 10 篇文章，
+     *   每篇再查一次附件就是 10 次额外 SQL（N+1），而列表卡片上
+     *   根本不会显示附件（它要的是标题、摘要、封面）。
+     *   ⚠️ 与 tags 的处理方式不同（标签在列表里也填了），
+     *   差别在于"列表用不用得到"：标签是列表卡片上要显示的小标签，
+     *   附件只出现在文章页 —— 为了一个用不到的字段多做一次查询，
+     *   是把成本花在了不产生价值的地方。
+     *
+     * 【它是在哪一层填上的】
+     *   两处详情转换都会填：ArticleServiceImpl.toVO（后台详情，含草稿）
+     *   与 PublishedArticleCache.toVO（前台详情，带 Redis 缓存）。
+     *   两处都调的同一个方法：ArticleAttachmentVO.fromEntities
+     *   —— 为什么必须只留一份转换，见那个方法的注释。
+     *
+     * 【空数组还是 null】
+     *   给【空数组】而不是 null：前端拿到详情就可以直接
+     *   {@code v-for="a in article.attachments"}，不必再写一层判空
+     *   （与 tags 是同一条约定）。
+     */
+    @Schema(description = "附件列表（没有附件时是空数组；列表接口恒为空数组）")
+    private java.util.List<ArticleAttachmentVO> attachments = new java.util.ArrayList<>();
+
     @Schema(description = "状态：0草稿 1已发布")
     private Integer status;
 

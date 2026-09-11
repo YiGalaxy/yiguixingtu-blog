@@ -12,6 +12,8 @@ import com.yigalaxy.yiguixingtu.category.entity.Category;
 import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
 import com.yigalaxy.yiguixingtu.link.entity.FriendLink;
 import com.yigalaxy.yiguixingtu.link.mapper.FriendLinkMapper;
+import com.yigalaxy.yiguixingtu.project.entity.Project;
+import com.yigalaxy.yiguixingtu.project.mapper.ProjectMapper;
 import com.yigalaxy.yiguixingtu.tag.entity.Tag;
 import com.yigalaxy.yiguixingtu.tag.mapper.TagMapper;
 import com.yigalaxy.yiguixingtu.user.entity.User;
@@ -105,6 +107,10 @@ class OperationLogTest extends AbstractIntegrationTest {
     @Autowired
     private FriendLinkMapper friendLinkMapper;
 
+    /** 项目：⑯ 同上 */
+    @Autowired
+    private ProjectMapper projectMapper;
+
     @Autowired
     private UserMapper userMapper;
 
@@ -185,6 +191,8 @@ class OperationLogTest extends AbstractIntegrationTest {
         // 友链（F5）：同样是真提交，而且它只有一个自增 id 可用作清理依据，
         // 所以一律按"名字里带 mark"来删
         jdbcTemplate.update("DELETE FROM friend_link WHERE name LIKE ?", "%" + mark + "%");
+        // 项目（F5）：同上
+        jdbcTemplate.update("DELETE FROM project WHERE name LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM user WHERE username LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM category WHERE name LIKE ?", "%" + mark + "%");
     }
@@ -654,6 +662,54 @@ class OperationLogTest extends AbstractIntegrationTest {
                 "删除记录里必须保留站点名快照，实际=" + deleteLog.getDetail());
     }
 
+    @Test
+    @DisplayName("⑯ 项目的增 / 改 / 删也都会留痕，审计对象类型是 PROJECT")
+    void projectOperations_shouldBeAudited() throws Exception {
+        String firstName = mark + "-项目甲";
+
+        mockMvc.perform(post("/admin/project")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(projectJson(firstName, "https://example.com/p1", 1)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        Project created = projectMapper.selectOne(new LambdaQueryWrapper<Project>()
+                .eq(Project::getName, firstName));
+        assertNotNull(created, "前置条件：项目应当建出来了");
+
+        OperationLog createLog = awaitLog("CREATE_PROJECT", created.getId());
+        assertNotNull(createLog, "新建项目应当留下 CREATE_PROJECT 审计");
+        assertEquals("PROJECT", createLog.getTargetType(), "对象类型应当是 PROJECT");
+        assertTrue(createLog.getDetail().contains(firstName),
+                "detail 里要有项目名，实际=" + createLog.getDetail());
+
+        // ---- 改名 ----
+        String secondName = mark + "-项目乙";
+        mockMvc.perform(put("/admin/project/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(projectJson(secondName, "https://example.com/p2", 2)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog updateLog = awaitLog("UPDATE_PROJECT", created.getId());
+        assertNotNull(updateLog, "编辑项目应当留下 UPDATE_PROJECT 审计");
+        assertTrue(updateLog.getDetail().contains(firstName) && updateLog.getDetail().contains(secondName),
+                "detail 里应当同时有旧名和新名，实际=" + updateLog.getDetail());
+
+        // ---- 删除 ----
+        mockMvc.perform(delete("/admin/project/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog deleteLog = awaitLog("DELETE_PROJECT", created.getId());
+        assertNotNull(deleteLog, "删除项目应当留下 DELETE_PROJECT 审计");
+        assertTrue(deleteLog.getDetail().contains(secondName),
+                "删除记录里必须保留项目名快照，实际=" + deleteLog.getDetail());
+    }
+
     // ================================================================
     //  三、"不该记的绝不记"
     // ================================================================
@@ -848,6 +904,17 @@ class OperationLogTest extends AbstractIntegrationTest {
                   "sort": %s
                 }
                 """.formatted(name, url, sort);
+    }
+
+    /** 构造"新建 / 编辑项目"的 JSON 请求体（见第⑯条） */
+    private String projectJson(String name, String repo, Object sort) {
+        return """
+                {
+                  "name": "%s",
+                  "repo": "%s",
+                  "sort": %s
+                }
+                """.formatted(name, repo, sort);
     }
 
     /** 构造"新建/编辑文章"的 JSON 请求体 */

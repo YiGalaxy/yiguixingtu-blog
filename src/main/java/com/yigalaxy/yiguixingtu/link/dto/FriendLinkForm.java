@@ -41,8 +41,10 @@ public class FriendLinkForm {
     private String name;
 
     /**
-     * 站点地址。格式必须是 http(s) 开头的完整地址（白名单，理由见 UrlPatterns）。
+     * 站点地址。格式必须是 http(s) 开头的完整地址（白名单，理由见 UrlPatterns）；
      * 长度 255 与数据库列 varchar(255) 对齐。
+     * 空串由上面的 {@code @NotBlank} 拦住（友链没有地址就没有意义）——
+     * 这也是"为什么正则本身允许空串"能成立的前提：必填靠 @NotBlank，格式靠 @Pattern。
      */
     @NotBlank(message = "站点地址不能为空")
     @Size(max = 255, message = "站点地址最长 255 字")

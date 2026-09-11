@@ -80,7 +80,16 @@ public enum OperationAction {
     UPDATE_LINK("编辑友链"),
 
     /** 删除友链 */
-    DELETE_LINK("删除友链");
+    DELETE_LINK("删除友链"),
+
+    /** 新建项目 */
+    CREATE_PROJECT("新建项目"),
+
+    /** 编辑项目 */
+    UPDATE_PROJECT("编辑项目"),
+
+    /** 删除项目 */
+    DELETE_PROJECT("删除项目");
 
     /** 中文说明，便于直接展示与排查（不用在前端再维护一份翻译） */
     private final String description;

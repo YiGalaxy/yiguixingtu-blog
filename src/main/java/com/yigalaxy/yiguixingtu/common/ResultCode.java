@@ -79,6 +79,9 @@ public enum ResultCode {
      */
     LINK_NOT_FOUND(404, "友链不存在"),
 
+    /** 项目不存在（含"已被逻辑删除"） */
+    PROJECT_NOT_FOUND(404, "项目不存在"),
+
     /** 分类名重复（前端要提示"换个名字"，而不是笼统的"已存在"） */
     CATEGORY_NAME_EXISTS(400, "分类名已存在"),
 

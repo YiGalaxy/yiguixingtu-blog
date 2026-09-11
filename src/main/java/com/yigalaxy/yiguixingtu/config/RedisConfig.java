@@ -136,6 +136,18 @@ public class RedisConfig {
     public static final String CACHE_FRIEND_LINK_LIST = "link:list";
 
     /**
+     * 项目列表的缓存名（前台"我的项目"页）。
+     *
+     * 【为什么它值得缓存，且为什么和友链用同一个版本号】
+     *   理由与友链完全一样（读多写极少、和文章无关）。
+     *   两者共用 {@code ContentCacheVersion} 那一个计数器：
+     *   代价只是"改一条友链会让项目列表也重建一次"，而这类内容一个月都未必改一次；
+     *   换成两个计数器则是两份要维护、要清理、要写测试的状态。
+     *   （和"标签与分类共用文章版本号"是同一个取舍：宁可多作废一次，也不多养一套状态。）
+     */
+    public static final String CACHE_PROJECT_LIST = "project:list";
+
+    /**
      * 统计结果的缓存时长：60 秒。
      * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
      * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
@@ -287,6 +299,7 @@ public class RedisConfig {
                 .withCacheConfiguration(CACHE_TAG_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_CATEGORY_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_FRIEND_LINK_LIST, baseConfig)
+                .withCacheConfiguration(CACHE_PROJECT_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_ARCHIVE, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_RSS, baseConfig)
                 .build();

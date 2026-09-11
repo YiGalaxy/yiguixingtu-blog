@@ -209,6 +209,8 @@ public class SecurityConfig {
                             // 友链列表：前台友情链接页要用。它只返回 status = 1 的那些
                             //（过滤写在 Service 的查询里，不是"由前端决定不显示"）
                             "/link/list",
+                            // 项目列表：前台"我的项目"页要用。同样只返回 status = 1 的那些
+                            "/project/list",
                             "/comment/list"      // 评论列表（只返回【已通过】的评论，状态在 Service 里写死）
                     ).permitAll();
 

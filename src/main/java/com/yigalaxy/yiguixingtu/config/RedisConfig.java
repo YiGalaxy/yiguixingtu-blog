@@ -168,6 +168,23 @@ public class RedisConfig {
     public static final String CACHE_ABOUT = "about:detail";
 
     /**
+     * 音乐列表的缓存名（前台「音乐」页）。
+     *
+     * 【为什么它值得缓存】音乐页是"每次打开都要拉一次"的接口，而曲目表
+     * 【只有管理员在后台上传曲目时才变】—— 典型的"读多写极少"。
+     * 而且列表里带的是歌词（TEXT，一条几百字到几 KB），一次返回全部曲目时
+     * 这些长文本都要从库里读出来，缓存掉的收益比友链那种"只有一行文字"的模块更明显。
+     *
+     * 【⚠️ 它为什么不用文章那个版本号】
+     *   与友链 / 项目 / 收藏 / 关于同一条理由：音乐和文章毫无关系（没有任何表引用它）。
+     *   如果共用 {@code article:page:version}，"上传一首歌 / 改一句歌词"会把
+     *   文章列表 / 详情 / 归档 / RSS / 分类 / 标签六份缓存一起作废 ——
+     *   功能不错，但纯属无谓的重新查库，还会让人以为"文章那边的缓存为什么老在重建"。
+     *   所以它和 F5 那四个内容模块共用 {@code ContentCacheVersion} 那一个计数器。
+     */
+    public static final String CACHE_MUSIC_LIST = "music:list";
+
+    /**
      * 统计结果的缓存时长：60 秒。
      * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
      * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
@@ -324,6 +341,8 @@ public class RedisConfig {
                 // 关于页是单条对象（不是列表），但 TTL 与序列化规则和列表完全一样，
                 // 所以也走 baseConfig —— 没有差异就不必造一份只为了"看起来整齐"的配置
                 .withCacheConfiguration(CACHE_ABOUT, baseConfig)
+                // 音乐列表也是列表，TTL 与序列化规则和上面几个完全一样，所以同样走 baseConfig
+                .withCacheConfiguration(CACHE_MUSIC_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_ARCHIVE, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_RSS, baseConfig)
                 .build();

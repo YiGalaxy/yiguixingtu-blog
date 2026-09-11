@@ -55,7 +55,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         // 上传目录指到临时路径，避免在项目目录里留下测试垃圾文件
         "app.upload.local-dir=${java.io.tmpdir}/ygt-upload-test",
         // 上限设小一点，这样"超大文件"用例不用真的造一个 5MB 的数组
-        "app.upload.max-size=1KB"
+        "app.upload.max-size=1KB",
+        // 音频的上限也设小（2MB），理由同上：不必为了测"超限"真的造一个 21MB 的数组。
+        // ⚠️ 它【必须大于】图片的 1KB —— 下面有一条用例专门证明
+        // "同一份 1.5KB 的内容，作为图片被拒、作为音频被接受"，
+        // 两个上限如果一样就证明不了"规则真的按 type 分流了"
+        "app.upload.audio-max-size=2MB"
 })
 class UploadAdminTest extends AbstractIntegrationTest {
 
@@ -287,6 +292,196 @@ class UploadAdminTest extends AbstractIntegrationTest {
         assertNotNull(url, "上传应当返回 url");
         assertTrue(url.contains("/uploads/cover/"),
                 "URL 里应当带上配置的前缀（形如 /uploads/cover/2026/09/xxx.png），实际=" + url);
+    }
+
+    // ================================================================
+    //  四、音频上传（type=audio）—— 音乐模块的曲目文件走这条路
+    //
+    //  【这一组用例要同时钉住【两个方向】】
+    //    ① 音频这一套规则真的生效：mp3 能传、存到 uploads/music/、落盘、能匿名取到
+    //    ② 图片那一套规则【没有被顺手放宽】：默认（不传 type）仍然拒 mp3、
+    //       上限仍是图片的 1KB（不是音频的 2MB）、音频接口也仍然拒 png
+    //    ② 才是这组用例里最值钱的部分 —— 放宽一个白名单或改大一个数字，
+    //    不会有任何报错，只会让"封面图字段被填成音频地址"这种事很久以后才被发现。
+    // ================================================================
+
+    /** 一个最小的合法 mp3（ID3v2 头 + 一帧静音）—— 内容不重要，扩展名与大小才是被测的点 */
+    private static final byte[] TINY_MP3 = new byte[]{
+            'I', 'D', '3', 4, 0, 0, 0, 0, 0, 0,
+            (byte) 0xFF, (byte) 0xFB, (byte) 0x90, 0x00
+    };
+
+    @Test
+    @DisplayName("⑬ type=audio 上传 mp3 -> 返回 URL、文件真的落在 uploads/music/ 下、且能被匿名取到")
+    void audioUpload_shouldWriteFileUnderMusicDirAndBeReadable() throws Exception {
+        String body = mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "夜曲.mp3", "audio/mpeg", TINY_MP3))
+                        .param("type", "audio")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                // 返回结构【没有变】：地址仍然在 data.url（前端上传组件只读它）
+                .andExpect(jsonPath("$.data.url").isString())
+                .andReturn().getResponse().getContentAsString();
+
+        String url = extractUrl(body);
+        assertNotNull(url, "返回体里应当有 url，实际=" + body);
+        assertTrue(url.contains("/uploads/music/"),
+                "音频应当存到与图片【不同】的子目录（/uploads/music/...），实际=" + url);
+        assertTrue(url.endsWith(".mp3"), "扩展名应当保留，实际=" + url);
+        assertTrue(!url.contains("夜曲"), "文件名应当被 UUID 替换掉（歌名带中文/空格很常见），实际=" + url);
+
+        // 【关键断言】落盘 + 内容一致：只断言 HTTP 200 只能说明接口没报错
+        String objectKey = url.substring(url.indexOf("/uploads/") + "/uploads/".length());
+        Path saved = Paths.get(uploadProperties.getLocalDir()).toAbsolutePath().normalize().resolve(objectKey);
+        assertTrue(Files.exists(saved), "音频文件应当真的写到磁盘上: " + saved);
+        assertEquals(TINY_MP3.length, Files.readAllBytes(saved).length, "落盘的内容长度应当与上传的一致");
+
+        // 静态映射 /uploads/** 覆盖子目录 —— 不验证的话"后台上传成功、前台播放器 404"
+        mockMvc.perform(get(url.substring(url.indexOf("/uploads/")))).andExpect(status().isOk());
+    }
+
+    @Test
+    @DisplayName("⑭ type=audio 传 .png -> 拒（音频接口不接受图片，方向一）")
+    void audioUpload_withPng_shouldBeRejected() throws Exception {
+        mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "cover.png", "image/png", TINY_PNG))
+                        .param("type", "audio")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.containsString("只允许上传 mp3 格式的音频")));
+    }
+
+    @Test
+    @DisplayName("⑮ 不传 type 传 .mp3 -> 拒（默认仍是图片规则，方向二：音频扩展名没被放宽到图片上）")
+    void defaultUpload_withMp3_shouldBeRejected() throws Exception {
+        mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "song.mp3", "audio/mpeg", TINY_MP3))
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.containsString("只允许上传 jpg / jpeg / png / gif / webp 格式的图片")));
+    }
+
+    @Test
+    @DisplayName("⑯ type=image 显式指定也一样拒 mp3（默认与 type=image 必须是同一个结果）")
+    void imageTypeUpload_withMp3_shouldBeRejected() throws Exception {
+        mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "song.mp3", "audio/mpeg", TINY_MP3))
+                        .param("type", "image")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400));
+    }
+
+    @Test
+    @DisplayName("⑰ 大小上限按 type 分流：同一份 1.5KB 内容，图片被拒（1KB）、音频被接受（2MB）")
+    void sizeLimit_shouldDependOnType() throws Exception {
+        // 上限在 @TestPropertySource 里设成：图片 1KB、音频 2MB
+        byte[] content = new byte[1536];
+        assertEquals(1536, content.length, "前置条件：这份内容比图片上限(1024)大、比音频上限(2MB)小");
+
+        // 作为图片：超限被拒 —— 说明"音频开到了 2MB"没有顺带把图片也放宽
+        mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "big.png", "image/png", content))
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.containsString("图片不能超过")));
+
+        // 作为音频：同样的字节数被接受 —— 说明音频用的是另一套上限，不是"统一调大了"
+        mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "big.mp3", "audio/mpeg", content))
+                        .param("type", "audio")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.url").value(
+                        org.hamcrest.Matchers.containsString("/uploads/music/")));
+    }
+
+    @Test
+    @DisplayName("⑱ 超过音频大小上限（2MB）-> 拒，并且给出用户看得懂的提示")
+    void audioUpload_oversize_shouldBeRejected() throws Exception {
+        byte[] big = new byte[3 * 1024 * 1024];
+        mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "big.mp3", "audio/mpeg", big))
+                        .param("type", "audio")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.containsString("音频不能超过")));
+    }
+
+    @Test
+    @DisplayName("⑲ 不认识的 type（video / audo 打错字）-> 400，提示只支持 image / audio")
+    void unknownType_shouldBeRejected() throws Exception {
+        // 【为什么未知类型要报错，而不是"回落到图片"】
+        //   回落到图片的话，type=audo（打错一个字）的表现是
+        //   "上传 mp3 被拒，提示只允许 jpg…" —— 用户看到的是"格式不支持"，
+        //   真正的原因却是参数名拼错了。报"不支持的类型"才有指向。
+        mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "a.mp3", "audio/mpeg", TINY_MP3))
+                        .param("type", "audo")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.containsString("只支持 image / audio")));
+    }
+
+    @Test
+    @DisplayName("⑳ 音频上传同样只有管理员能干：无 token 401、游客 403")
+    void audioUpload_shouldRequireAdmin() throws Exception {
+        mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "song.mp3", "audio/mpeg", TINY_MP3))
+                        .param("type", "audio"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "song.mp3", "audio/mpeg", TINY_MP3))
+                        .param("type", "audio")
+                        .header("Authorization", "Bearer " + guestToken))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("㉑ type 大小写不敏感、带空格也能认（type=Audio / ' audio '）")
+    void audioType_shouldBeCaseInsensitiveAndTrimmed() throws Exception {
+        mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "song.mp3", "audio/mpeg", TINY_MP3))
+                        .param("type", " Audio ")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.url").value(
+                        org.hamcrest.Matchers.containsString("/uploads/music/")));
+    }
+
+    @Test
+    @DisplayName("㉒ 两个前缀各自取自配置：图片 cover、音频 music（改名后仍然生效）")
+    void bothPrefixes_shouldComeFromConfiguration() throws Exception {
+        assertEquals("cover", uploadProperties.getKeyPrefix(),
+                "图片前缀应当来自 app.upload.key-prefix");
+        // 音频前缀在 @TestPropertySource 里没有覆盖，取 application.properties 的默认值 music
+        assertEquals("music", uploadProperties.getAudioKeyPrefix(),
+                "音频前缀应当来自 app.upload.audio-key-prefix");
+
+        String audioUrl = extractUrl(mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "song.mp3", "audio/mpeg", TINY_MP3))
+                        .param("type", "audio")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+
+        assertNotNull(audioUrl, "上传应当返回 url");
+        assertTrue(audioUrl.contains("/uploads/music/"),
+                "音频 URL 里应当带上配置的前缀（形如 /uploads/music/2026/09/xxx.mp3），实际=" + audioUrl);
     }
 
     // ================================================================

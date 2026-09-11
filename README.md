@@ -41,7 +41,7 @@
 | 限流 | Resilience4j 2.4.0（`resilience4j-spring-boot4`）—— 注解式限流，**不写自研切面**；与 Nginx `limit_req` 组成两层，见「部署」章节 |
 | 链路追踪 | Micrometer Tracing + Brave（traceId 进日志 + 响应头 `X-Trace-Id`），见「可观测」 |
 | 操作审计 | Spring 事件机制（`@TransactionalEventListener` + `@Async`）+ 自建 `operation_log` 表，**不写自研切面**，见「操作审计」 |
-| 图片存储 | 服务器本地磁盘 + 具名卷持久化；**不接对象存储**（理由与"将来怎么换"见「文件上传」章节） |
+| 文件存储 | 图片与音频都存服务器本地磁盘 + 具名卷持久化；**不接对象存储**（理由与"将来怎么换"见「文件上传」章节） |
 | 工具库 | Lombok |
 | 测试 | JUnit 5 + MockMvc（`spring-boot-starter-webmvc-test`）+ **Testcontainers 2.0.5** |
 | 代码覆盖率 | JaCoCo 0.8.13 |
@@ -171,7 +171,7 @@
   编辑时保持原值（"不传"和"想改成 0"必须能区分开）
 - 增 / 改 / 删都进操作审计（`CREATE_LINK` / `UPDATE_LINK` / `DELETE_LINK`，对象类型 `LINK`）
 - 前台列表走 Redis 缓存，key 里带**内容缓存版本号**（`content:list:version`）——
-  F5 的四个内容模块（友链 / 项目 / 收藏 / 关于）共用这一个计数器：
+  站点内容模块（友链 / 项目 / 收藏 / 关于 / 音乐）共用这一个计数器：
   它们和文章毫无关系，若沿用文章那个版本号，"加一条友链"会把文章列表 / 详情 /
   归档 / RSS / 分类 / 标签六份缓存一起作废（功能不错，但纯属无谓的重新查库）
 
@@ -240,6 +240,34 @@
 - 保存进操作审计（`UPDATE_ABOUT`，对象类型 `ABOUT`，`target_id` 恒为 1）：
   按 `target_type = 'ABOUT'` 查就能得到"关于页被谁改过几次"的完整历史
 
+**音乐**
+- 音乐列表 `GET /music/list`（游客可访问）：只返回 `status = 1` 的那些，
+  按 `sort` 升序、`sort` 相同再按 `id` 升序（**两段排序是前台的契约** ——
+  只按 `sort` 排的话，同一个 `sort` 的两首在两次请求里先后不定，列表会"自己跳"；
+  V11 的索引 `(status, sort, id)` 就是照这条查询建的）；
+  后台 `/admin/music/**` 是同一套增删改查
+- **曲目由后台录入**：先 `POST /upload?type=audio` 传 mp3（返回的地址形如
+  `/uploads/music/2026/09/{uuid}.mp3`），再填曲名 / 歌手 / 封面 / 歌词存进 `music` 表。
+  在此之前曲目是写死在前端的，换一首歌要改代码重新部署
+- ⚠️ **`lyrics` 存的是 LRC 原文文本（TEXT），不是文件路径**：
+  时间戳由前端自己解析（`app/utils/lrc.ts`）。后端不解析 ——
+  解析结果（什么时间点显示哪一行）是纯展示逻辑，放后端只会多一份要跟着前端改的东西。
+  上限 20000 字：一份带逐句时间戳的 LRC 很容易超过 2000 字，卡在那里只会挡住正当输入
+- ⚠️ **`url` 走的是 `MEDIA_URL` 白名单，不是 `IMAGE_URL`**：两者规则相同
+  （http(s) 外链 / `/` 开头的站内路径 / 空串放行），但语义不同 ——
+  用 `IMAGE_URL` 会让后来的人以为"音频地址被限制成了图片"。
+  为什么不合并成一个常量，见 `common/validation/UrlPatterns` 的注释
+- ⚠️ **删除只删数据库里的那一行，磁盘上的 mp3 不删**（逻辑删除）：
+  同一个文件可能被多条记录引用，而删文件不可逆 —— 猜错的代价太大。
+  磁盘上的 `uploads/music/` 会随删除慢慢积累，需要时按目录手工清理
+- ⚠️ **迁移里刻意不插任何种子数据**：库里一首都没有是**正常状态** ——
+  前端在列表为空时会回落成内置的那一首（`static-media/bg-music.mp3`）。
+  看到 `music` 表是空的时候不要去"补数据"，也不要把空列表当成接口坏了
+  （`GET /music/list` 此时返回 `code 200` + 空数组，不是 404）
+- 其余与友链 / 项目 / 收藏同形：`""` 归一化成 `NULL`、增 / 改 / 删进审计
+  （`CREATE_MUSIC` / `UPDATE_MUSIC` / `DELETE_MUSIC`，对象类型 `MUSIC`）、
+  前台列表走 Redis 缓存并共用内容缓存版本号
+
 **基础设施**
 - 统一返回 `{code, message, data}`
 - 全局异常处理（业务异常 / 参数校验 / 认证失败 / 账号禁用 / 权限不足 / 兜底）
@@ -250,15 +278,17 @@
   被限流返回 **429** —— 两层的分工与数值理由见「部署」章节
 - **操作审计**：文章的增 / 改 / 发布下架 / 删除，用户的启用禁用 / 改角色 /
   重置密码 / 删除，标签的增 / 改 / 删，评论的审核 / 删除，分类的增 / 改 / 删，
-  友链的增 / 改 / 删，项目、收藏的增 / 改 / 删，关于页的保存
-  —— 共 26 类管理动作全部留痕（操作人、来源 IP、traceId、改动内容快照）；
+  友链的增 / 改 / 删，项目、收藏的增 / 改 / 删，关于页的保存，音乐的增 / 改 / 删
+  —— 共 29 类管理动作全部留痕（操作人、来源 IP、traceId、改动内容快照）；
   **业务提交之后才异步落库**，回滚掉的操作不会被记下来 —— 见「操作审计」
 - **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
-- **图片上传**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
-  图片存服务器本地磁盘，并用**具名卷**持久化
-- 集成测试 **35 个类 369 个用例**，行覆盖率 **91.2%**
+- **文件上传（图片 + 音频两套规则）**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
+  图片走 `type=image`（默认，5MB，存 `uploads/cover/`），音频走 `type=audio`
+  （mp3，20MB，存 `uploads/music/`）—— 两套规则**互不放宽**，各有用例钉住；
+  文件存服务器本地磁盘，并用**具名卷**持久化
+- 集成测试 **36 个类 403 个用例**，行覆盖率 **91.2%**
 
 ### 🚧 规划中
 
@@ -280,7 +310,7 @@ com.yigalaxy.yiguixingtu
 ├── common
 │   ├── Result                      # 统一返回包装 {code, message, data}
 │   ├── ResultCode                  # 结果码枚举
-│   ├── cache/ContentCacheVersion    # F5 内容模块（友链/项目/收藏/关于）共用的缓存版本号
+│   ├── cache/ContentCacheVersion    # 站点内容模块（友链/项目/收藏/关于/音乐）共用的缓存版本号
 │   ├── validation/UrlPatterns       # URL 入参白名单正则（http(s) 外链 / 站内路径）
 │   ├── metrics/BusinessMetrics     # 自定义业务指标（浏览量落库 / 登录 / token 拉黑）
 │   ├── idempotency/IdempotencyService   # 接口幂等：SET NX 占位 + 结果缓存（见「接口幂等」章节）
@@ -310,7 +340,7 @@ com.yigalaxy.yiguixingtu
 ├── audit
 │   ├── OperationLog                # 审计记录实体（对应 operation_log 表，刻意没有逻辑删除）
 │   ├── OperationAction             # 操作类型枚举（CREATE_ARTICLE / DELETE_USER …）
-│   ├── AuditTarget                 # 操作对象类型（ARTICLE / USER / TAG / COMMENT / CATEGORY / LINK / PROJECT / FAVORITE / ABOUT）
+│   ├── AuditTarget                 # 操作对象类型（ARTICLE / USER / TAG / COMMENT / CATEGORY / LINK / PROJECT / FAVORITE / ABOUT / MUSIC）
 │   ├── OperationLogEvent           # 事件对象（带上用户 / IP / traceId 的快照）
 │   ├── OperationLogRecorder        # 业务代码只调它一行：抄上下文 + 发事件
 │   ├── OperationLogListener        # @Async + AFTER_COMMIT：业务提交后才落库
@@ -388,6 +418,13 @@ com.yigalaxy.yiguixingtu
     ├── entity/About                     # 全站唯一没有 @TableLogic / create_time 的业务表
     ├── mapper/AboutMapper
     └── dto/                             # AboutForm / AboutVO
+└── music
+    ├── MusicController                  # 前台：音乐列表（公开，只含显示中的；列表为空返回空数组）
+    ├── AdminMusicController             # 后台：音乐增删改查（ADMIN）
+    ├── service/MusicService(+Impl)      # ⚠️ 删除只逻辑删库里的行，磁盘上的音频文件不删（见实体注释）
+    ├── entity/Music                     # lyrics 是 LRC 原文（TEXT），不是文件路径
+    ├── mapper/MusicMapper
+    └── dto/                             # MusicForm / MusicVO
 
 src/main/resources
 ├── application.properties
@@ -402,7 +439,8 @@ src/main/resources
     ├── V7__create_friend_link_table.sql # friend_link（友链；同样是逻辑删除）
     ├── V8__create_project_table.sql     # project（项目；url 与 repo 至少填一个，见脚本内说明）
     ├── V9__create_favorite_table.sql    # favorite（收藏；category 是自由文本分组名，见脚本内说明）
-    └── V10__create_about_table.sql      # about（关于页；只有一行，插入语句就在脚本里）
+    ├── V10__create_about_table.sql      # about（关于页；只有一行，插入语句就在脚本里）
+    └── V11__create_music_table.sql      # music（音乐；**刻意不插种子数据**，见脚本内说明）
 
 src/test/java/com/yigalaxy/yiguixingtu
 ├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
@@ -430,12 +468,13 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── ProjectTest                     # 项目：同上 + ⚠️ url 与 repo 至少填一个（两个都空被拒、只填一个合法、编辑时清空也拒且不动旧值）
 ├── FavoriteTest                    # 收藏：同上 + ⚠️ category 是自由文本分组（斜杠合法、可重复、空串归一化成 NULL、只卡长度）
 ├── AboutTest                       # 关于页：单条记录的不变量（永远一行 / 缺行时读给空壳且保存能写回 / POST 是真 405）+ 校验边界 + 权限 + 缓存
-├── UploadAdminTest                 # 封面上传（类型/大小校验、权限）
+├── MusicTest                       # 音乐：排序两段稳定（sort 同则按 id）/ 音频地址白名单 / 长歌词原样存取 / 空列表返回空数组 / 增删改与权限 / 缓存命中与失效
+├── UploadAdminTest                 # 上传（图片 + 音频两套规则、大小按 type 分流、权限）
 ├── LogoutTokenTest                 # 登出后旧 token 立即失效（jti 黑名单）
 ├── SecurityHeadersTest             # 四个安全响应头
 ├── MetricsEndpointTest             # 指标端点与自定义业务指标
 ├── TracingTest                     # 链路追踪：traceId 进日志 + 进响应头
-├── OperationLogTest                # 操作审计：26 类写操作都留痕 / IP 取真实客户端 / 回滚与失败不记账
+├── OperationLogTest                # 操作审计：29 类写操作都留痕 / IP 取真实客户端 / 回滚与失败不记账
 ├── PaginationLimitTest             # 分页全局上限（从 Mapper 层验证插件兜底）
 ├── ProfileDevConfigTest            # dev 环境行为：Swagger 开着 / SQL 日志 / 跨域白名单
 ├── ProfileProdConfigTest           # prod 环境行为：Swagger 关闭 / 凭据必须来自环境变量
@@ -806,18 +845,50 @@ spring.datasource.hikari.max-lifetime=1800000
 | `connection-timeout` | 3000 ms | Hikari 默认 30 秒 —— 数据库出问题时请求要挂 30 秒才报错（用户早关页面了），这期间还一直占着 Tomcat 工作线程。实测 P99 才 135ms，3 秒足够覆盖正常排队，超过就是不正常，应当立刻失败 |
 | `max-lifetime` | 1800000 ms（30 分钟） | MySQL 的 `wait_timeout` 默认 8 小时，超时会被服务端单方面关连接。池里的连接若活得比它久，就会拿到一条"其实已经死了"的连接，报出 `Communications link failure` 这种与真实原因无关的错。30 分钟 ≪ 8 小时；**将来调小 MySQL 的 `wait_timeout`，这个值必须跟着调小** |
 
-#### 文件上传（封面图存在服务器磁盘上）
+#### 文件上传（封面图与音频都存在服务器磁盘上）
 
 ```properties
+# ---- 图片：POST /upload（不传 type，或 type=image）----
 app.upload.local-dir=${UPLOAD_LOCAL_DIR:./uploads}
 app.upload.base-url=${UPLOAD_BASE_URL:http://localhost:8082}
 app.upload.allowed-extensions=jpg,jpeg,png,gif,webp
 app.upload.key-prefix=${UPLOAD_KEY_PREFIX:cover}
 app.upload.max-size=5MB
+# ---- 音频：POST /upload?type=audio ----
+app.upload.audio-allowed-extensions=mp3
+app.upload.audio-max-size=20MB
+app.upload.audio-key-prefix=${UPLOAD_AUDIO_KEY_PREFIX:music}
+# ---- multipart 的框架层闸门：按【最大的那一类】设，业务层再按 type 细分 ----
+spring.servlet.multipart.max-file-size=20MB
+spring.servlet.multipart.max-request-size=25MB
 ```
 
-**本项目用本地磁盘存封面图，不用对象存储。** 理由很简单：单台 ECS +
-个人博客的图片量级，本地磁盘完全够用，**少一个外部依赖就少一处会失败的地方**
+**两种上传各自一套规则，互不放宽**（完整推导见 `upload/UploadType` 的类注释）：
+
+| | 图片（默认 / `type=image`） | 音频（`type=audio`） |
+|---|---|---|
+| 扩展名 | `jpg` `jpeg` `png` `gif` `webp` | `mp3` |
+| 大小上限 | 5MB | **20MB** |
+| 存储目录 | `uploads/cover/yyyy/MM/` | `uploads/music/yyyy/MM/` |
+| 返回 | `{"url": "..."}`（**两者结构完全一样**，前端上传组件不用改） | 同左 |
+
+> **20MB 这个数字的依据（不是拍的）**：主流音乐平台的高质量档约 320kbps（≈40KB/s），
+> 一首 5 分钟的歌 = 320kbps × 300s ÷ 8 ≈ **12MB**，取 20MB 足以覆盖 320kbps 下
+> 8 分钟以内的曲目。音频天然比图片大一个量级（它有时间维度），
+> 所以两套上限分开写、各自有依据，而不是"统一调大到 20MB"。
+>
+> **为什么另起三项配置，而不是把 `mp3` 加进图片白名单、把上限改成 20MB**：
+> 那是两行就能改完的做法，但会**悄悄放宽图片的规则** —— 图片从此能传 20MB、
+> 也能传 mp3，而且不会有任何报错。所以按 `type` 分流，
+> 并且**两个方向各有一条用例钉住**（`UploadAdminTest` ⑭ = 音频接口拒 png、
+> ⑮ = 默认接口拒 mp3，⑰ = 同一份 1.5KB 内容作为图片被拒、作为音频被接受）。
+>
+> **两层限额的分工**：`spring.servlet.multipart.max-file-size` 管"请求能不能进来"
+> （超了根本走不到业务代码，报的是框架异常），`UploadService` 管"这一类允许多大"。
+> 所以框架层按最大的那一类（音频 20MB）设，图片的 5MB 由业务层按 `type` 拦下。
+
+**本项目用本地磁盘存封面图与音频，不用对象存储。** 理由很简单：单台 ECS +
+个人博客的量级，本地磁盘完全够用，**少一个外部依赖就少一处会失败的地方**
 （网络抖动、密钥过期、配额限制、还要多付一份钱）。
 
 > 📌 **那一套 OSS 代码已经删掉了（2026-09-10）**
@@ -843,8 +914,17 @@ app.upload.max-size=5MB
                       └─ 按年月分目录 ─┘  └ UUID 重命名 ┘
 ```
 
+音频同理，只是目录换成了 `music`：
+
+```
+{UPLOAD_BASE_URL}/uploads/music/2026/09/{uuid}.mp3   ← 直接塞进 <audio src>
+```
+
 - **按年月分目录**：单目录里堆几万个文件，`ls`/备份/排查都会变得很难受
-- **UUID 重命名**：用原名会撞名、还会把用户的文件名暴露在 URL 里
+- **UUID 重命名**：用原名会撞名、还会把用户的文件名暴露在 URL 里 ——
+  音频这一点更明显（"周杰伦 - 夜曲 (Live).mp3" 这种名字直接进 URL 只会给编码找麻烦）
+- **两类分开目录**：图片是"文章封面"、音频是"曲目文件"，量与生命周期都不同，
+  备份 / 清理 / 排查（"这个 mp3 是谁传的"）时按目录一眼分得开
 
 > ⚠️ **部署时最容易踩的一个坑：上传目录必须挂到卷上**
 >
@@ -987,7 +1067,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 ## 接口列表
 
-共 **53 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
+共 **58 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
 具体到角色见下方「接口 × 角色权限矩阵」。
 
 | # | 方法 | 路径 | 说明 | 是否需要登录 |
@@ -1027,7 +1107,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 33 | POST | `/admin/category` | 新建分类 | 是（ADMIN） |
 | 34 | PUT | `/admin/category/{id}` | 编辑分类（改名 / 描述 / 排序） | 是（ADMIN） |
 | 35 | DELETE | `/admin/category/{id}` | 删除分类（**分类下有文章时会被拒绝**） | 是（ADMIN） |
-| 36 | POST | `/upload` | 上传图片（封面图），返回可访问 URL | 是（ADMIN） |
+| 36 | POST | `/upload` | 上传文件（**不传 `type` 或 `type=image` → 图片，5MB；`type=audio` → 音频，mp3 / 20MB**），返回可访问 URL | 是（ADMIN） |
 | 37 | GET | `/link/list` | 友链列表（**只含"显示"的**，按 `sort` 升序；走 Redis 缓存） | 否 |
 | 38 | GET | `/admin/link/list` | 友链列表（后台，**含隐藏的、不走缓存**） | 是（ADMIN） |
 | 39 | POST | `/admin/link` | 新建友链 | 是（ADMIN） |
@@ -1045,19 +1125,25 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 51 | DELETE | `/admin/favorite/{id}` | 删除收藏（逻辑删除） | 是（ADMIN） |
 | 52 | GET | `/about` | 关于页信息（单条对象；**只含一行**，走 Redis 缓存） | 否 |
 | 53 | PUT | `/admin/about` | 保存关于页信息（**单条更新，没有新建/删除**） | 是（ADMIN） |
+| 54 | GET | `/music/list` | 音乐列表（**只含"显示"的**，按 `sort` 升序、`sort` 相同按 `id` 升序；走 Redis 缓存；**列表为空返回空数组，不是 404**） | 否 |
+| 55 | GET | `/admin/music/list` | 音乐列表（后台，**含隐藏的、不走缓存**） | 是（ADMIN） |
+| 56 | POST | `/admin/music` | 新建音乐（`url` 来自 `POST /upload?type=audio`） | 是（ADMIN） |
+| 57 | PUT | `/admin/music/{id}` | 编辑音乐（曲名 / 歌手 / 音频地址 / 封面 / 歌词 / 排序 / 显示状态） | 是（ADMIN） |
+| 58 | DELETE | `/admin/music/{id}` | 删除音乐（逻辑删除；**磁盘上的音频文件不删**） | 是（ADMIN） |
 
-**共 53 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
-用本地磁盘存储时，上传的图片通过 `GET /uploads/**` 公开读取（无需登录）。
+**共 58 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
+用本地磁盘存储时，上传的图片与音频都通过 `GET /uploads/**` 公开读取（无需登录）——
+图片在 `uploads/cover/`，音频在 `uploads/music/`，同一个静态映射覆盖子目录，不需要额外配置。
 
 ## 接口 × 角色权限矩阵
 
 三种访问身份：**游客**（不带 token）、**普通用户**（GUEST + 合法 token）、**管理员**（ADMIN + 合法 token）。
 
-> **这张表应当覆盖上面全部 53 个接口**，账是这么对的：**16 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
-> `GET /article/page` `stats` `archive` `rss` `{id}`、`GET /category/list` `tag/list` `comment/list` `link/list` `project/list` `favorite/list` `about`、`POST /comment`）
-> **+ 1 个只需登录**（`GET /auth/me`）**+ 36 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
+> **这张表应当覆盖上面全部 58 个接口**，账是这么对的：**17 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
+> `GET /article/page` `stats` `archive` `rss` `{id}`、`GET /category/list` `tag/list` `comment/list` `link/list` `project/list` `favorite/list` `music/list` `about`、`POST /comment`）
+> **+ 1 个只需登录**（`GET /auth/me`）**+ 40 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
 > `/admin/tag/**` 4 + `/admin/comment/**` 3 + `/admin/category/**` 4 + `/admin/link/**` 4 +
-> `/admin/project/**` 4 + `/admin/favorite/**` 4 + `/admin/about` 1 + `POST /upload` 1）= 53。
+> `/admin/project/**` 4 + `/admin/favorite/**` 4 + `/admin/music/**` 4 + `/admin/about` 1 + `POST /upload` 1）= 58。
 > 以后加接口时这两处要一起改 —— 少一行不会有任何报错，只会让人在这张表里找不到那个接口的权限。
 
 | 接口 | 游客 | GUEST | ADMIN |
@@ -1074,6 +1160,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `GET /project/list` | ✅ | ✅ | ✅ |
 | `GET /favorite/list` | ✅ | ✅ | ✅ |
 | `GET /about` | ✅ | ✅ | ✅ |
+| `GET /music/list` | ✅ | ✅ | ✅ |
 | `GET /article/archive` | ✅ | ✅ | ✅ |
 | `GET /article/rss` | ✅ | ✅ | ✅ |
 | `GET /comment/list`（已通过） | ✅ | ✅ | ✅ |
@@ -1088,9 +1175,10 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `/admin/link/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/project/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/favorite/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
+| `/admin/music/**`（全部 4 个） | ❌ 401 | ❌ 403 | ✅ |
 | `PUT /admin/about` （只有这一个） | ❌ 401 | ❌ 403 | ✅ |
-| `POST /upload` | ❌ 401 | ❌ 403 | ✅ |
-| `GET /uploads/**`（本地存储的图片） | ✅ | ✅ | ✅ |
+| `POST /upload`（图片与音频都是它） | ❌ 401 | ❌ 403 | ✅ |
+| `GET /uploads/**`（本地存储的图片与音频） | ✅ | ✅ | ✅ |
 
 **几个刻意的设计决定：**
 
@@ -1450,6 +1538,7 @@ verify(spyArticleMapper, times(1)).selectById(articleId);   // 12 个线程 -> �
 | 项目 | 新建 / 编辑 / 删除 | `CREATE_PROJECT`、`UPDATE_PROJECT`、`DELETE_PROJECT` |
 | 收藏 | 新建 / 编辑 / 删除 | `CREATE_FAVORITE`、`UPDATE_FAVORITE`、`DELETE_FAVORITE` |
 | 关于页 | 保存（只有这一种） | `UPDATE_ABOUT`（`target_id` 恒为 1） |
+| 音乐 | 新建 / 编辑 / 删除 | `CREATE_MUSIC`、`UPDATE_MUSIC`、`DELETE_MUSIC` |
 
 ### 每条记录有哪些字段，为什么
 
@@ -1537,6 +1626,7 @@ operation_log 表（异步完成，请求早就返回了）
 | `project` | 项目展示（含显示/隐藏、技术栈） | `idx_status_sort(status, sort)` | Flyway `V8__create_project_table.sql` |
 | `favorite` | 收藏（含分组、显示/隐藏） | `idx_status_sort(status, sort)` | Flyway `V9__create_favorite_table.sql` |
 | `about` | 关于页信息（**全表只有一行，`id` 恒为 1**） | 主键 `id`（不需要别的索引） | Flyway `V10__create_about_table.sql`（含那一行的 INSERT） |
+| `music` | 音乐（含歌手 / 封面 / LRC 歌词原文；**迁移刻意不插种子数据**） | `idx_status_sort_id(status, sort, id)`（前台那条查询是 `WHERE status = 1 ORDER BY sort, id`，id 也进索引是为了消掉 filesort，见 V11 注释） | Flyway `V11__create_music_table.sql` |
 | `flyway_schema_history` | Flyway 自己的迁移记录表 | —— | Flyway 自动创建 |
 
 > `article` 上四个索引看着多，其实每个都有明确的归属，缺了会有可量化的退化：
@@ -1583,6 +1673,15 @@ operation_log 表（异步完成，请求早就返回了）
 > 用逻辑删除。它的 `tech`（技术栈）是**逗号分隔的字符串而不是关联表** ——
 > 纯展示字段，没有"按技术栈筛选 / 统计"的需求，不值得为它写一套覆盖式重写关联的逻辑
 > （理由写在 V8 迁移脚本里）。
+>
+> `music`（音乐，V11）同样没有唯一索引（曲名当然可以重复）、用逻辑删除。
+> 它值得单独记一笔的是**两件"看着像漏了其实是有意的"**：
+> ① **迁移里不插任何种子数据** —— 库里一首都没有是正常状态，前端在列表为空时
+>    会回落成内置的那一首（`static-media/bg-music.mp3`）；看到空表不要去"补数据"
+> ② **删除只标记数据库行、不删磁盘上的 mp3** —— 同一个文件可能被多条记录引用，
+>    而删文件不可逆。磁盘上的 `uploads/music/` 会随删除慢慢积累，需要时手工按目录清理
+> 索引比 V7–V9 多带一个 `id`：那条查询的排序是 `sort ASC, id ASC` 两段，
+> 把 id 放进索引才能完全消掉 filesort（理由写在 V11 迁移脚本里）。
 
 ## 性能
 
@@ -1951,7 +2050,7 @@ curl -s http://127.0.0.1:8082/actuator/prometheus | head -20
 | 数据库账号 | compose 里单独建 `yiguixingtu` 业务账号，**不让应用用 root**（最小权限） |
 | Redis | 设 `requirepass`，**内网也设** —— 默认无密码时，只要容器网络可达就等于公开 |
 | JWT 密钥 | 必须用环境变量覆盖，且 prod 配置里**不给默认值**（忘配就启动失败） |
-| 图片存储 | 存在服务器磁盘上（具名卷 uploads_data），不用对象存储；/uploads/** 只放行 GET |
+| 上传的文件 | 图片与音频都存在服务器磁盘上（具名卷 uploads_data），不用对象存储；/uploads/** 只放行 GET（图片在 cover/、音频在 music/，同一个映射覆盖子目录） |
 | 依赖漏洞 | `.github/dependabot.yml` 每周检查 maven 与 github-actions 依赖，自动开 PR |
 | 接口文档 | prod 下 Swagger 真的关掉（不只设开关，还从放行名单里移除，见「配置」章节） |
 
@@ -2511,7 +2610,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 285 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 403 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -2523,10 +2622,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 369 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 403 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**35 个测试类，369 个用例，全部通过：**
+**36 个测试类，403 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -2545,7 +2644,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleDetailCacheTest` | 11 | 详情缓存：走缓存、**浏览量不被冻住**、写操作后立刻更新、下架即 404、自愈重建、**12 线程并发只查库 1 次（防击穿）**、TTL 有效 |
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
-| `UploadAdminTest` | 12 | 封面上传：类型/大小白名单、UUID 重命名、非管理员 403；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
+| `UploadAdminTest` | 22 | 上传的**两套规则**：图片（类型/大小白名单、UUID 重命名、非管理员 403）；音频（`type=audio` 传 mp3 成功且**文件真的落盘、返回的 url 能匿名取到**、音频接口拒 png、默认接口拒 mp3、**大小上限按 type 分流**、超音频上限被拒、未知 type 被拒、音频同样只有管理员能传、`type` 大小写与空格容错、两个前缀各自取自配置）；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
 | `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |
 | `SecurityHeadersTest` | 7 | 四个安全响应头，含 401 与上传响应两条易漏路径 |
 | `MetricsEndpointTest` | 8 | 指标端点：Prometheus 格式与内容、未开放的端点确实不可达、登录/登出/浏览量落库指标真的会涨 |
@@ -2559,13 +2658,14 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleTagTest` | 12 | 文章打标签与按标签筛选：覆盖式语义（换标签旧的不留）、**校验先于写入**（失败不动原有标签）、去重、草稿不泄漏、标签不存在返回空页、列表带标签、删文章清关联、打标签后标签云计数立刻 +1 |
 | `CommentTest` | 17 | 评论：游客可发但**默认待审核**、传 `status=0` 也拿不到待审核内容、审核通过才可见、草稿不能评论、XSS 转义、**常见符号（→ — … ©）不被转义**、**极端输入先转义再截断不报 500**、响应里带 `createTime`、公开响应体不含邮箱与 IP、后台带邮箱/IP/文章标题、审核参数校验、逻辑删除（原生 SQL 验物理行）、权限、限流 429、正序与分页 |
 | `CategoryAdminTest` | 11 | 分类：新建/编辑/改名后前台立刻生效、重名与空格、**分类下有文章时拒绝删除**、**删掉后同名分类能重建**（名字被释放）、**文章逻辑删除后分类就能删**（守"手写 COUNT 要自己加 deleted=0"）、权限、前台仍公开 |
-| `OperationLogTest` | 18 | 操作审计：管理动作都留痕（含标签、评论、分类、友链、项目、收藏的增删改，以及关于页的保存）、发表评论**不**记、回滚与失败不记账、审计行不含明文密码 |
+| `OperationLogTest` | 19 | 操作审计：管理动作都留痕（含标签、评论、分类、友链、项目、收藏、音乐的增删改，以及关于页的保存）、发表评论**不**记、回滚与失败不记账、审计行不含明文密码 |
 | `FriendLinkTest` | 20 | 友链：前台只含"显示"的（隐藏的不出现）、排序 sort + id 双段稳定、后台增删改（**清空可选字段真的写成 NULL**）、非法 URL（含 `javascript:`）与非法状态 400、逻辑删除（原生 SQL 验物理行与 deleted）、权限 401/403、缓存命中 / 写操作推进版本号 / key 带版本号且有 TTL |
 | `ProjectTest` | 23 | 项目：同友链那一整套，外加**本项目特有**的"在线地址与仓库地址至少填一个"（两个都空被拒、只填一个合法、编辑时把两个都清空被拒**且库里的旧值分毫未动**）、封面与简介与技术栈的长度边界 |
 | `FavoriteTest` | 21 | 收藏：同友链那一整套，外加 **`category` 是自由文本分组名**的语义（带斜杠合法、同一分组可多条、空串归一化成 NULL、只卡长度 50）、地址必填与格式白名单、备注与标题的长度边界 |
 | `AboutTest` | 16 | 关于页：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 返回空壳且保存能写回 / POST 是真 405）、迁移脚本已插好那一行、昵称与头像与 GitHub 与邮箱与长文本的长度与格式边界、一次性清空全部可选字段真的写成 NULL、权限 401/403、缓存命中与保存后失效 |
+| `MusicTest` | 23 | 音乐：前台只含"显示"的（隐藏的不出现）、**排序两段稳定（sort 升序、sort 相同按 id 升序）**、列表为空返回空数组而不是 404、响应字段齐全（歌词是 LRC 原文、换行不丢）、**音频地址两种形态都合法（`/uploads/music/…` 与 http(s) 外链）而 `javascript:` 被拒**、曲名/歌手/歌词/地址/状态的长度与格式边界、约 5000 字歌词原样存取（守 TEXT 列不被改成短列）、增删改与逻辑删除（原生 SQL 验物理行与 deleted）、清空歌手与封面与歌词真的写成 NULL、权限 401/403、缓存命中 / 写操作推进版本号 / key 带版本号且 TTL 落在 300~360 秒（含抖动） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **369** | |
+| **合计** | **403** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

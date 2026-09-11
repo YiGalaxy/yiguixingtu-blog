@@ -49,17 +49,30 @@ public class UploadController {
     }
 
     /**
-     * 上传一张图片，返回可访问的 URL。
+     * 上传一个文件，返回可访问的 URL。
+     *
+     * 【{@code type} 参数决定按哪一套规则校验】
+     *   不传 / {@code type=image} → 图片：{@code jpg/jpeg/png/gif/webp}，上限 5MB，
+     *     存到 {@code uploads/cover/yyyy/MM/}（**这是接口上线以来的既有行为，一个字没变**）
+     *   {@code type=audio}     → 音频：{@code mp3}，上限 20MB，存到 {@code uploads/music/yyyy/MM/}
+     *   其它取值 → 报"不支持的上传类型"（而不是悄悄回落到图片，理由见 UploadType）
+     *
+     *   ⚠️ 两个方向都【不会】互相放宽：音频不会接受图片扩展名，图片也不会接受 mp3。
+     *   各有一条用例钉着（UploadAdminTest ⑭、⑮，⑰ 证明上限也按 type 分流）——
+     *   这类"顺手放宽"不会有任何报错，只会让"封面图字段填成音频地址"这种事很久以后才被发现。
      *
      * 【为什么返回一个对象而不是直接返回字符串 URL】
      *   直接返回字符串的话，前端拿到的是 {@code data: "http://..."}；
-     *   返回对象（{"url": "..."}）以后想加字段（宽高、文件大小、key）
+     *   返回对象（{"url": "..."}）以后想加字段（宽高、时长、文件大小、key）
      *   不用改前端的解析代码 —— 这是接口设计上很划算的一点预留。
+     *   ⇒ 加了音频之后返回结构【没有变】，仍然是 {@code {url: "..."}}，
+     *     前端的上传组件不用改（它只读 data.url）。
      */
-    @Operation(summary = "上传图片（仅管理员）")
+    @Operation(summary = "上传文件（图片；type=audio 时上传音频）")
     @PostMapping
-    public Result<Map<String, String>> upload(@RequestParam("file") MultipartFile file) {
-        String url = uploadService.upload(file);
+    public Result<Map<String, String>> upload(@RequestParam("file") MultipartFile file,
+                                             @RequestParam(value = "type", required = false) String type) {
+        String url = uploadService.upload(file, type);
         return Result.success(Map.of("url", url));
     }
 }

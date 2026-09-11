@@ -15,6 +15,8 @@ import com.yigalaxy.yiguixingtu.favorite.entity.Favorite;
 import com.yigalaxy.yiguixingtu.favorite.mapper.FavoriteMapper;
 import com.yigalaxy.yiguixingtu.link.entity.FriendLink;
 import com.yigalaxy.yiguixingtu.link.mapper.FriendLinkMapper;
+import com.yigalaxy.yiguixingtu.music.entity.Music;
+import com.yigalaxy.yiguixingtu.music.mapper.MusicMapper;
 import com.yigalaxy.yiguixingtu.project.entity.Project;
 import com.yigalaxy.yiguixingtu.project.mapper.ProjectMapper;
 import com.yigalaxy.yiguixingtu.tag.entity.Tag;
@@ -118,6 +120,10 @@ class OperationLogTest extends AbstractIntegrationTest {
     @Autowired
     private FavoriteMapper favoriteMapper;
 
+    /** 音乐：⑲ 同上 */
+    @Autowired
+    private MusicMapper musicMapper;
+
     @Autowired
     private UserMapper userMapper;
 
@@ -202,6 +208,8 @@ class OperationLogTest extends AbstractIntegrationTest {
         jdbcTemplate.update("DELETE FROM project WHERE name LIKE ?", "%" + mark + "%");
         // 收藏（F5）：同上
         jdbcTemplate.update("DELETE FROM favorite WHERE title LIKE ?", "%" + mark + "%");
+        // 音乐（F6）：同上（本类是 NOT_SUPPORTED，音乐是真的提交进库的）
+        jdbcTemplate.update("DELETE FROM music WHERE title LIKE ?", "%" + mark + "%");
         // 关于页（F5）：这张表只有一行、而且不能删（删了前后台都拿不到数据），
         // 所以本类改完之后要【改回迁移脚本里的初始状态】，而不是删掉它
         jdbcTemplate.update("UPDATE about SET nickname = '站长', avatar = NULL, bio = NULL,"
@@ -797,6 +805,67 @@ class OperationLogTest extends AbstractIntegrationTest {
                 "detail 里应当有昵称，实际=" + log.getDetail());
     }
 
+    @Test
+    @DisplayName("⑲ 音乐的增 / 改 / 删也都会留痕，审计对象类型是 MUSIC")
+    void musicOperations_shouldBeAudited() throws Exception {
+        // 【顺带说明：音乐比另外几个内容模块多一个"文件"】
+        //   本用例只走增删改接口，不上传文件 —— 因为审计记的是"谁改了哪条记录"，
+        //   而音频文件本身由 upload 包负责落盘（那部分的断言在 UploadAdminTest ⑬）。
+        //   提交一个 url 就足以覆盖审计要证明的事。
+        String firstTitle = mark + "-音乐甲";
+
+        mockMvc.perform(post("/admin/music")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(musicJson(firstTitle, "https://example.com/music-a.mp3", 1)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        Music created = musicMapper.selectOne(new LambdaQueryWrapper<Music>()
+                .eq(Music::getTitle, firstTitle));
+        assertNotNull(created, "前置条件：音乐应当建出来了");
+
+        OperationLog log = awaitLog("CREATE_MUSIC", created.getId());
+        assertNotNull(log, "新建音乐应当留下 CREATE_MUSIC 审计");
+        // 对象类型是 MUSIC：按 target_type + target_id 查"这首曲子被改动过几次 / 什么时候被删的"
+        assertEquals("MUSIC", log.getTargetType(), "对象类型应当是 MUSIC");
+        assertEquals(admin.getId(), log.getUserId(), "要记下操作人ID");
+        assertEquals(admin.getUsername(), log.getUsername(), "要记下是谁建的");
+        assertTrue(log.getDetail().contains(firstTitle),
+                "detail 里要有曲名，实际=" + log.getDetail());
+
+        // ---- 改名 ----
+        String secondTitle = mark + "-音乐乙";
+        mockMvc.perform(put("/admin/music/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(musicJson(secondTitle, "https://example.com/music-b.mp3", 2)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog updateLog = awaitLog("UPDATE_MUSIC", created.getId());
+        assertNotNull(updateLog, "编辑音乐应当留下 UPDATE_MUSIC 审计");
+        assertTrue(updateLog.getDetail().contains(firstTitle) && updateLog.getDetail().contains(secondTitle),
+                "detail 里应当同时有旧曲名和新曲名（只记新名字的话，事后看不出这是一次改名），实际="
+                        + updateLog.getDetail());
+
+        // ---- 删除 ----
+        mockMvc.perform(delete("/admin/music/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog deleteLog = awaitLog("DELETE_MUSIC", created.getId());
+        assertNotNull(deleteLog, "删除音乐应当留下 DELETE_MUSIC 审计");
+        // 音乐是【逻辑删除】：行虽然还在表里，但所有走 Mapper 的查询都看不到了
+        // （@TableLogic 会自动加 deleted = 0）——"删掉的是哪一首"这个问题，
+        // 在不专门去翻原生 SQL 的情况下，只有这条审计记录能回答。
+        // ⚠️ 另注：删除【不】删磁盘上的音频文件（见 Music 实体注释），
+        //    所以这条记录也不能被当成"文件已被清理"的凭据。
+        assertTrue(deleteLog.getDetail().contains(secondTitle),
+                "删除记录里必须保留曲名快照，实际=" + deleteLog.getDetail());
+    }
+
     // ================================================================
     //  三、"不该记的绝不记"
     // ================================================================
@@ -1006,6 +1075,17 @@ class OperationLogTest extends AbstractIntegrationTest {
 
     /** 构造"新建 / 编辑收藏"的 JSON 请求体（见第⑰条） */
     private String favoriteJson(String title, String url, Object sort) {
+        return """
+                {
+                  "title": "%s",
+                  "url": "%s",
+                  "sort": %s
+                }
+                """.formatted(title, url, sort);
+    }
+
+    /** 构造"新建 / 编辑音乐"的 JSON 请求体（见第⑲条） */
+    private String musicJson(String title, String url, Object sort) {
         return """
                 {
                   "title": "%s",

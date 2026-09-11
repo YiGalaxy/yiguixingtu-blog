@@ -2084,6 +2084,80 @@ curl -s http://127.0.0.1:8082/actuator/prometheus | head -20
 > 前端用服务名 `backend` 就能访问后端，不用手写网络配置。
 > 代价是上线时两个仓库要放在一起 —— 对一个单机博客来说这个取舍是划算的。
 
+#### ⚠️ 内存预算：2 核 2G 的机器必须给容器设上限（否则 OOM 先杀的是 MySQL）
+
+`docker-compose.prod.yaml` 里给四个服务都写了 `mem_limit`。**这不是"性能调优"，
+而是"能不能稳定跑起来"的前提** —— 原因在 JVM 的容器感知只认 cgroup 限额：
+
+- `Dockerfile` 里**不再写任何堆参数**（镜像保持中立）；堆的大小由 compose 的
+  `JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=60` 决定，而这个百分比乘的是
+  **容器内存上限**（`mem_limit`）。
+- **不设** `mem_limit` 时容器没有限额，JVM 看到的是**宿主机**的那几个 G，
+  于是算出"堆可以到 1.2G"。一台 2G 的机器上，后端 + MySQL + Redis + Node
+  的峰值必然超过物理内存，最后由内核的 OOM killer 出手 ——
+  而它挑的通常是 RSS 最大的那个：**MySQL**。
+  症状是"数据库莫名重启、连接全断"，应用日志里什么都看不到（要看 `dmesg`）。
+- 设了上限之后，越界只会杀掉**越界的那一个**容器，其余服务不受影响，
+  `restart: unless-stopped` 再把它拉回来 —— 故障范围被限制在一个容器里。
+
+| 服务 | 上限 | 预估实占 | 主要构成 |
+|---|---|---|---|
+| `mysql` | 512m | ~200MB | 缓冲池 128M + 连接与线程 |
+| `backend` | 768m | ~550MB | 堆 ~462M + 元空间 + 线程栈 + 直接内存 |
+| `frontend` | 320m | ~180MB | Node SSR 的常驻内存 |
+| `redis` | 128m | ~30MB | `maxmemory 96mb`（实际只用到十几 MB） |
+| **合计** | **1728m** | | 余 ~320MB 给系统 + Docker + Nginx |
+
+**这张表里已经实测过三项**（不是纸面估算）：
+
+| 服务 | 实测方式 | 结果 |
+|---|---|---|
+| `mysql` | 容器 512m 下**从空数据目录初始化**（mysql 8.4.11） | 成功；占用 197MB / 512MB（38%），`OOMKilled=false`；`performance_schema=0`、`innodb_buffer_pool_size=128M`、`max_connections=50` 三项均生效 |
+| `redis` | 容器 128m 下启动 | 正常；`maxmemory=96MB`、`maxmemory-policy=volatile-lru` 均生效 |
+| `backend` | `--memory 768m` + 本文件里的 `JAVA_TOOL_OPTIONS` | 堆 462M / 元空间 192M / 直接内存 64M（和 718M < 768M），`gc.log` 正常生成 |
+
+> ⚠️ **MySQL 的缓冲池会被静默向上取整**（这一条是实测踩出来的）：
+> MySQL 会把 `innodb_buffer_pool_size` 取整到 `innodb_buffer_pool_chunk_size`
+> 的整数倍，而那个 chunk 默认就是 **128M**。所以
+> `--innodb-buffer-pool-size=192M` 实际生效的是 **256M**（实测
+> `@@innodb_buffer_pool_size = 268435456`）——白占 64M，而且不报错、不警告。
+> 写 `128M` 才实测得到 128M。**取值应当是 128M 的整数倍**
+> （除非连 chunk size 一起改），测试里有一条用例盯着这件事。
+
+> ⚠️ **上限之和刻意不顶满 2048**。操作系统、Docker 守护进程、Nginx、sshd
+> 自身也要内存，而它们不在 compose 里。把容器上限之和顶到物理内存，
+> 等于把"谁先被 OOM"交给内核随机决定。
+
+**宿主机还要配 4G swap**（compose 里没有对应配置项，所以写在这里）：
+
+```bash
+sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+free -h          # 应当看到 Swap: 4.0Gi
+```
+
+**为什么是 4G**：compose 不写 `memswap_limit` 时，Docker 默认允许容器使用
+"内存上限 + 等量 swap"，四个容器加起来最坏是 `512+768+320+128 = 1728M`，
+4G 刚好把最坏情况整个接住。
+**swap 不是"内存够就不用配"** —— 它在这里的作用是给内存上限兜底，
+让容器即使在峰值也只会变慢、不会被杀。
+
+验证上限真的生效（`LIMIT` 列应当就是上面那几个值）：
+
+```bash
+docker stats --no-stream
+# 或看单个容器：docker inspect yiguixingtu-prod-backend --format '{{.HostConfig.Memory}}'
+```
+
+> **换到更大内存的机器时**按同一张表整体放大即可：主要改四个 `mem_limit`；
+> backend 的堆是百分比、会自动跟着走，但 mysql 的 `--innodb-buffer-pool-size`
+> 是绝对值、要一起改（**而且要给 128M 的整数倍**，理由见上面那条取整的说明）。
+>
+> ⚠️ **万一 MySQL 第一次初始化就被杀**（容器反复重启、`docker inspect` 的
+> `ExitCode` 是 137、`dmesg` 里有 oom-kill 记录）：把 mysql 提到 640m，
+> 同时把 backend 降到 640m —— **总量维持不变，不要直接加总预算**。
+
 ### 1. 准备环境变量
 
 在服务器上（`docker-compose.prod.yaml` 同目录）创建 `.env`：
@@ -2138,7 +2212,7 @@ BOOTSTRAP_ADMIN_NICKNAME=站长
 # 第一次（要构建后端镜像，会花几分钟）
 docker compose -f docker-compose.prod.yaml up -d --build
 
-# 看状态：三个都应该是 healthy
+# 看状态：四个都应该是 healthy
 docker compose -f docker-compose.prod.yaml ps
 
 # 跟一下后端日志，确认这几件事都发生了：
@@ -2153,7 +2227,7 @@ MySQL 用 `mysqladmin ping`、Redis 用 `redis-cli ping`。
 `backend` 通过 `depends_on: condition: service_healthy` 等另外两个**真的能用**了才启动 ——
 否则 MySQL 还在初始化数据目录时应用就去连库，Flyway 会直接报错退出。
 
-**重启 Docker 服务后会自动恢复**：三个服务都配了 `restart: unless-stopped`。
+**重启 Docker 服务后会自动恢复**：四个服务都配了 `restart: unless-stopped`。
 
 ### 3. Nginx 反向代理（含第一层限流）
 

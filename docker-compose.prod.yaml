@@ -1,5 +1,5 @@
 # =====================================================================
-# 生产环境编排（三个容器：backend + mysql + redis）
+# 生产环境编排（四个容器：backend + frontend + mysql + redis）
 #
 # 【⚠️ 必须给它一个独立项目名（name），这是踩过坑才加的】
 #   compose 默认用【目录名】当项目名，而 docker-compose.yaml（本地开发）
@@ -18,7 +18,7 @@
 #   | 有哪些服务 | 只有 mysql + redis | backend + mysql + redis |
 #   | 数据库端口 | **映射到宿主机**（3310/6380，方便本地用客户端连） | **完全不映射**（只在容器内网可达） |
 #   | 数据库密码 | 明文 root/root，为了开箱即用 | 必须由环境变量注入 |
-#   | 健康检查 | 没有 | 三个服务都有，backend 依赖另外两个 healthy 才启动 |
+#   | 健康检查 | 没有 | 四个服务都有，backend 依赖 mysql / redis healthy 才启动 |
 #   | 自动重启 | 没有 | restart: unless-stopped |
 #
 #   尤其"数据库端口不映射"这一条：生产环境把 3306 暴露到公网
@@ -29,7 +29,7 @@
 # 【怎么用】
 #   1. 先准备一个 .env 文件（和本文件同目录），内容见下方注释
 #   2. docker compose -f docker-compose.prod.yaml up -d --build
-#   3. docker compose -f docker-compose.prod.yaml ps   # 三个都应是 healthy
+#   3. docker compose -f docker-compose.prod.yaml ps   # 四个都应是 healthy
 #
 # 【.env 要准备什么】（⚠️ 这个文件不要提交）
 #   MYSQL_ROOT_PASSWORD=一个强密码
@@ -74,6 +74,62 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
+# =====================================================================
+# 内存预算 —— 按"2 核 2G / 40G 盘"的服务器定的，四个服务的 mem_limit 都出自这张表
+#
+# 【为什么必须给容器设上限：MaxRAMPercentage 读的是【宿主机】内存】
+#   JVM 的"容器感知"只认 cgroup 限额。不设 mem_limit 时容器【没有限额】，
+#   它看到的就是宿主机的那几个 G，于是百分比会算出"堆可以到 1.2G"——
+#   一台 2G 的机器上，这意味着后端 + MySQL + Redis + Node 的峰值必然超过物理内存，
+#   最后由内核的 OOM killer 出手，而它挑的通常是 RSS 最大的那个（**MySQL**）。
+#   症状是"数据库莫名重启、连接全断"，而且应用日志里什么都看不到
+#   （要看 `dmesg` 才知道是 OOM）。
+#   设了上限之后，越界只会杀掉【越界的那一个】容器，其余服务不受影响，
+#   再配合 restart: unless-stopped 把它拉回来 —— 故障范围被限制在一个容器里。
+#
+# 【预算表】（宿主机 2048MB）
+#   | 服务     | 上限  | 预估实占 | 主要构成                               |
+#   |----------|-------|---------|----------------------------------------|
+#   | mysql    | 512m  | ~200MB  | 缓冲池 128M + 连接与线程                |
+#   | backend  | 768m  | ~550MB  | 堆 ~462M + 元空间 + 线程栈 + 直接内存    |
+#   | frontend | 320m  | ~180MB  | Node SSR 的常驻内存                     |
+#   | redis    | 128m  | ~30MB   | maxmemory 96M（实际只用到十几 MB）      |
+#   | 合计     | 1728m |         | 余 ~320MB 给系统 + Docker + Nginx       |
+#
+# 【⚠️ 上限之和刻意【不】顶满 2048，别去"把内存用完"】
+#   操作系统、Docker 守护进程、Nginx、sshd 自身也要内存，而它们不在这个文件里。
+#   把容器上限之和顶到物理内存，等于把"谁先被 OOM"交给内核随机决定 ——
+#   留出的这一档，就是给这些"不在 compose 里但确实在跑"的东西的。
+#
+# 【已验证的部分（不是纸面估算）】
+#   · mysql：容器 512m 下从【空数据目录初始化】成功（mysql 8.4.11），
+#     实测占用 197MB / 512MB（38%），OOMKilled=false；
+#     performance_schema=0、innodb_buffer_pool_size=128M、max_connections=50 三项均实测生效
+#   · redis：容器 128m 下正常启动，实测 maxmemory=96MB、maxmemory-policy=volatile-lru 生效
+#   · backend 的 JVM 参数：以 --memory 768m 实测，堆 462M / 元空间 192M / 直接内存 64M
+#     （三者之和 718M < 768M），gc.log 正常生成 —— 详见 backend 服务里那段注释
+#   · frontend 的 ~180MB 是唯一没有实测的一项（没在本机起 SSR 容器量过）
+#
+#
+# 【宿主机侧还要做的一件事：4G swap —— 这里没有对应配置项，所以写在这里免得漏】
+#   compose 不写 memswap_limit 时，Docker 默认允许容器使用
+#   "内存上限 + 等量 swap"。四个容器加起来最坏是 512+768+320+128 = **1728M swap**，
+#   所以宿主机的 swapfile 给 **4G** 刚好能把最坏情况整个接住。
+#   swap 上的内存很慢，但"慢"远好于"被 OOM 杀掉"。
+#   （顺带一个反直觉的点：swap 不是"内存够就不用配"——它在这里的作用是
+#     给内存上限兜底，让容器即使在峰值也只会变慢、不会被杀。）
+#
+# 【换机器时怎么调】按同一张表的比例整体放大即可：
+#   主要改这四个 mem_limit；backend 的堆是百分比，会自动跟着走，
+#   但 mysql 的 innodb-buffer-pool-size 是绝对值，要一起改（见下面 mysql 的 command）。
+#
+# 【⚠️ 万一 MySQL 第一次初始化就被杀】
+#   症状是容器反复重启，`docker inspect yiguixingtu-prod-mysql` 的 ExitCode 是 137，
+#   `dmesg` 里有 oom-kill 记录 —— 那是初始化数据目录时的峰值顶到了 512M。
+#   处理：把 mysql 的 mem_limit 提到 640m，同时把 backend 降到 640m（总量维持不变），
+#   不要直接加总预算。
+# =====================================================================
+
 services:
 
   # -------------------------------------------------------------------
@@ -82,6 +138,8 @@ services:
   mysql:
     image: mysql:8
     container_name: yiguixingtu-prod-mysql
+    # 内存上限 512M（预算表与理由见文件顶部「内存预算」）
+    mem_limit: 512m
     environment:
       MYSQL_DATABASE: yiguixingtu
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?必须在 .env 里设置 MYSQL_ROOT_PASSWORD}
@@ -117,6 +175,38 @@ services:
       - --slow-query-log-file=/var/lib/mysql/slow.log
       - --long-query-time=0.1
       - --log-output=FILE
+      # ------------------------------------------------------------------
+      # 以下是"2 核 2G"这个规格专用的内存参数（预算表见文件顶部「内存预算」）
+      #
+      # 【为什么 performance_schema 要关掉：这是这个规格下最划算的一刀】
+      #   它默认是【开】的，自己就要占 100~200MB —— 相当于一个 2G 机器上
+      #   凭空少了一成的内存。它记录的是"每条语句在等什么锁、每个阶段花多久"，
+      #   这是给 DBA 做性能诊断用的；对一个单人博客来说完全用不上。
+      #   ⚠️ 代价要说清楚：关掉之后 performance_schema 与 sys 库下的诊断视图不可用。
+      #      但本项目真正依赖的性能数据是【慢查询日志】（上面那三行），
+      #      它不依赖 performance_schema，所以排查能力并没有丢。
+      - --performance-schema=OFF
+      # InnoDB 缓冲池：128M。
+      #   【为什么是 128M】本站的数据量是"几 MB 的文章正文 + 几 MB 的评论"，
+      #   128M 足以把全部热数据装进内存（那条 183ms → 0.11ms 的覆盖索引查询
+      #   依赖的也只是索引页常驻），再多就是白占。
+      #
+      #   ⚠️ 【为什么不是 192M —— 这个数是实测踩出来的，记下来免得再踩】
+      #   MySQL 会把缓冲池【向上取整】到 innodb_buffer_pool_chunk_size 的整数倍，
+      #   而那个 chunk 默认就是 128M。于是：
+      #     --innodb-buffer-pool-size=192M → 实际生效 256M
+      #        （实测 @@innodb_buffer_pool_size = 268435456，白白多占 64M 物理内存，
+      #          而且【不报错、不警告】，只在读变量时才能发现）
+      #     --innodb-buffer-pool-size=128M → 实际生效 128M
+      #        （实测 134217728，正是想要的；chunk_size 实测也是 134217728）
+      #   在 2G 的机器上，"写 192 得 256"这种静默取整不能不管。
+      #   ⇒ 取值应当是 128M 的整数倍（除非连 chunk size 一起改）。
+      #   测试里有一条用例盯着这一点（DeploymentMemoryBudgetTest#mysqlMustCapItsOwnMemory）。
+      - --innodb-buffer-pool-size=128M
+      # 连接数上限：默认 151。每一条连接在服务端都占线程与排序缓冲，
+      #   而应用侧的 HikariCP 池最多只要 6 条（见 backend 的 DB_POOL_SIZE）。
+      #   留 50 是给"运维手工连库排查"用的，绰绰有余。
+      - --max-connections=50
     volumes:
       # 具名卷：容器删了数据还在（docker compose down 不会删卷，加 -v 才会）。
       # 慢查询日志也写在这个目录里，所以它同样不会随容器重建而丢失。
@@ -142,6 +232,8 @@ services:
   redis:
     image: redis:7
     container_name: yiguixingtu-prod-redis
+    # 内存上限 128M（预算表与理由见文件顶部「内存预算」）
+    mem_limit: 128m
     environment:
       # 【为什么要把密码也放进 environment，明明 command 里已经用了】
       #   因为下面的健康检查需要它。踩过一次：一开始只在 command 里用
@@ -152,7 +244,34 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?必须在 .env 里设置 REDIS_PASSWORD}
     # 用密码启动；--appendonly yes 打开 AOF 持久化，
     # 这样容器重启后缓存不至于全丢（虽然缓存丢了也能自愈，但频繁冷启动会压数据库）
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?必须在 .env 里设置 REDIS_PASSWORD}", "--appendonly", "yes"]
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?必须在 .env 里设置 REDIS_PASSWORD}
+      - --appendonly
+      - "yes"
+      # ------------------------------------------------------------------
+      # 以下是"2 核 2G"这个规格专用的内存参数（预算表见文件顶部「内存预算」）
+      #
+      # maxmemory：Redis 默认【不限内存】，在 2G 的机器上必须给它一个天花板 ——
+      #   否则"缓存"这种东西会在内存紧张时反过来变成压垮系统的那一个。
+      #   本站的实际用量是十几 MB 量级（几百条缓存条目 + 浏览量增量 + 版本号），
+      #   96MB 是给得很宽裕的保险丝，正常永远碰不到。
+      - --maxmemory
+      - 96mb
+      # 【⚠️ 为什么是 volatile-lru 而不是 allkeys-lru —— 这一条是特意选的】
+      #   本项目在 Redis 里存了【两类"丢了就真丢数据"的 key，而它们都没有 TTL】：
+      #     · article:view:*  —— 文章浏览量的待落库增量，由定时任务每 5 分钟取走一次
+      #                          （见 ArticleViewCounter）。被淘汰 = 这 5 分钟里的浏览白记了，
+      #                          而且是静默丢失，事后查不出来。
+      #     · 两个缓存版本号计数器（article:page:version / content:list:version）——
+      #                          被淘汰则版本号从 0 重来，不会出错，但会让全部缓存白白重建。
+      #   allkeys-lru 会把上面这些一起淘汰；volatile-lru 只淘汰【带 TTL 的】，
+      #   而那正好是 Spring 缓存的那批条目（TTL 5 分钟 / 60 秒 / 30 秒 + 抖动），
+      #   它们本来就是"随时可以重新查库重建"的东西。
+      #   ⇒ "淘汰可重建的、保住不可重建的"，这就是选它的全部理由。
+      - --maxmemory-policy
+      - volatile-lru
     volumes:
       - redis_data:/data
     healthcheck:
@@ -174,6 +293,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: yiguixingtu-prod-backend
+    # 内存上限 768M。
+    # ⚠️ 这一行和下面 JAVA_TOOL_OPTIONS 里的 MaxRAMPercentage 是【同一个决定的两半】：
+    #    JVM 按"这个上限"算堆（60% ≈ 460M），改一个必须同时看另一个。
+    #    （预算表与理由见文件顶部「内存预算」）
+    mem_limit: 768m
     depends_on:
       # 【condition: service_healthy 是关键】
       #   只写 depends_on: [mysql] 的话，compose 只保证"容器启动了"，
@@ -235,6 +359,108 @@ services:
       #   · 文件    → 按天滚动、保留 15 天，能回头查"上周那次是几点开始的"
       # 只留 stdout 的话受 30MB 轮转限制，翻不了那么久；只留文件的话
       # 排查时要先进容器。两条路都留着，代价只是几十 MB。
+
+      # ------------------------------------------------------------------
+      # 内存与并发：与上面 mem_limit 配套的一组旋钮
+      # （预算表与理由见文件顶部「内存预算」）
+      #
+      # 【为什么 JVM 参数写在这里，而不是 Dockerfile 的 ENTRYPOINT 里】
+      #   它们是同一个决定的两半：MaxRAMPercentage 是"按容器内存上限的比例算堆"，
+      #   而"容器内存上限"就是上面的 mem_limit。分居两个文件时，
+      #   把 mem_limit 从 768m 改成 1.5g 的人未必会想到还有一份百分比在 Dockerfile 里。
+      #   ⚠️ 更要紧的是【两处都写会静默失效】：JAVA_TOOL_OPTIONS 由 JVM 在解析
+      #   命令行之前读入，命令行上的同名参数会覆盖它 —— 于是 Dockerfile 里那个值
+      #   会赢，这里写的被悄悄忽略，症状只是"我调了堆怎么没生效"。
+      #   ⇒ 口径：镜像保持中立（见 Dockerfile 末尾），随环境变的旋钮全在这里。
+      #
+      # 每一个参数为什么在（没有一个是"网上抄的标配"）：
+      #
+      # 【先说清楚这一组参数要一起满足的那条不变式】
+      #   下面三个 -XX:*Size* 是【硬上限】，它们之和必须小于 mem_limit：
+      #     堆 ~461M（768×60%）+ 元空间 192M + 直接内存 64M = **~717M < 768M**
+      #   为什么必须成立：cgroup 的限额是"整进程"的，JVM 自己并不知道
+      #   那三个上限加起来会不会越界。只要有可能越界，越界时就是
+      #   **内核直接杀容器**（ExitCode 137），Java 层面连一句 OutOfMemoryError
+      #   都不会打；守着不变式之后，超限只可能以"某一类内存的 OOM + 一份堆转储"
+      #   的形式在应用日志里明确报出来。测试里有一条用例专门盯着这个和
+      #   （DeploymentMemoryBudgetTest#backendHardLimitsMustFitInsideMemoryLimit）。
+      #
+      #   【⚠️ 这一组参数是【实测】过的，不是照着"最佳实践"抄的】
+      #     · 环境：eclipse-temurin:17-jre（与生产镜像同一个基础镜像）
+      #     · 命令：docker run --rm --memory 768m --env-file <本文件里的这一串> ... \
+      #             java -XX:+PrintFlagsFinal -version
+      #     · 实测结果：MaxHeapSize = 484442112 字节（462M，正是上限的 60%，
+      #       比 460.8M 略高是因为 JVM 会把堆对齐到 G1 的 region 边界）、
+      #       MaxMetaspaceSize = 192M、MaxDirectMemorySize = 64M，
+      #       且 gc.log 在目标目录里正常生成（说明 -Xlog 的语法也是对的）。
+      #     · 三者的和 718M < 768M，不变式成立。
+      #   为什么要真的跑一遍：JVM 参数写错的表现是【容器起不来】
+      #   （比如 -Xlog 的格式不对，JVM 会直接拒绝启动），
+      #   而那是在服务器上才会暴露、且报错信息很不直观的一类问题。
+      #
+      #   · MaxRAMPercentage=60 —— 堆占容器上限的 60%。留 40% 给堆外：
+      #       元空间、线程栈、直接内存、JIT 的代码缓存、GC 自身的结构。
+      #       留 40% 而不是常见的 25%，是因为这台机器内存很紧、
+      #       上限本身设得就不大，堆外那部分占比会相对更显眼。
+      #   · MaxMetaspaceSize=192m —— 元空间默认【无上限】。它装的是类元数据，
+      #       正常只有几十 MB；但一旦有类加载器泄漏，它会一路吃下去，
+      #       而它吃的是【堆外】内存：结果是容器被 cgroup 杀掉、
+      #       Java 层面连一句 OutOfMemoryError 都不会打 —— 这是最难查的一类 OOM。
+      #       给个上限，让它变成"堆内可见的 Metaspace OOM + 一份堆转储"。
+      #   · MaxDirectMemorySize=64m —— 直接内存（NIO / Tomcat 的 NIO2 连接器
+      #       读写缓冲、文件上传）也默认【无上限】：它的默认值是 **MaxHeapSize**，
+      #       也就是说不管它的话，这里等于又放开了 461M 的额度，
+      #       上面那条"硬上限之和"的不变式立刻不成立。
+      #       64M 对本项目是很宽裕的：TLS 在 Nginx 那层就终止了，
+      #       后端每个连接的直接缓冲只有 8KB 量级。
+      #   · HeapDumpOnOutOfMemoryError + HeapDumpPath=/app/logs ——
+      #       出 OOM 时把堆转储下来，事后能看出到底是哪个对象占满了。
+      #       路径指向 /app/logs 是【挂过卷】的目录：容器随后会被重启，
+      #       写在容器可写层里的话，转储文件和现场一起没了。
+      #   · ExitOnOutOfMemoryError —— 走到 OOM 的 JVM 已经不可信
+      #       （可能连日志都写不出来、响应畸慢）。直接退出，由
+      #       restart: unless-stopped 换一个干净的新进程起来，
+      #       比让一个半死的进程继续接请求要好。
+      #   · -Xlog:gc* —— 在内存吃紧的机器上，"是不是一直在 GC"是第一个要问的问题。
+      #       没有 GC 日志就只能靠猜，而这些日志事后补不出来。
+      #       上限 filecount=5 × filesize=10M = 50MB，不会失控。
+      #
+      # 【⚠️ 刻意【没有】加的，以及为什么】（免得后来的人以为是漏了）
+      #   · -Xss512k（调小线程栈）：Linux 上线程栈是【懒提交】的，
+      #     改它主要动的是虚拟地址空间，而不是常驻内存 —— 换不来真的内存收益，
+      #     却换来"递归深一点就 StackOverflowError"的风险。不加。
+      #   · ReservedCodeCacheSize（JIT 代码缓存上限）：它默认预留 240M，
+      #     但"预留"占用的是虚拟地址空间，实际提交的只有真正编译出来的那几十 MB，
+      #     而且它不像元空间/直接内存那样会被泄漏撑爆。所以不进那条不变式。
+      #   · -XX:+UseSerialGC 之类换 GC 的：那是"没实测就调"。
+      #     README 里那些性能数字（183ms → 0.11ms、wrk 压测）都是在默认 G1 下量的，
+      #     换掉 GC 等于让那些结论失去依据。要换先量。
+      JAVA_TOOL_OPTIONS: >-
+        -XX:MaxRAMPercentage=60.0
+        -XX:MaxMetaspaceSize=192m
+        -XX:MaxDirectMemorySize=64m
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/app/logs
+        -XX:+ExitOnOutOfMemoryError
+        -Xlog:gc*:file=/app/logs/gc.log:time,uptime,level,tags:filecount=5,filesize=10M
+
+      # 数据库连接池上限。项目里的属性是 ${DB_POOL_SIZE:10}，这里收紧到 6：
+      # 每一条 MySQL 连接在服务端都占一个线程和一份排序缓冲，
+      # 而本站的并发极低（单人博客），6 条足够，"闲置的连接"没有任何理由留着。
+      # 与 mysql 的 --max-connections=50 是配套的：池子 6 条 ≪ 服务端 50 条上限，
+      # 于是不会出现"应用把服务端的连接数占满、运维连不进去排查"的情况。
+      DB_POOL_SIZE: 6
+
+      # Tomcat 工作线程上限（Spring Boot 的宽松绑定：SERVER_TOMCAT_THREADS_MAX → server.tomcat.threads.max）
+      # 默认 200 —— 那是给大内存机器的默认值，为"永远达不到的并发"预留线程没有意义。
+      # 【50 这个数不是随手写的】它是"这台机器上真的做过的那一轮压测"的并发量：
+      #   README 的 wrk 压测用 -c50（50 个并发连接）直打后端，
+      #   所以 50 已经覆盖了已知的最大压力；而正常工作时的并发远低于它 ——
+      #   外部请求先到 Nginx、再经前端 SSR（是 SSR 代替浏览器去调后端），
+      #   真实用户只有个位数时后端的线程占用也是个位数。
+      # 注意它是【上限】不是预留：达不到就不会创建，所以调小它只是收紧最坏情况；
+      # 超过 50 的请求会在 accept 队列里排队（默认 100 个位置），而不是被直接拒绝。
+      SERVER_TOMCAT_THREADS_MAX: 50
     volumes:
       # 【上传的图片必须放在卷里，这是本文件里最容易被忽略的一处】
       #   不挂卷的话，图片写进容器的可写层：容器一重建就全没了
@@ -301,6 +527,13 @@ services:
       context: ${FRONTEND_DIR:-../yiguixingtu-web}
       dockerfile: Dockerfile
     container_name: yiguixingtu-prod-frontend
+    # 内存上限 320M（预算表与理由见文件顶部「内存预算」）。
+    # 【为什么这里不配 NODE_OPTIONS=--max-old-space-size】
+    #   Node 的运行时（经 libuv）会去读 cgroup 的内存限额，据此定自己的堆上限 ——
+    #   所以给出 mem_limit 它就自然按 320M 算。再手工写一个更小的值，
+    #   只会把"内存不够"从"容器被限额约束"变成"渲染某个页面时进程直接崩"，
+    #   而后者对访问者来说是一个 500 错误，反而更糟。
+    mem_limit: 320m
     depends_on:
       # 等后端 healthy 再启动：前端 SSR 渲染首页时可能就要去后端拿数据，
       # 后端没就绪的话首屏会渲染出错误页

@@ -55,6 +55,19 @@ public class SettingForm {
     @Schema(description = "ICP 备案号（可为空）", example = "京ICP备12345678号-1")
     private String icpNumber;
 
+    /**
+     * 公安网安备案号：可为空（留空 = 页脚不显示公安备案那一行）。
+     * 与 {@code icpNumber} 完全同形：同一个长度上限（50，与数据库列长、Service 常量
+     * 三处一致）、同样不做格式校验（各省编号规则不同，加正则只会挡住正当输入）、
+     * 同样只当文字渲染 —— 链接与备案图标由前端按公安部平台的规则拼。
+     * 【为什么它俩不是"二选一"】它们是两套独立的备案体系（主管机关不同、
+     * 编号规则不同、指向的查询平台也不同），谁缺了都不影响另一个 ——
+     * 两个都填才是正常状态，所以这一栏不能和 icpNumber 共用一个字段。
+     */
+    @Size(max = 50, message = "公安备案号最长 50 字")
+    @Schema(description = "公安网安备案号（可为空）", example = "川公网安备 51090002000169号")
+    private String policeNumber;
+
     /** 页脚版权：可为空（留空 = 页脚不显示版权行） */
     @Size(max = 200, message = "版权文案最长 200 字")
     @Schema(description = "页脚版权（可为空）")

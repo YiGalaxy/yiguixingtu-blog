@@ -22,8 +22,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -49,9 +52,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *
  * 【它与 AboutTest 的关键不同：字段是【互相独立】的开关】
  *   关于页是一个"页面"——所有字段一起读、一起用，所以那边只要测"整份存进去了"。
- *   而这里六个字段各自驱动界面上很不一样的一处：
+ *   而这里七个字段各自驱动界面上很不一样的一处：
  *     站点名 → 页眉页脚与标题、公告 → 首页那一条、评论开关 → 文章页的评论框、
- *     备案号与版权 → 页脚、每页条数 → 首页列表请求的 size。
+ *     两个备案号（ICP 与公安网安）与版权 → 页脚、每页条数 → 首页列表请求的 size。
  *   后果是【任何一个字段悄悄失效，其它字段都还是好的】——
  *   页面看起来一切正常，只有那一处不动。所以这里对每个字段都单独有用例：
  *   能改、能读到、能清空（能清空是重点：公告会下掉、备案号会换）。
@@ -149,7 +152,8 @@ class SiteSettingTest extends AbstractIntegrationTest {
     }
 
     @Test
-    @DisplayName("② 迁移已经把那一行插好了：库里恰好一行、id = 1；种子值读【迁移脚本原文】核对")
+    @DisplayName("② 迁移已经把那一行插好了：库里恰好一行、id = 1；种子值读【迁移脚本原文】核对"
+            + "（V13 新加的列同样在这一条里核对：结构 + 没有种子值）")
     void migrationAlreadyInsertedTheSingleRow() {
         // ---- 库里：只断言【结构性的不变量】（这些与谁先跑无关）----
         Integer count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM site_setting", Integer.class);
@@ -201,6 +205,57 @@ class SiteSettingTest extends AbstractIntegrationTest {
                     "INSERT 不该给 " + column + " 值：留 NULL 才是「前台不渲染」，"
                             + "外观才与上线前一致");
         }
+
+        // ---- V13（公安网安备案号）：先把上面这套断言"逐条对照到新列上" ----
+        //
+        // ⚠️ V13 是一条 ADD COLUMN，所以它只有两件事要断言：
+        //   ① 库里真的多出这一列、且形状对（varchar(50)、可空、紧跟在 icp_number 后面）
+        //   ② 脚本里【没有】任何种子值
+        //
+        // ① 用 information_schema 查【列的定义】，而不是 rawValue("police_number") 查值：
+        //    与上面那两条 DB 断言同一类 —— "列存在、类型、位置"是与谁先跑无关的结构事实，
+        //    而"列里此刻是什么值"会被 OperationLogTest ⑳ 这类提交型用例改掉（见上面那一大段）。
+        //    这样既证明了"V13 真的执行了"（Flyway 静默失效是踩过的坑，
+        //    见 ArticleIndexTest 里那条 flyway_schema_history 断言），又不碰会漂的东西。
+        List<Map<String, Object>> policeColumn = jdbcTemplate.queryForList(
+                "SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE, ORDINAL_POSITION"
+                        + " FROM information_schema.COLUMNS"
+                        + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'site_setting'"
+                        + " AND COLUMN_NAME = 'police_number'");
+        assertEquals(1, policeColumn.size(),
+                "V13 之后 site_setting 应当有 police_number 这一列 —— 查不到说明这条迁移没真正执行");
+        assertEquals("varchar", policeColumn.get(0).get("DATA_TYPE"));
+        assertEquals(50L, ((Number) policeColumn.get(0).get("CHARACTER_MAXIMUM_LENGTH")).longValue(),
+                "长度 50 与 icp_number 一致（DTO 的 @Size、Service 的常量、列宽三处同一个数字）");
+        assertEquals("YES", policeColumn.get(0).get("IS_NULLABLE"),
+                "必须可空：留空 = 页脚不显示公安备案那一行（与 icp_number 同一条规则）");
+        Long icpPosition = jdbcTemplate.queryForObject(
+                "SELECT ORDINAL_POSITION FROM information_schema.COLUMNS"
+                        + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'site_setting'"
+                        + " AND COLUMN_NAME = 'icp_number'", Long.class);
+        assertEquals(icpPosition + 1,
+                ((Number) policeColumn.get(0).get("ORDINAL_POSITION")).longValue(),
+                "AFTER icp_number：两个备案号在表里挨着，SELECT * 核对时一眼能看出是一对");
+        // 列顺序断言用"+1"来表达，而不是写死一个绝对位置（比如 6）：
+        // 写死的话，将来在它前面再加一列，这条断言会因为"与本次改动无关的原因"变红
+
+        // ② "没有种子值"：读 V13 脚本原文核对（与上面那条"读 V12 原文"同一个做法）
+        String v13 = readClasspathFile("db/migration/V13__add_police_number_to_site_setting.sql");
+        assertTrue(v13.contains("ADD COLUMN `police_number` varchar(50) DEFAULT NULL"),
+                "V13 应当加一列 police_number varchar(50) DEFAULT NULL");
+        assertTrue(v13.contains("AFTER `icp_number`"),
+                "新列的位置由 AFTER icp_number 指定（理由：两个备案号挨着放）");
+        // ⚠️ 判断"有没有种子值"之前必须先把【注释行】剥掉：这份脚本的中文注释里
+        //    恰恰写了"不要在这里补一条 UPDATE …"，直接对全文 contains("UPDATE")
+        //    会被自己的说明文字绊倒 —— 那种失败信息最误导人（脚本明明是干净的）
+        String v13Sql = v13.lines()
+                .filter(line -> !line.trim().startsWith("--"))
+                .collect(Collectors.joining("\n"));
+        assertFalse(v13Sql.contains("INSERT"),
+                "V13 不该 INSERT：备案号是站点主体相关信息，该由站长在后台自己填");
+        assertFalse(v13Sql.contains("UPDATE"),
+                "V13 也不该 UPDATE 出种子值：它属于备案材料，不该出现在公开仓库的迁移脚本里"
+                        + "（与 V12 里 icp_number 留空是同一个理由）；留 NULL 才保证页脚外观不变");
     }
 
     // ================================================================
@@ -649,6 +704,164 @@ class SiteSettingTest extends AbstractIntegrationTest {
     }
 
     // ================================================================
+    //  七、公安网安备案号（V13 新增的那一列）
+    //
+    //  【为什么整段放在最后，而不是插进上面"逐字段"那一节】
+    //    上一个字段（ICP 备案号）的用例在 ⑦ / ⑩ 里，而它是和版权挤在一条里写的；
+    //    这里既不回去改动那两条已通过的用例，也不打乱 ① … ⑰ 的编号 ——
+    //    新增的东西整段追加，审查时一眼能圈出"这次只动了这一段"。
+    //    内容是同一套思路：能填、能读、能清空、卡长度、缓存生效、兜底不编值。
+    // ================================================================
+
+    @Test
+    @DisplayName("⑱ 公安备案号：保存 -> 库里那一列真的有值，公开 GET 也读得到")
+    void updateSetting_policeNumber_shouldPersistAndBeReadable() throws Exception {
+        // 测试数据用与 ⑦ 同形的【假号】（那个省简称 + 14 位数字的形态是真的，
+        // 数字是编的）：真实备案号属于站点主体的备案材料，不该进仓库 ——
+        // 这条规矩对迁移脚本和测试数据是同一条
+        // ⚠️ 公安号里那个【中间的空格】是保留的（真实形态就是"苏公网安备 3201…号"）：
+        //    normalizeOptional 只 trim【首尾】空白，不会去动中间的 —— 要是有人顺手写成
+        //    replaceAll("\\s", "")，页脚上拼给公安平台查询页的号就会和备案时的号不一致
+        String icp = "京ICP备12345678号-1";
+        String police = "苏公网安备 32010000000000号";
+
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("公安排" + mark, null, true, icp, police, "© 2026 亿轨星途", 10)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        // ① 断言落到数据库这一列的原生值上（与 ③ 同一条规矩：不能只看接口返回，
+        //    接口返回的可能是"内存里拼的那份"，写没写进库要单独证明）
+        assertEquals(police, rawValue("police_number", String.class),
+                "公安备案号必须真的写进 police_number 这一列");
+
+        // ② 两个备案号【各自独立】：写公安那个号不该动到 ICP 那一列 ——
+        //    它们不是同一个字段的两种写法，而是两套备案体系（见 V13 脚本里的说明）
+        assertEquals(icp, rawValue("icp_number", String.class),
+                "保存公安备案号不该把 ICP 备案号连带改掉");
+
+        // ③ 前台读得到：页脚渲染用的就是 GET /setting 这一份（公开、走缓存）
+        SettingVO vo = settingService.get();
+        assertEquals(police, vo.getPoliceNumber(), "公开读应当拿到刚保存的公安备案号");
+        assertEquals(icp, vo.getIcpNumber(), "两个号在 VO 里同样是各自独立的两项");
+    }
+
+    @Test
+    @DisplayName("⑲ 公安备案号：提交空串能被清空（库里与接口都变回 null）")
+    void updateSetting_policeNumber_shouldBeClearable() throws Exception {
+        // 【为什么"能清空"要单独有用例】它是"用 updateById 会清不掉"那个坑的护栏：
+        // updateById 会【跳过 null 字段】，于是表现是"后台清空了、页脚仍挂着旧备案号"，
+        // 而接口高高兴兴返回 200 —— 换主体、换域名时第一个要做的动作就是清旧号。
+        // ⑦ 用 icpNumber 守过这条，这里用新列再守一次：它是【另一条 SET 语句】，
+        // 漏写一处就是漏一整列（不是同一个写法的复制粘贴问题）。
+        String police = "苏公网安备32010000000000号";
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("公安排填上" + mark, null, true, null, police, null, 10)))
+                .andExpect(jsonPath("$.code").value(200));
+        assertEquals(police, rawValue("police_number", String.class), "前置条件：先把它填上");
+
+        // 空串 = "我要清空这一栏"（前端清空输入框就长这样，见 settingJson 的注释）
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("公安排清空" + mark, null, true, null, "", null, 10)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        assertNull(rawValue("police_number", String.class), "清空公安备案号必须真的写成 NULL");
+        assertNull(settingService.get().getPoliceNumber(),
+                "接口里也必须是 null —— 前端据此决定页脚不渲染公安那一行");
+    }
+
+    @Test
+    @DisplayName("⑳ 公安备案号：50 字收下、51 被拒（与 DTO 校验、列长度三处一致）")
+    void updateSetting_policeNumberBoundaries() throws Exception {
+        // 上限必须【恰好】是列宽：列是 varchar(50)，校验要是松到 60，
+        // 会出现"提交成功、MySQL 静默截断"的偏差 —— 站长的号存进去少一截，
+        // 而且不会有任何报错（与 ⑤ / ⑦ 守的是同一类问题）
+        String longest = "备".repeat(50);
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("公安边界" + mark, null, true, null, longest, null, 10)))
+                .andExpect(jsonPath("$.code").value(200));
+        assertEquals(longest, rawValue("police_number", String.class), "刚好 50 字应当收下");
+
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("公安超长" + mark, null, true, null, "备".repeat(51), null, 10)))
+                .andExpect(jsonPath("$.code").value(400))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.containsString("公安备案号最长 50 字")));
+    }
+
+    @Test
+    @DisplayName("㉑ 保存公安备案号之后前台立刻读到新值（缓存被推进版本号作废）")
+    void updateSetting_policeNumber_shouldRefreshCachedGet() throws Exception {
+        // 【为什么它和 ⑱ 不重复】⑱ 证明"写进库了"，这条证明"读出来的是新的"：
+        // GET /setting 是走 Redis 的（@Cacheable，key = 内容缓存版本号）。
+        // 漏掉 bump 的后果与 ⑮ 里那个"绕过 Service 改库"是同一个症状 ——
+        // 库里明明是新的，页脚却要等缓存 TTL 到期才更新，而且没有任何报错。
+        // 所以这里先【故意读一次】把旧值灌进缓存，再保存新值，最后要求读到的必须是新值。
+        String before = "苏公网安备32010000000001号";
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("公安缓存前" + mark, null, true, null, before, null, 10)))
+                .andExpect(jsonPath("$.code").value(200));
+        assertEquals(before, settingService.get().getPoliceNumber(), "前置条件：先把旧值读进缓存");
+        long versionBefore = Long.parseLong(contentCacheVersion.current());
+
+        String updated = "苏公网安备32010000000002号";
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("公安缓存后" + mark, null, true, null, updated, null, 10)))
+                .andExpect(jsonPath("$.code").value(200));
+
+        assertEquals(updated, settingService.get().getPoliceNumber(),
+                "保存之后前台读到的必须是新号，而不是缓存里那份旧的");
+        assertTrue(Long.parseLong(contentCacheVersion.current()) > versionBefore,
+                "保存应当推进内容缓存版本号（否则前台的页脚要等 TTL 才更新）");
+    }
+
+    @Test
+    @DisplayName("㉒ 那一行不存在时：兜底值里 policeNumber 是 null（展示类字段不参与兜底）")
+    void missingRow_shouldLeavePoliceNumberNull() throws Exception {
+        // 与 ⑫ 是同一件事落在新字段上的那一条。规矩还是那两条：
+        //   · 行为类（commentEnabled）必须给一个能用的值，否则前端不知道该不该渲染评论框
+        //   · 展示类（备案号 / 版权 / 站点名）必须留 null —— 这里要是编一个备案号出来，
+        //     等于在"站点根本没备案"的情况下让页脚挂出一个号，合规问题比"这一行不显示"严重得多
+        jdbcTemplate.update("DELETE FROM site_setting");
+        clearSettingCache();
+        assertEquals(0, countRows(), "前置条件：那一行确实没了");
+
+        mockMvc.perform(get("/setting"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+        assertNull(settingService.get().getPoliceNumber(), "缺行时不该编一个公安备案号出来");
+        assertNull(settingService.get().getIcpNumber(), "ICP 备案号同样不参与兜底（与 ⑫ 一致）");
+
+        // 顺手把 ⑫ 的"第二半"在新字段上验一遍：自愈写回的那一行也要带上本次提交的公安备案号
+        // （漏了 setPoliceNumber 的后果是"自愈之后页脚少一行"，而且只有真出过事才暴露）
+        String police = "苏公网安备32010000000003号";
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("公安自愈" + mark, null, true, null, police, null, 10)))
+                .andExpect(jsonPath("$.code").value(200));
+
+        assertEquals(1, countRows(), "自愈之后仍然恰好一行");
+        assertEquals(police, rawValue("police_number", String.class),
+                "自愈写回的那一行必须带上本次提交的公安备案号");
+    }
+
+    // ================================================================
     //  工具方法
     // ================================================================
 
@@ -698,9 +911,13 @@ class SiteSettingTest extends AbstractIntegrationTest {
      *   · null = "本次不提交这个字段"（用于测 @NotNull / 缺字段那几条）
      * 对可选文本字段来说两者最终都会被归一化成 NULL，但走的校验路径不同；
      * 而 commentEnabled / pageSize 是必填，缺了要被拒 —— 所以这个区别必须能表达出来。
+     *
+     * 【policeNumber 也按同一条规则处理】它的位置在 icpNumber 与 copyright 之间，
+     * 与数据库列里的先后顺序、与 SettingForm / SettingVO 的字段顺序保持一致：
+     * 四层（库 / 实体 / 接口 / 测试）读起来是同一个顺序，加字段时不容易漏。
      */
     private String settingJson(String siteName, String announcement, Boolean commentEnabled,
-                               String icpNumber, String copyright, Integer pageSize) {
+                               String icpNumber, String policeNumber, String copyright, Integer pageSize) {
         StringBuilder sb = new StringBuilder("{");
         sb.append("\"siteName\":\"").append(siteName == null ? "" : siteName).append("\"");
         if (announcement != null) {
@@ -712,6 +929,9 @@ class SiteSettingTest extends AbstractIntegrationTest {
         if (icpNumber != null) {
             sb.append(",\"icpNumber\":\"").append(icpNumber).append("\"");
         }
+        if (policeNumber != null) {
+            sb.append(",\"policeNumber\":\"").append(policeNumber).append("\"");
+        }
         if (copyright != null) {
             sb.append(",\"copyright\":\"").append(copyright).append("\"");
         }
@@ -719,6 +939,21 @@ class SiteSettingTest extends AbstractIntegrationTest {
             sb.append(",\"pageSize\":").append(pageSize);
         }
         return sb.append("}").toString();
+    }
+
+    /**
+     * 【旧签名】重载：等价于"本次不提交 policeNumber 这个字段"。
+     *
+     * 【为什么保留这个六参版本，而不是把上面三十多处调用一次性改签名】
+     *   ① 既有用例（① … ⑰）的语义本来就是"只提交这六个字段"，签名与语义一一对应；
+     *      扩大签名会把一次"加一个字段"的改动变成横扫全文的 diff，
+     *      里面夹着一大片与本次改动无关的噪音，审查时反而看不清真正改了什么
+     *   ② 它委托给七参版本，两者拼出来的 JSON 只差"有没有 policeNumber"这一处 ——
+     *      不会出现两套拼串逻辑各自漂移（那才是保留重载的真正风险点）
+     */
+    private String settingJson(String siteName, String announcement, Boolean commentEnabled,
+                               String icpNumber, String copyright, Integer pageSize) {
+        return settingJson(siteName, announcement, commentEnabled, icpNumber, null, copyright, pageSize);
     }
 
     /**

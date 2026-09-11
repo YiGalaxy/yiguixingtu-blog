@@ -222,8 +222,14 @@ class OperationLogTest extends AbstractIntegrationTest {
         //    都会莫名其妙地失败，而报错信息是"评论已关闭"，
         //    看起来像"评论模块坏了"，实际是上一个测试类留下的开关。
         //    （站点名与每页条数也一起还原：它们同样是共享状态，还原是一行的事。）
+        //    ⚠️ 这条 SQL 是【逐列列举】的，所以 site_setting 每加一列都要回来补一笔
+        //       （V13 加的 police_number 就是这么补上的）。漏了的表现很隐蔽：
+        //       本类跑完会把公安备案号残留在那一行里，而"页脚该不该显示公安备案"
+        //       恰恰就是靠这一列是不是 NULL 来判断的 —— 后面的用例会读到一个
+        //       根本不是它写进去的值，失败时看起来像"新功能坏了"。
         jdbcTemplate.update("UPDATE site_setting SET site_name = '亿轨星途', announcement = NULL,"
-                + " comment_enabled = 1, icp_number = NULL, copyright = NULL, page_size = 12 WHERE id = 1");
+                + " comment_enabled = 1, icp_number = NULL, police_number = NULL,"
+                + " copyright = NULL, page_size = 12 WHERE id = 1");
         jdbcTemplate.update("DELETE FROM user WHERE username LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM category WHERE name LIKE ?", "%" + mark + "%");
     }

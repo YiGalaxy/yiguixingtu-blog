@@ -15,7 +15,7 @@
 
 **yiguixingtu** 是一个个人博客系统的后端服务，已实现 **认证与用户管理**、**文章管理**、
 **分类**、**标签**、**评论与审核**、**友情链接 / 项目 / 收藏 / 关于页 / 音乐**、
-**站点设置**（站点名 / 首页公告 / 评论总开关 / 页脚版权与备案号 / 每页条数）、**操作审计** 等模块，
+**站点设置**（站点名 / 首页公告 / 评论总开关 / 页脚版权与两个备案号（ICP + 公安网安）/ 每页条数）、**操作审计** 等模块，
 采用 **JWT 无状态认证**，**MySQL** 存储数据、**Redis** 缓存认证信息与文章缓存，接口文档由 **springdoc** 自动生成。
 
 前端为独立仓库 `yiguixingtu-web`（Nuxt 4 + Vue 3 + Element Plus），通过 HTTP 调用本服务。
@@ -271,9 +271,16 @@
 
 **站点设置**
 - `GET /setting`（公开，走 Redis 缓存）+ `PUT /admin/setting`（仅管理员，**单条更新**，没有新建 / 删除）
-- 六项：站点名 / 首页公告 / 评论总开关 / 页脚版权 / ICP 备案号 / 每页文章条数。
+- 七项：站点名 / 首页公告 / 评论总开关 / 页脚版权 / ICP 备案号 / **公安网安备案号** / 每页文章条数。
   在这之前它们全都写死在前端代码里 —— 改一个站点名要改五处 `.vue` 再重新构建部署，
   而备案号这种东西又必须能随时改（换域名、换主体）
+- ⚠️ **两个备案号是两列、两套备案体系**（`icp_number` / `police_number`，V13 加的后者）：
+  主管机关不同（工信部 vs 公安机关）、编号形态不同，**链接规则也不同** ——
+  ICP 统一链到 `beian.miit.gov.cn`，公安那一行要链到"公安部全国互联网安全管理服务平台"
+  （`beian.mps.gov.cn`）的备案查询页并挂它的图标。所以两串号各自独立存：
+  挤进一列（`蜀ICP备…；川公网安备…`）之后，前端只能解析字符串猜"哪一段属于哪个平台"，
+  多一个空格就会把合规链接拼错 —— 页脚备案链接拼错的后果等同于没备案。
+  字段里**只存号本身、不存链接**（链接与图标是平台规定的固定物，由前端按规则拼）
 - ⚠️ **它与 `about` 是同一类（全表只有一行）但刻意分成两张表**：`about` 是
   "站长是谁"这类对外展示内容（几个月不动），站点设置是"站点怎么运行"的配置
   （上线当天就可能改好几轮）。分表的收益是接口形状与缓存范围都清楚 ——
@@ -282,11 +289,13 @@
   每页条数、文章页的评论开关 —— 也就是**每一次页面渲染都要读它**（含错误页与 404 页）。
   所以它必须能被**匿名**读到：页脚里的备案号是合规要求，不能让未登录访客看不到
 - ⚠️ **迁移的种子值等于前端原本写死的那些值**（站点名 `亿轨星途`、评论开着、每页 **12** 条，
-  公告 / 备案号 / 版权留空）：目的是让这个功能上线**本身不改变站点外观** ——
+  公告 / 两个备案号 / 版权留空）：目的是让这个功能上线**本身不改变站点外观** ——
   部署完打开首页应当是"什么都没变，只是以后可以在后台改"。
   那个 **12** 是前端首页此刻在用的每页条数（3 列瀑布流 4 行），
   **不是** `ArticleQuery.DEFAULT_PAGE_SIZE`（10：那是"接口没收到 size 时用什么"）。
-  备案号刻意**不预填**：它属于站点的备案材料，该由站长在后台自己填
+  备案号刻意**不预填**：它属于站点的备案材料，该由站长在后台自己填。
+  V13 加公安网安备案号那一列时**同样没有补任何种子值**（没有 `UPDATE`）：
+  真实备案号绑定的是站点主体，编不出来也不该进公开仓库的迁移脚本
 - ⚠️ **`pageSize` 的上限直接引用 `ArticleQuery.MAX_PAGE_SIZE` 这个常量**（不是另写一个 50）：
   文章接口会把超出的 `size` **静默夹到 50**，所以设置里若允许更大的值，
   站长会得到一个"保存成功但首页还是只列 50 篇"的开关，而且不会有任何报错
@@ -319,7 +328,7 @@
   图片走 `type=image`（默认，5MB，存 `uploads/cover/`），音频走 `type=audio`
   （mp3，20MB，存 `uploads/music/`）—— 两套规则**互不放宽**，各有用例钉住；
   文件存服务器本地磁盘，并用**具名卷**持久化
-- 集成测试 **39 个类 434 个用例**，行覆盖率 **91.2%**
+- 集成测试 **39 个类 439 个用例**，行覆盖率 **91.2%**
 
 ### 🚧 规划中
 
@@ -472,7 +481,8 @@ src/main/resources
     ├── V9__create_favorite_table.sql    # favorite（收藏；category 是自由文本分组名，见脚本内说明）
     ├── V10__create_about_table.sql      # about（关于页；只有一行，插入语句就在脚本里）
     ├── V11__create_music_table.sql      # music（音乐；**刻意不插种子数据**，见脚本内说明）
-    └── V12__create_site_setting_table.sql # site_setting（站点设置；同样只有一行，种子值等于前端原本写死的值）
+    ├── V12__create_site_setting_table.sql # site_setting（站点设置；同样只有一行，种子值等于前端原本写死的值）
+    └── V13__add_police_number_to_site_setting.sql # site_setting 加公安网安备案号列（**刻意不写种子值**，见脚本内说明）
 
 src/test/java/com/yigalaxy/yiguixingtu
 ├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
@@ -513,7 +523,7 @@ src/test/java/com/yigalaxy/yiguixingtu
 ├── AdminBootstrapInitTest          # 管理员初始化引导（空库也能进后台）
 ├── DeploymentMemoryBudgetTest      # 部署配置契约：容器内存上限 / JVM 参数的位置 / MySQL 与 Redis 的内存参数（读 compose 与 Dockerfile，不起 Spring 上下文）
 ├── ActuatorExposureContractTest    # 管理端点的暴露面契约：Nginx 必须挡掉 /api/actuator/ + 数据库端口不发布 + 应用端口只绑回环（读 README 与 compose）
-├── SiteSettingTest                 # 站点设置：单条记录的不变量 + 六个字段逐个能改能清空 + 每页条数上限跟文章接口走 + 评论开关的 0/1↔布尔转换
+├── SiteSettingTest                 # 站点设置：单条记录的不变量 + 七个字段逐个能改能清空 + 每页条数上限跟文章接口走 + 评论开关的 0/1↔布尔转换 + V13 公安网安备案号列
 └── YiguixingtuApplicationTests     # 冒烟
 
 docs
@@ -1165,7 +1175,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 56 | POST | `/admin/music` | 新建音乐（`url` 来自 `POST /upload?type=audio`） | 是（ADMIN） |
 | 57 | PUT | `/admin/music/{id}` | 编辑音乐（曲名 / 歌手 / 音频地址 / 封面 / 歌词 / 排序 / 显示状态） | 是（ADMIN） |
 | 58 | DELETE | `/admin/music/{id}` | 删除音乐（逻辑删除；**磁盘上的音频文件不删**） | 是（ADMIN） |
-| 59 | GET | `/setting` | 站点设置（单条对象；站点名 / 首页公告 / 评论总开关 / 页脚版权与备案号 / 每页文章条数，**走 Redis 缓存**） | 否 |
+| 59 | GET | `/setting` | 站点设置（单条对象；站点名 / 首页公告 / 评论总开关 / 页脚版权与两个备案号（`icpNumber` / `policeNumber`）/ 每页文章条数，**走 Redis 缓存**） | 否 |
 | 60 | PUT | `/admin/setting` | 保存站点设置（**单条更新，没有新建/删除**；`pageSize` 上限跟文章接口同为 50） | 是（ADMIN） |
 
 **共 60 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
@@ -1667,7 +1677,7 @@ operation_log 表（异步完成，请求早就返回了）
 | `favorite` | 收藏（含分组、显示/隐藏） | `idx_status_sort(status, sort)` | Flyway `V9__create_favorite_table.sql` |
 | `about` | 关于页信息（**全表只有一行，`id` 恒为 1**） | 主键 `id`（不需要别的索引） | Flyway `V10__create_about_table.sql`（含那一行的 INSERT） |
 | `music` | 音乐（含歌手 / 封面 / LRC 歌词原文；**迁移刻意不插种子数据**） | `idx_status_sort_id(status, sort, id)`（前台那条查询是 `WHERE status = 1 ORDER BY sort, id`，id 也进索引是为了消掉 filesort，见 V11 注释） | Flyway `V11__create_music_table.sql` |
-| `site_setting` | 站点设置（站点名 / 首页公告 / 评论总开关 / 页脚版权与备案号 / 每页文章条数；**全表只有一行，`id` 恒为 1**） | 主键 `id`（不需要别的索引） | Flyway `V12__create_site_setting_table.sql`（含那一行的 INSERT） |
+| `site_setting` | 站点设置（站点名 / 首页公告 / 评论总开关 / 页脚版权与两个备案号（ICP `icp_number`、公安网安 `police_number`）/ 每页文章条数；**全表只有一行，`id` 恒为 1**） | 主键 `id`（不需要别的索引） | Flyway `V12__create_site_setting_table.sql`（含那一行的 INSERT）+ `V13__add_police_number_to_site_setting.sql`（加公安网安备案号列，**刻意不写种子值**） |
 | `flyway_schema_history` | Flyway 自己的迁移记录表 | —— | Flyway 自动创建 |
 
 > `article` 上四个索引看着多，其实每个都有明确的归属，缺了会有可量化的退化：
@@ -1724,7 +1734,7 @@ operation_log 表（异步完成，请求早就返回了）
 > 索引比 V7–V9 多带一个 `id`：那条查询的排序是 `sort ASC, id ASC` 两段，
 > 把 id 放进索引才能完全消掉 filesort（理由写在 V11 迁移脚本里）。
 >
-> `site_setting`（站点设置，V12）与 `about` 属于**同一类**（只有一行、没有 `deleted`、
+> `site_setting`（站点设置，V12；公安网安备案号列是 V13 加的）与 `about` 属于**同一类**（只有一行、没有 `deleted`、
 > 没有 `create_time`、缺行时读给默认值 + 保存自愈写回），但**刻意分成两张表**：
 > `about` 是"站长是谁"这类对外展示的内容，几个月不动一次；
 > 站点设置是"站点怎么运行"的配置，上线当天就可能改好几轮。
@@ -1737,13 +1747,19 @@ operation_log 表（异步完成，请求早就返回了）
 >    所以设置里允许填更大的话，站长会得到一个"保存成功但首页还是只列 50 篇"的开关，
 >    而且没有任何报错（属于最难查的一类问题）
 > ② **种子值等于前端原本写死的那些值**（站点名 `亿轨星途`、评论开着、每页 **12** 条，
->    公告 / 备案号 / 版权留空）—— 目的是让这个功能上线本身**不改变站点外观**：
+>    公告 / 两个备案号 / 版权留空）—— 目的是让这个功能上线本身**不改变站点外观**：
 >    部署完打开首页应当"什么都没变，只是以后可以在后台改"。
 >    ⚠️ 其中 `page_size` 的 12 **不是** `ArticleQuery.DEFAULT_PAGE_SIZE`（10）：
 >    前者是"前端首页此刻真正在用几篇"（3 列瀑布流 4 行），后者是"调用方没传 size 时
 >    接口用什么"—— 两件事。种子值用错的话，这个功能一上线首页就会从 12 篇变成 10 篇，
 >    而"不改变外观"正是种子值存在的全部意义。
->    ⚠️ 尤其**不预填备案号**：它属于站点主体的备案材料，该由站长在后台自己填
+>    ⚠️ 尤其**不预填备案号**：它属于站点主体的备案材料，该由站长在后台自己填。
+>    V13 加公安网安备案号（`police_number`）时同样**没有写任何种子值**：
+>    两个备案号是**两套独立的备案体系**（工信部 vs 公安机关），编号形态与
+>    **链接规则**都不同（ICP 链 `beian.miit.gov.cn`，公安链 `beian.mps.gov.cn` 的
+>    备案查询页并挂平台图标），所以各占一列、各自留 NULL = 页脚不渲染那一行。
+>    理由写在 V13 脚本里，实现侧的对应处是 `SettingServiceImpl.normalizeOptional`
+>    与 `toVO`（两条链路都带上 `policeNumber`）
 > ③ **`comment_enabled` 在库里是 `tinyint` 0/1，而接口上是布尔** ——
 >    库里用 0/1 便于用 SQL 排查（`WHERE comment_enabled = 0`），
 >    接口给布尔是因为前端那个控件就是 `el-switch`。转换只发生在 `SettingServiceImpl` 一处，
@@ -2871,7 +2887,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 434 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 439 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -2883,10 +2899,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 434 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 439 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**39 个测试类，434 个用例，全部通过：**
+**39 个测试类，439 个用例，全部通过：**
 
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
@@ -2925,11 +2941,11 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `FavoriteTest` | 21 | 收藏：同友链那一整套，外加 **`category` 是自由文本分组名**的语义（带斜杠合法、同一分组可多条、空串归一化成 NULL、只卡长度 50）、地址必填与格式白名单、备注与标题的长度边界 |
 | `AboutTest` | 16 | 关于页：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 返回空壳且保存能写回 / POST 是真 405）、迁移脚本已插好那一行、昵称与头像与 GitHub 与邮箱与长文本的长度与格式边界、一次性清空全部可选字段真的写成 NULL、权限 401/403、缓存命中与保存后失效 |
 | `MusicTest` | 23 | 音乐：前台只含"显示"的（隐藏的不出现）、**排序两段稳定（sort 升序、sort 相同按 id 升序）**、列表为空返回空数组而不是 404、响应字段齐全（歌词是 LRC 原文、换行不丢）、**音频地址两种形态都合法（`/uploads/music/…` 与 http(s) 外链）而 `javascript:` 被拒**、曲名/歌手/歌词/地址/状态的长度与格式边界、约 5000 字歌词原样存取（守 TEXT 列不被改成短列）、增删改与逻辑删除（原生 SQL 验物理行与 deleted）、清空歌手与封面与歌词真的写成 NULL、权限 401/403、缓存命中 / 写操作推进版本号 / key 带版本号且 TTL 落在 300~360 秒（含抖动） |
-| `SiteSettingTest` | 17 | 站点设置：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 给默认值且保存能写回 / POST 是真 405）、**迁移种子值读脚本原文核对**（守"上线这个功能本身不改变站点外观"）、六个字段逐个"能改、能读到、能清空"、**每页条数上限跟文章接口同为 50**（超了会变成"保存成功但不生效"）、**评论开关 0/1 与布尔的转换两个方向都断言**、**⑰ 评论总开关在后端真的生效**（关掉后 `POST /comment` 返回 code 403，且库里没有多出记录；再打开又能发）、权限 401/403、缓存命中与保存后失效 |
+| `SiteSettingTest` | 22 | 站点设置：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 给默认值且保存能写回 / POST 是真 405）、**迁移种子值读脚本原文核对**（守"上线这个功能本身不改变站点外观"）、七个字段逐个"能改、能读到、能清空"、**公安网安备案号（V13 新列）**：库里真有这一列（`information_schema` 查类型 / 可空 / 紧跟 `icp_number`）、脚本里**没有任何种子值**、能填能读能清空、50 字收下 51 被拒、保存后前台立刻读到新值（缓存 bump）、缺行兜底里是 `null`（展示类字段不编值）、**每页条数上限跟文章接口同为 50**（超了会变成"保存成功但不生效"）、**评论开关 0/1 与布尔的转换两个方向都断言**、**⑰ 评论总开关在后端真的生效**（关掉后 `POST /comment` 返回 code 403，且库里没有多出记录；再打开又能发）、权限 401/403、缓存命中与保存后失效 |
 | `DeploymentMemoryBudgetTest` | 9 | 部署配置契约（**读 `docker-compose.prod.yaml` 与 `Dockerfile`，不起 Spring 上下文**）：四个服务都必须有 `mem_limit`、上限之和要给宿主机留余量、**Dockerfile 的 ENTRYPOINT 不许带 JVM 参数**（带了会静默覆盖 `JAVA_TOOL_OPTIONS`）、三个硬上限之和必须小于 `mem_limit`、堆转储与 GC 日志必须落在挂了卷的目录里、redis 必须是 `volatile-lru`（`allkeys-lru` 会淘汰没有 TTL 的浏览量增量 = 真丢数据）、mysql 必须关 `performance_schema` 且缓冲池是 128M 的整数倍（否则被静默取整成 256M）、**数据服务的镜像必须钉住小版本**（浮动 `mysql:8` 实测拉到了四年前的 8.0.27）、YAML 开启重复键检查 |
 | `ActuatorExposureContractTest` | 4 | 管理端点的暴露面契约（`/actuator/prometheus` 在应用层是**放行**的，只能靠部署挡住）：`location /api/` 必须剥掉前缀（这也是 `/api/actuator/` 会命中后端根路径的根因）、必须有把 `/api/actuator/` 返回 404 的 location、mysql/redis 不发布任何端口且 backend/frontend 只绑 `127.0.0.1`、上线核对清单里这一项必须写出**可判定的**预期结果（404） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **434** | |
+| **合计** | **439** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

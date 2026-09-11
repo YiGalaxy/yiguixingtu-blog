@@ -30,7 +30,7 @@ import org.springframework.util.StringUtils;
  *      · commentEnabled 给 true —— 它是【行为类】的：为 null 的后果不是
  *        "这块不显示"，而是前端不知道该不该渲染评论框（两边猜的方向还可能相反）。
  *        那是把"配置缺失"升级成了"功能损坏"
- *      · 其余（站点名 / 公告 / 备案号 / 版权 / 每页条数）留 null ——
+ *      · 其余（站点名 / 公告 / 两个备案号 / 版权 / 每页条数）留 null ——
  *        前端对 null 的语义本来就是"不渲染这一块 / 用自己的默认值"，
  *        正好是这时候该有的表现。
  *        ⚠️ 尤其【每页条数】故意不给后端默认值：那个 12 是前端的排版决策
@@ -39,7 +39,7 @@ import org.springframework.util.StringUtils;
  *        留 null 也是安全的 —— ArticleQuery 把 null 的 size 当成"没传"用默认值
  *
  * ② save 时"传了空串"要真的能清掉
- *    announcement / icpNumber / copyright 都是"随时可能被清空"的字段
+ *    announcement / icpNumber / policeNumber / copyright 都是"随时可能被清空"的字段
  *    （比如备案号换了、公告下掉了）。所以更新走 LambdaUpdateWrapper 显式 SET，
  *    而不是 updateById（后者会跳过 null 字段，表现是"清空保存了但还显示着旧的"）。
  *
@@ -69,6 +69,16 @@ public class SettingServiceImpl implements SettingService {
 
     /** 备案号长度上限（与 DTO 和列长度一致） */
     private static final int ICP_MAX_LENGTH = 50;
+
+    /**
+     * 公安网安备案号长度上限，与 {@link #ICP_MAX_LENGTH} 同为 50。
+     * 【为什么单独一个常量、不直接复用 ICP_MAX_LENGTH】两者现在数值相同，
+     * 但它们是【两列】：将来若某一边的列宽改了（比如公安号变得更长），
+     * 复用同一个常量会让另一边的校验静默跟着漂 —— 而"校验宽于列宽"的后果是
+     * 用户能存进去、MySQL 却截断或报错，属于最难查的一类偏差。
+     * 这个数字与 DTO 上的 {@code @Size}、数据库列长度【三处一致】。
+     */
+    private static final int POLICE_MAX_LENGTH = 50;
 
     /** 版权文案长度上限（与 DTO 和列长度一致） */
     private static final int COPYRIGHT_MAX_LENGTH = 200;
@@ -126,12 +136,16 @@ public class SettingServiceImpl implements SettingService {
         String siteName = normalizeSiteName(form);
         String announcement = normalizeOptional(form.getAnnouncement(), ANNOUNCEMENT_MAX_LENGTH, "公告");
         String icpNumber = normalizeOptional(form.getIcpNumber(), ICP_MAX_LENGTH, "备案号");
+        // 公安备案号与 ICP 走【同一个】归一化方法（空白 → null、超长报错），
+        // 只是长度常量与报错文案各用自己那份：两者是两列，混用常量会让
+        // "哪一列被改宽了"这件事在校验上失去区分度（见 POLICE_MAX_LENGTH 的注释）
+        String policeNumber = normalizeOptional(form.getPoliceNumber(), POLICE_MAX_LENGTH, "公安备案号");
         String copyright = normalizeOptional(form.getCopyright(), COPYRIGHT_MAX_LENGTH, "版权文案");
         int commentEnabled = normalizeCommentEnabled(form);
         int pageSize = normalizePageSize(form);
 
         // 逐字段显式 SET：传 null（或空串）会真的写成 NULL。
-        // 这一条在本模块尤其重要：公告 / 备案号 / 版权都是"随时可能要清掉"的字段，
+        // 这一条在本模块尤其重要：公告 / 两个备案号 / 版权都是"随时可能要清掉"的字段，
         // 用 updateById 会因为"跳过 null 字段"而清不掉，界面上看起来像"保存没生效"
         int affected = settingMapper.update(null, new LambdaUpdateWrapper<SiteSetting>()
                 .eq(SiteSetting::getId, SiteSetting.SINGLE_ROW_ID)
@@ -139,6 +153,10 @@ public class SettingServiceImpl implements SettingService {
                 .set(SiteSetting::getAnnouncement, announcement)
                 .set(SiteSetting::getCommentEnabled, commentEnabled)
                 .set(SiteSetting::getIcpNumber, icpNumber)
+                // ⚠️ policeNumber 也【必须】在这条显式 SET 链里：
+                //    它是页脚上一个"换主体就可能要清掉"的号，漏在这里的表现是
+                //    "后台清空了、页脚还挂着旧备案号"，而接口返回 code 200
+                .set(SiteSetting::getPoliceNumber, policeNumber)
                 .set(SiteSetting::getCopyright, copyright)
                 .set(SiteSetting::getPageSize, pageSize));
 
@@ -158,6 +176,9 @@ public class SettingServiceImpl implements SettingService {
             created.setAnnouncement(announcement);
             created.setCommentEnabled(commentEnabled);
             created.setIcpNumber(icpNumber);
+            // 自愈写回时同样要带上公安备案号：漏了的话，后台在"那一行不见了"
+            // 之后第一次保存，页脚会少掉公安那一行，而站长提交的表单里明明填了
+            created.setPoliceNumber(policeNumber);
             created.setCopyright(copyright);
             created.setPageSize(pageSize);
             settingMapper.insert(created);
@@ -191,7 +212,7 @@ public class SettingServiceImpl implements SettingService {
         vo.setCommentEnabled(DEFAULT_COMMENT_ENABLED);
 
         // ② 其余一律留 null，前端的语义就是"不渲染这一块 / 用自己的默认值"：
-        //    · 展示类（站点名 / 公告 / 备案号 / 版权）→ 不渲染那一块
+        //    · 展示类（站点名 / 公告 / 两个备案号 / 版权）→ 不渲染那一块
         //    · 每页条数 → 前端用它自己的布局默认值（那个 12 = 3 列瀑布流 4 行，
         //      是前端的排版决策）。⚠️ 后端【故意】不在这里再写一个数字：
         //      两边各写一份才是最容易漂移的写法，而且 12 与 ArticleQuery 的
@@ -268,6 +289,9 @@ public class SettingServiceImpl implements SettingService {
         vo.setAnnouncement(setting.getAnnouncement());
         vo.setCommentEnabled(toBooleanCommentEnabled(setting.getCommentEnabled()));
         vo.setIcpNumber(setting.getIcpNumber());
+        // 公安备案号与 ICP 各自映射、互不作兜底：一个是 null 不该让另一个也变成 null
+        // （它们是两套独立的备案，页脚那两行的显示与否各自判断）
+        vo.setPoliceNumber(setting.getPoliceNumber());
         vo.setCopyright(setting.getCopyright());
         vo.setPageSize(setting.getPageSize());
         vo.setUpdateTime(setting.getUpdateTime());

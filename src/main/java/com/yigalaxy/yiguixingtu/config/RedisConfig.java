@@ -148,6 +148,12 @@ public class RedisConfig {
     public static final String CACHE_PROJECT_LIST = "project:list";
 
     /**
+     * 收藏列表的缓存名（前台"收藏"页）。
+     * 与前三个内容模块同理：读多写极少、与文章无关，共用内容缓存版本号。
+     */
+    public static final String CACHE_FAVORITE_LIST = "favorite:list";
+
+    /**
      * 统计结果的缓存时长：60 秒。
      * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
      * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
@@ -300,6 +306,7 @@ public class RedisConfig {
                 .withCacheConfiguration(CACHE_CATEGORY_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_FRIEND_LINK_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_PROJECT_LIST, baseConfig)
+                .withCacheConfiguration(CACHE_FAVORITE_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_ARCHIVE, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_RSS, baseConfig)
                 .build();

@@ -211,6 +211,8 @@ public class SecurityConfig {
                             "/link/list",
                             // 项目列表：前台"我的项目"页要用。同样只返回 status = 1 的那些
                             "/project/list",
+                            // 收藏列表：前台"收藏"页要用。同样只返回 status = 1 的那些
+                            "/favorite/list",
                             "/comment/list"      // 评论列表（只返回【已通过】的评论，状态在 Service 里写死）
                     ).permitAll();
 

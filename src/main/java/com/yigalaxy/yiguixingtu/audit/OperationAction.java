@@ -89,7 +89,16 @@ public enum OperationAction {
     UPDATE_PROJECT("编辑项目"),
 
     /** 删除项目 */
-    DELETE_PROJECT("删除项目");
+    DELETE_PROJECT("删除项目"),
+
+    /** 新建收藏 */
+    CREATE_FAVORITE("新建收藏"),
+
+    /** 编辑收藏 */
+    UPDATE_FAVORITE("编辑收藏"),
+
+    /** 删除收藏 */
+    DELETE_FAVORITE("删除收藏");
 
     /** 中文说明，便于直接展示与排查（不用在前端再维护一份翻译） */
     private final String description;

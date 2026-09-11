@@ -10,6 +10,8 @@ import com.yigalaxy.yiguixingtu.audit.mapper.OperationLogMapper;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.category.entity.Category;
 import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
+import com.yigalaxy.yiguixingtu.favorite.entity.Favorite;
+import com.yigalaxy.yiguixingtu.favorite.mapper.FavoriteMapper;
 import com.yigalaxy.yiguixingtu.link.entity.FriendLink;
 import com.yigalaxy.yiguixingtu.link.mapper.FriendLinkMapper;
 import com.yigalaxy.yiguixingtu.project.entity.Project;
@@ -111,6 +113,10 @@ class OperationLogTest extends AbstractIntegrationTest {
     @Autowired
     private ProjectMapper projectMapper;
 
+    /** 收藏：⑰ 同上 */
+    @Autowired
+    private FavoriteMapper favoriteMapper;
+
     @Autowired
     private UserMapper userMapper;
 
@@ -193,6 +199,8 @@ class OperationLogTest extends AbstractIntegrationTest {
         jdbcTemplate.update("DELETE FROM friend_link WHERE name LIKE ?", "%" + mark + "%");
         // 项目（F5）：同上
         jdbcTemplate.update("DELETE FROM project WHERE name LIKE ?", "%" + mark + "%");
+        // 收藏（F5）：同上
+        jdbcTemplate.update("DELETE FROM favorite WHERE title LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM user WHERE username LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM category WHERE name LIKE ?", "%" + mark + "%");
     }
@@ -710,6 +718,54 @@ class OperationLogTest extends AbstractIntegrationTest {
                 "删除记录里必须保留项目名快照，实际=" + deleteLog.getDetail());
     }
 
+    @Test
+    @DisplayName("⑰ 收藏的增 / 改 / 删也都会留痕，审计对象类型是 FAVORITE")
+    void favoriteOperations_shouldBeAudited() throws Exception {
+        String firstTitle = mark + "-收藏甲";
+
+        mockMvc.perform(post("/admin/favorite")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(favoriteJson(firstTitle, "https://example.com/fav-1", 1)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        Favorite created = favoriteMapper.selectOne(new LambdaQueryWrapper<Favorite>()
+                .eq(Favorite::getTitle, firstTitle));
+        assertNotNull(created, "前置条件：收藏应当建出来了");
+
+        OperationLog createLog = awaitLog("CREATE_FAVORITE", created.getId());
+        assertNotNull(createLog, "新建收藏应当留下 CREATE_FAVORITE 审计");
+        assertEquals("FAVORITE", createLog.getTargetType(), "对象类型应当是 FAVORITE");
+        assertTrue(createLog.getDetail().contains(firstTitle),
+                "detail 里要有标题，实际=" + createLog.getDetail());
+
+        // ---- 改名 ----
+        String secondTitle = mark + "-收藏乙";
+        mockMvc.perform(put("/admin/favorite/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(favoriteJson(secondTitle, "https://example.com/fav-2", 2)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog updateLog = awaitLog("UPDATE_FAVORITE", created.getId());
+        assertNotNull(updateLog, "编辑收藏应当留下 UPDATE_FAVORITE 审计");
+        assertTrue(updateLog.getDetail().contains(firstTitle) && updateLog.getDetail().contains(secondTitle),
+                "detail 里应当同时有旧标题和新标题，实际=" + updateLog.getDetail());
+
+        // ---- 删除 ----
+        mockMvc.perform(delete("/admin/favorite/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog deleteLog = awaitLog("DELETE_FAVORITE", created.getId());
+        assertNotNull(deleteLog, "删除收藏应当留下 DELETE_FAVORITE 审计");
+        assertTrue(deleteLog.getDetail().contains(secondTitle),
+                "删除记录里必须保留标题快照，实际=" + deleteLog.getDetail());
+    }
+
     // ================================================================
     //  三、"不该记的绝不记"
     // ================================================================
@@ -915,6 +971,17 @@ class OperationLogTest extends AbstractIntegrationTest {
                   "sort": %s
                 }
                 """.formatted(name, repo, sort);
+    }
+
+    /** 构造"新建 / 编辑收藏"的 JSON 请求体（见第⑰条） */
+    private String favoriteJson(String title, String url, Object sort) {
+        return """
+                {
+                  "title": "%s",
+                  "url": "%s",
+                  "sort": %s
+                }
+                """.formatted(title, url, sort);
     }
 
     /** 构造"新建/编辑文章"的 JSON 请求体 */

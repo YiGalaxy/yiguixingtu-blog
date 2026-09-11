@@ -10,6 +10,8 @@ import com.yigalaxy.yiguixingtu.audit.mapper.OperationLogMapper;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.category.entity.Category;
 import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
+import com.yigalaxy.yiguixingtu.link.entity.FriendLink;
+import com.yigalaxy.yiguixingtu.link.mapper.FriendLinkMapper;
 import com.yigalaxy.yiguixingtu.tag.entity.Tag;
 import com.yigalaxy.yiguixingtu.tag.mapper.TagMapper;
 import com.yigalaxy.yiguixingtu.user.entity.User;
@@ -99,6 +101,10 @@ class OperationLogTest extends AbstractIntegrationTest {
     @Autowired
     private TagMapper tagMapper;
 
+    /** 友链：⑮ 验证内容模块（F5）的写操作也会留痕 */
+    @Autowired
+    private FriendLinkMapper friendLinkMapper;
+
     @Autowired
     private UserMapper userMapper;
 
@@ -176,6 +182,9 @@ class OperationLogTest extends AbstractIntegrationTest {
         jdbcTemplate.update("DELETE FROM tag WHERE name LIKE ?", "%" + mark + "%");
         // 评论同理：本类是 NOT_SUPPORTED，评论是真的提交进库的
         jdbcTemplate.update("DELETE FROM comment WHERE nickname LIKE ?", "%" + mark + "%");
+        // 友链（F5）：同样是真提交，而且它只有一个自增 id 可用作清理依据，
+        // 所以一律按"名字里带 mark"来删
+        jdbcTemplate.update("DELETE FROM friend_link WHERE name LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM user WHERE username LIKE ?", "%" + mark + "%");
         jdbcTemplate.update("DELETE FROM category WHERE name LIKE ?", "%" + mark + "%");
     }
@@ -584,10 +593,70 @@ class OperationLogTest extends AbstractIntegrationTest {
                 "删除记录里必须保留分类名快照，实际=" + deleteLog.getDetail());
     }
 
+    @Test
+    @DisplayName("⑮ 友链的增 / 改 / 删也都会留痕，删除记录里保留站点名快照")
+    void linkOperations_shouldBeAudited() throws Exception {
+        // 【为什么友链（以及接下来的项目 / 收藏 / 关于）的审计断言也在本类】
+        //   审计是 @TransactionalEventListener(AFTER_COMMIT) 才落库的，
+        //   而 FriendLinkTest 整体是 @Transactional（跑完回滚）—— 事务永远不提交，
+        //   事件会被丢弃，那边断言"查得到审计"必然失败。
+        //   那属于"测试环境的事务语义"，不是功能坏了。
+        String firstName = mark + "-友链甲";
+
+        mockMvc.perform(post("/admin/link")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(linkJson(firstName, "https://example.com/link-a", 1)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        FriendLink created = friendLinkMapper.selectOne(new LambdaQueryWrapper<FriendLink>()
+                .eq(FriendLink::getName, firstName));
+        assertNotNull(created, "前置条件：友链应当建出来了");
+
+        OperationLog createLog = awaitLog("CREATE_LINK", created.getId());
+        assertNotNull(createLog, "新建友链应当留下 CREATE_LINK 审计");
+        // 对象类型是 LINK：按 target_type + target_id 查"这条友链被改动过几次"，
+        // 比拿 action 去 LIKE '%LINK%' 猜名字可靠得多（AuditTarget 的类注释里写着这件事）
+        assertEquals("LINK", createLog.getTargetType(), "对象类型应当是 LINK");
+        assertEquals(admin.getId(), createLog.getUserId(), "要记下操作人ID");
+        assertEquals(admin.getUsername(), createLog.getUsername(), "要记下是谁建的");
+        assertTrue(createLog.getDetail().contains(firstName),
+                "detail 里要有站点名，实际=" + createLog.getDetail());
+
+        // ---- 改名 ----
+        String secondName = mark + "-友链乙";
+        mockMvc.perform(put("/admin/link/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(linkJson(secondName, "https://example.com/link-b", 2)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog updateLog = awaitLog("UPDATE_LINK", created.getId());
+        assertNotNull(updateLog, "编辑友链应当留下 UPDATE_LINK 审计");
+        assertTrue(updateLog.getDetail().contains(firstName) && updateLog.getDetail().contains(secondName),
+                "detail 里应当同时有旧名和新名（只记新名字的话，事后看不出这是一次改名），实际="
+                        + updateLog.getDetail());
+
+        // ---- 删除 ----
+        mockMvc.perform(delete("/admin/link/{id}", created.getId())
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        OperationLog deleteLog = awaitLog("DELETE_LINK", created.getId());
+        assertNotNull(deleteLog, "删除友链应当留下 DELETE_LINK 审计");
+        // 友链是【逻辑删除】：行虽然还在表里，但所有走 Mapper 的查询都看不到了
+        // （@TableLogic 会自动加 deleted = 0）——"删掉的是哪个站点"这个问题，
+        // 在不专门去翻原生 SQL 的情况下，只有这条审计记录能回答
+        assertTrue(deleteLog.getDetail().contains(secondName),
+                "删除记录里必须保留站点名快照，实际=" + deleteLog.getDetail());
+    }
+
     // ================================================================
     //  三、"不该记的绝不记"
     // ================================================================
-
     @Test
     @DisplayName("⑩ 业务失败（分类不存在）-> 不产生审计记录")
     void failedOperation_shouldNotBeAudited() throws Exception {
@@ -770,9 +839,19 @@ class OperationLogTest extends AbstractIntegrationTest {
         return form;
     }
 
-    /** 构造"新建/编辑文章"的 JSON 请求体 */
-    private String articleJson(String title, String content, Object categoryId, Object status) {
+    /** 构造"新建 / 编辑友链"的 JSON 请求体（见第⑮条） */
+    private String linkJson(String name, String url, Object sort) {
         return """
+                {
+                  "name": "%s",
+                  "url": "%s",
+                  "sort": %s
+                }
+                """.formatted(name, url, sort);
+    }
+
+    /** 构造"新建/编辑文章"的 JSON 请求体 */
+    private String articleJson(String title, String content, Object categoryId, Object status) {        return """
                 {
                   "title": "%s",
                   "content": "%s",

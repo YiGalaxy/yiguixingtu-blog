@@ -1,0 +1,83 @@
+package com.yigalaxy.yiguixingtu.common.validation;
+
+/**
+ * =====================================================================
+ * URL 类入参的正则（本项目里第一次出现"格式校验"，所以把为什么写清楚）
+ *
+ * 【为什么要在 DTO 上校验 URL 格式，而不是"能填进去就行"】
+ *   这些字段最终都会出现在前端的 {@code <a href="...">} 或 {@code <img src="...">} 里，
+ *   而它们【是管理员填的、存进数据库、再由前台渲染出来的】——
+ *   典型的存储型 XSS 通道。一个 {@code javascript:alert(document.cookie)} 填进
+ *   "友链地址"，缓存一存、前台一渲染，每个访问者都会执行到它。
+ *   所以这里不去"黑名单拦 javascript"，而是反过来做【白名单】：
+ *   只接受 {@code http://} 或 {@code https://} 开头的地址，其余一律拒绝。
+ *   黑名单永远列不全（{@code JavaScript:} 大小写、{@code data:text/html}、
+ *   {@code vbscript:}……），白名单只有两条规则。
+ *
+ * 【为什么抽成一个常量类，而不是每个 DTO 里各写一遍正则】
+ *   "@Pattern 的 regexp 必须是编译期常量"，所以不能从方法里取。
+ *   散在四五个 DTO 里各写一遍的后果是：哪天发现规则要改（比如允许站内相对路径），
+ *   只改到其中两个，另外几个悄悄留着旧规则 —— 这种"改一半"不会有任何报错。
+ *
+ * 【为什么不用自定义注解（@HttpUrl + Validator）】
+ *   那要多两个类（注解 + 校验器）加一处注册，而这里要表达的只是
+ *   "两三条正则"。Jakarta Validation 的 {@link jakarta.validation.constraints.Pattern}
+ *   本来就是这个用途，用现成的更少代码、也更好读。
+ *   （真到了"要查 URL 是否可达 / 要按域名白名单放行"那一步，再换成自定义注解。）
+ * =====================================================================
+ */
+public final class UrlPatterns {
+
+    /**
+     * 外部链接：必须是可以点出去的完整地址。
+     *
+     * 【逐段解释这个正则】
+     *   {@code ^}        —— 从头匹配（不加锚点的话 "http://x javascript:xxx" 也能通过）
+     *   {@code https?}   —— http 或 https（只放行这两种协议，这是白名单的核心）
+     *   {@code :\/\/}    —— 协议分隔符（正则里的 / 需要转义）
+     *   {@code \S+}      —— 后面跟至少一个非空白字符，也就是"必须有主机名"
+     *                      （{@code http://} 单独一个是不合法的地址）
+     *   {@code $}        —— 匹配到结尾
+     *
+     * 【为什么不校验"这个地址真的能打开"】
+     *   那需要发一次网络请求：填表的人要等、还可能是内网地址
+     *   （校验器去请求内网等于做了 SSRF 的跳板）。这里只保证"格式是外链"，
+     *   能不能打开由人工确认 —— 友链本来就是人工核对过才录入的。
+     */
+    public static final String EXTERNAL_URL = "^https?://\\S+$";
+
+    /** {@link #EXTERNAL_URL} 不匹配时给用户看的提示（写清"应该长什么样"，而不是"格式错误"） */
+    public static final String EXTERNAL_URL_MESSAGE = "地址必须以 http:// 或 https:// 开头";
+
+    /**
+     * 图片地址：既接受外链，也接受"站内相对路径"。
+     *
+     * 【为什么图片比外链多允许一种形态】
+     *   图片有两个来源，都是正当的：
+     *     ① 管理员用 {@code POST /upload} 上传 → 拿到的是
+     *        {@code http://localhost:8082/uploads/cover/2026/09/xxx.png} 这种【绝对地址】
+     *     ② 图直接放在【前端仓库】的 public 目录里（例如 {@code /cover-1.png}），
+     *        这种是【以 / 开头的站内路径】。个人博客把几张固定图放在自己的前端仓库里
+     *        是最省事的做法，不该逼着人家先上传一遍
+     *   所以这里放行两种形态。⚠️ 但注意 {@code //evil.com/x.png} 这种
+     *   "协议相对地址"也会匹配 —— 它实际上会跳到 evil.com。这不构成新风险：
+     *   能填这个字段的是管理员本人，而管理员本来就有上传能力。
+     *   （真正要防的是"用户提交的内容被当成图片地址渲染"，那个场景在评论里，
+     *    评论的 VO 根本不接受图片字段。)
+     *
+     * 【为什么整组可以缺省（末尾的 {@code ?}）：空串也算合法】
+     *   前端的输入框被清空时，提交上来的往往是 {@code ""} 而不是 {@code null}
+     *   （Element Plus 的表单就是这样）。如果正则不接受空串，管理员把头像删掉、
+     *   点保存就会收到"图片地址必须以…开头"，而他明明只是想清空 ——
+     *   看起来像功能坏了。所以格式校验只负责"非空的串必须是合法地址"，
+     *   空串交给 Service 归一化成 null（见 FriendLinkServiceImpl.normalizeOptional）。
+     */
+    public static final String IMAGE_URL = "^(?:https?://\\S+|/\\S*)?$";
+
+    /** {@link #IMAGE_URL} 不匹配时的提示 */
+    public static final String IMAGE_URL_MESSAGE = "图片地址必须是 http(s):// 开头的完整地址，或以 / 开头的站内路径";
+
+    /** 工具类不需要实例：私有构造把它关掉（和 {@code java.util.Collections} 同样的做法） */
+    private UrlPatterns() {
+    }
+}

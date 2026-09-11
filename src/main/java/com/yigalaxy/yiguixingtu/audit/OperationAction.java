@@ -64,7 +64,23 @@ public enum OperationAction {
     UPDATE_CATEGORY("编辑分类"),
 
     /** 删除分类 */
-    DELETE_CATEGORY("删除分类");
+    DELETE_CATEGORY("删除分类"),
+
+    /**
+     * 新建友链。
+     *
+     * 【这一组为什么是"内容类"而不是"文章类"】
+     *   友链 / 项目 / 收藏 / 关于（F5 的四个内容模块）都是【站点级静态内容】：
+     *   管理员本人维护、没有别的表引用它们、也不需要审核。
+     *   它们各自的增删改都记一笔，命名沿用 {@code 动作_对象} 的既有规则。
+     */
+    CREATE_LINK("新建友链"),
+
+    /** 编辑友链 */
+    UPDATE_LINK("编辑友链"),
+
+    /** 删除友链 */
+    DELETE_LINK("删除友链");
 
     /** 中文说明，便于直接展示与排查（不用在前端再维护一份翻译） */
     private final String description;

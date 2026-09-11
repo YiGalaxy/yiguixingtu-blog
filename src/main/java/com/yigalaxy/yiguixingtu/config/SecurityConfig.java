@@ -206,6 +206,9 @@ public class SecurityConfig {
                             "/article/*",        // 文章详情 /article/123
                             "/category/list",    // 分类列表
                             "/tag/list",         // 标签列表（标签云，带每个标签下的已发布文章数）
+                            // 友链列表：前台友情链接页要用。它只返回 status = 1 的那些
+                            //（过滤写在 Service 的查询里，不是"由前端决定不显示"）
+                            "/link/list",
                             "/comment/list"      // 评论列表（只返回【已通过】的评论，状态在 Service 里写死）
                     ).permitAll();
 

@@ -120,6 +120,22 @@ public class RedisConfig {
     public static final String CACHE_ARTICLE_RSS = "article:rss";
 
     /**
+     * 友链列表的缓存名（前台友情链接页）。
+     *
+     * 【为什么它值得缓存】友链页是"每次打开都要拉一次"的接口，
+     * 而它的内容【只有管理员手工改的时候才变】—— 典型的"读多写极少"。
+     *
+     * 【⚠️ 它为什么不用文章那个版本号】
+     *   友链和文章毫无关系（没有任何表引用它）。如果共用
+     *   {@code article:page:version}，"加一条友链"会把文章列表 / 详情 / 归档 / RSS /
+     *   分类 / 标签六份缓存一起作废 —— 功能不错，但纯属无谓的重新查库，
+     *   还会让人误以为"文章那边的缓存为什么老在重建"。
+     *   所以 F5 的四个内容模块（友链 / 项目 / 收藏 / 关于）共用
+     *   {@code ContentCacheVersion} 那一个计数器：谁的内容变，就推进谁的版本号。
+     */
+    public static final String CACHE_FRIEND_LINK_LIST = "link:list";
+
+    /**
      * 统计结果的缓存时长：60 秒。
      * 为什么比列表缓存的 5 分钟短得多，见下面 resolveStatsTtl 的注释
      * （一句话：里面那个"总浏览量"是异步落库的，天生会滞后）。
@@ -270,6 +286,7 @@ public class RedisConfig {
                 .withCacheConfiguration(CACHE_ARTICLE_STATS, statsConfig)
                 .withCacheConfiguration(CACHE_TAG_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_CATEGORY_LIST, baseConfig)
+                .withCacheConfiguration(CACHE_FRIEND_LINK_LIST, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_ARCHIVE, baseConfig)
                 .withCacheConfiguration(CACHE_ARTICLE_RSS, baseConfig)
                 .build();

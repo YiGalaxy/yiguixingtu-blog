@@ -2897,56 +2897,94 @@ docker compose -f docker-compose.prod.yaml build --build-arg MAVEN_MIRROR_URL=
 > 拿开发的名字去服务器上执行，只会得到一句 `No such container`。
 
 ```bash
-# —— 备份 MySQL ——
-# --single-transaction：备份期间不锁表（InnoDB），站点不用停机
-# 密码从容器自己的环境变量取（compose 里注入过），不用写在命令里
-mkdir -p /srv/backup
-docker exec yiguixingtu-prod-mysql sh -c \
-  'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --databases yiguixingtu' \
-  > /srv/backup/yiguixingtu_$(date +%F).sql
+# —— 手动备一次（日常由 cron 自动跑，见下一节）——
+/srv/yiguixingtu/scripts/backup.sh
 
-# —— 恢复 ——
-# 恢复前【先停掉后端】，避免写入和恢复互相打架
+# —— 恢复 MySQL（先停后端，避免写入和恢复互相打架）——
+# 用带时间戳的那一份（db-YYYYmmdd-HHMMSS.sql.gz）
 docker compose -f docker-compose.prod.yaml stop backend
-docker exec -i yiguixingtu-prod-mysql sh -c \
-  'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD"' < /srv/backup/yiguixingtu_2026-09-11.sql
+gunzip -c /srv/backup/db-20260912-033000.sql.gz | \
+  docker exec -i yiguixingtu-prod-mysql sh -c \
+  'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD"'
 docker compose -f docker-compose.prod.yaml start backend
+
+# —— 恢复上传文件（把备份解回卷里；用运行中的 backend 容器，不必拉别的镜像）——
+docker exec -i yiguixingtu-prod-backend tar -xzf - -C /app/uploads \
+  < /srv/backup/uploads-20260912-033000.tar.gz
 ```
 
-**每天自动备份一次（crontab）**：
+#### 自动备份是怎么装的（2026-09-12 落地）
+
+**一个脚本 + 一条 cron，脚本本身跟着代码一起版本化**（`scripts/backup.sh`，注释里写了每一步的理由）：
 
 ```bash
-crontab -e
-# 加上这一行：每天 3:00 备份，并删掉 7 天前的
-0 3 * * * docker exec yiguixingtu-prod-mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --databases yiguixingtu' > /srv/backup/yiguixingtu_$(date +\%F).sql && find /srv/backup -name 'yiguixingtu_*.sql' -mtime +7 -delete
+# 脚本做了这些：取锁 → 磁盘空间护栏 → mysqldump 全库 gzip → 打包上传目录
+#                → 校验（gzip -t / 有没有 CREATE TABLE / 表数量对账）→ 写 sha256 → 清理旧备份
+chmod +x /srv/yiguixingtu/scripts/backup.sh
+
+# crontab -e 里加这一行：每天 3:30 跑，输出追加到日志
+30 3 * * * /bin/bash /srv/yiguixingtu/scripts/backup.sh >> /var/log/yiguixingtu-backup.log 2>&1
 ```
 
-> ⚠️ **`%F` 里的 `%` 必须写成 `\%`** —— crontab 把没转义的 `%` 当成"命令结束/换行"，
-> 不转义的话这条任务会以一种很难看懂的方式失败（而且 crontab 不会报错给你）。
-> 这是 crontab 最经典的坑之一，特意写在这里免得你调试半天。
+| 项 | 值 |
+|---|---|
+| 备份目录 | `/srv/backup/`（`db-*.sql.gz` + `uploads-*.tar.gz` + `backup-*.sha256`） |
+| 保留 | **14 天**（`KEEP_DAYS` 可覆盖），到点自动删 |
+| 日志 | `/var/log/yiguixingtu-backup.log` |
+| 什么时候跳过 | 上一次还在跑（`flock`）—— 跳过不算失败，日志里会写清楚 |
+| 什么时候**拒绝**跑 | 磁盘剩余 < 500MB（`MIN_FREE_MB`）—— 宁可少一天备份，也不要写满磁盘 |
 
-#### ⚠️ 别忘了备份上传的图片
+> ⚠️ **脚本里几个"看起来多余、其实都是坑"的设计**（改脚本前先读注释）：
+> - **`set -o pipefail`**：没有它，`mysqldump | gzip` 里 mysqldump 的失败会被 gzip 的成功掩盖，
+>   结果是**安静地产出一个只有半个库的备份** —— 备份脚本最危险的失败方式；
+> - **写 `.tmp` 再 `mv`**：中途被杀会留下半截文件，而它名字、gzip 头都对，看起来和好备份一样；
+>   改名是原子的，"目录里存在的正式备份 = 当时确实写完过"；
+> - **表数量对账**：备份里的 `CREATE TABLE` 条数必须等于线上表数，少一张就判失败；
+> - **打包上传目录用 backend 容器、不用 `docker run -v 卷:/data alpine ...`**：
+>   后者要额外拉镜像，而**服务器拉镜像本来就时好时坏**（实测镜像加速器经常失败）——
+>   "平时能跑、偶尔因为拉不到镜像而失败"的备份等于没有备份；
+> - **`MYSQL_PWD` 走环境变量**：密码不进程命令行（命令行参数在 `ps` 里谁都看得见）；
+>   密码始终由**容器自己的**环境变量提供，不出容器。
 
-封面图存在服务器的**具名卷** `yiguixingtu-prod_uploads_data` 里，
+**验证过的备份才算备份**：脚本带一个手动开关，会把备份**真的导进一个临时库**、比对行数、再删掉临时库：
+
+```bash
+/srv/yiguixingtu/scripts/backup.sh --verify-restore
+# 实测输出（2026-09-12）：
+#   ⚠️ --verify-restore：把备份导进临时库 yiguixingtu_verify_20260912-112152 并比对行数
+#   ✅ 恢复演练通过：article 行数 3 = 3，临时库已删除
+```
+
+> ⚠️ 这一步刻意**不进 cron**（它比日常备份重得多）；但每次改完数据库结构、
+> 或者心里没底的时候，手动跑一次。⚠️ 演练时的 `USE` 目标会被改写成临时库 ——
+> 这一步写错就等于"恢复演练把生产库清了"，所以脚本里把它放在导入前、并且只改 `USE` 那一行。
+>
+> ⚠️ **一个必须承认的短板**：这些备份都躺在**同一块盘**上。
+> 它能挡住"误删数据 / 迁移写坏 / 卷损坏"，挡不住"磁盘整个没了 / 实例被释放"。
+> 真要防后者，还得加一样**离开这台机器**的：阿里云**快照**（整盘，最省事）
+> 或者把 `/srv/backup` 每天同步到 **OSS**（`ossutil cp -r --update`）。
+> 这两件都需要你的云账号，所以还没做 —— 记得补上。
+
+#### ⚠️ 别忘了上传文件（备份脚本里已经包含）
+
+封面图 / 音频 / 附件存在服务器的**具名卷** `yiguixingtu-prod_uploads_data` 里，
 它和数据库是两回事 —— **只备份 MySQL 的话，数据库恢复出来了、图片却是空的**，
-文章里全是裂图。
+文章里全是裂图。所以 `scripts/backup.sh` **每次都会同时产出两份**：
+`db-*.sql.gz` 与 `uploads-*.tar.gz`，两者用**同一个时间戳**配对（`sha256` 也是同一份文件里）。
+
+恢复上传文件（把备份解回卷里）：
 
 ```bash
-# —— 备份图片（把卷里的文件拷到当前目录的 uploads_backup/）——
-docker run --rm \
-  -v yiguixingtu-prod_uploads_data:/data:ro \
-  -v "$PWD":/out \
-  alpine sh -c 'mkdir -p /out/uploads_backup && cp -r /data/. /out/uploads_backup/'
-
-# —— 恢复图片（把备份拷回卷里）——
-docker run --rm \
-  -v yiguixingtu-prod_uploads_data:/data \
-  -v "$PWD":/out \
-  alpine sh -c 'cp -r /out/uploads_backup/. /data/'
+# ⚠️ 这一步用【运行中的 backend 容器】解包，不拉额外镜像（理由同上：服务器拉镜像不稳）
+docker exec -i yiguixingtu-prod-backend tar -xzf - -C /app/uploads \
+  < /srv/backup/uploads-20260912-033000.tar.gz
+# 解完确认一下文件数（脚本的日志里记着备份时是几个文件）
+docker exec yiguixingtu-prod-backend sh -c 'find /app/uploads -type f | wc -l'
 ```
 
-> **备份要验证过才算备份**。建议演练一次：拷一份库出来、导进一个新库、
-> 启动应用确认文章都在；图片也一样 —— 把备份拷进一个空卷，确认还能显示。
+> **备份要验证过才算备份**。数据库那份用 `--verify-restore` 演练（见上一节，已实测通过）；
+> 上传文件那份最省事的验证是 `tar -tzf uploads-*.tar.gz | head`（能列出文件名就说明包没坏）
+> 加上"解进一个空目录、文件数与日志里的数字对得上"。
 > 没验证过的备份，真出事时大概率用不了。
 
 #### 磁盘不会被日志写满（两类日志都管住了）

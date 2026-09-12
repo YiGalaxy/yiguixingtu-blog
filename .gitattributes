@@ -1,2 +1,7 @@
 /mvnw text eol=lf
 *.cmd text eol=crlf
+# shell 脚本同样必须保持 LF：本机 core.autocrlf=true，
+# 不写这一条的话 `scripts/backup.sh` 检出到 Windows 工作区时会变成 CRLF，
+# 再传（或直接在 WSL/容器里用）到 Linux 上就报 `/bin/bash^M: bad interpreter`
+# 或更隐蔽的 `$'\r': command not found` —— 而它是要在服务器上跑的定时任务。
+*.sh text eol=lf

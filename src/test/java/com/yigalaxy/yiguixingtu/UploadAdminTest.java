@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.head;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -484,6 +485,36 @@ class UploadAdminTest extends AbstractIntegrationTest {
         assertNotNull(audioUrl, "上传应当返回 url");
         assertTrue(audioUrl.contains("/uploads/music/"),
                 "音频 URL 里应当带上配置的前缀（形如 /uploads/music/2026/09/xxx.mp3），实际=" + audioUrl);
+    }
+
+    @Test
+    @DisplayName("㉓ 上传文件对 HEAD 请求也要匿名放行（监控探活 / 链接检查器发的是 HEAD）")
+    void uploadedFile_shouldAlsoBePubliclyReachableByHead() throws Exception {
+        String url = extractUrl(mockMvc.perform(multipart("/upload")
+                        .file(new MockMultipartFile("file", "cover.png", "image/png", TINY_PNG))
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+        assertNotNull(url, "上传应当返回 url");
+        String path = url.substring(url.indexOf("/uploads/"));
+
+        // 【为什么单独钉一条】`requestMatchers(HttpMethod.GET, "/uploads/**")` 是**按方法精确匹配**的，
+        //   HEAD 不在这条规则里 ⇒ 会落到链尾的 `anyRequest().authenticated()` ⇒ **401**。
+        //   浏览器看图/下载用的是 GET，所以这个洞在人工点页面时**看不出来**；
+        //   但监控探活、链接检查器、部分代理的预取会发 HEAD，它们会把 401 报成
+        //   "资源不可用/权限坏了"。真实踩到过：给附件做冒烟时 `curl -sI` 得到 401，换 GET 才 200。
+        mockMvc.perform(head(path))
+                .andExpect(status().isOk());
+
+        // 【对照】同一个地址的 GET 仍然是 200：防止"HEAD 修好了、GET 反而被改坏"
+        mockMvc.perform(get(path))
+                .andExpect(status().isOk());
+
+        // 【反向】放开的只是 /uploads/** 这一片：随便挑一个受保护路径，它的 HEAD 必须仍然是 401。
+        //   没有这条的话，"把所有请求都 permitAll"这种改法也能让上面两条变绿 ——
+        //   而那等于整站接口裸奔，比原来的 401 严重得多。
+        mockMvc.perform(head("/user/page"))
+                .andExpect(status().isUnauthorized());
     }
 
     // ================================================================

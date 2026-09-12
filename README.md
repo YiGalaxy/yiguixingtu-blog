@@ -3,13 +3,13 @@
 [![CI](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml/badge.svg)](https://github.com/YiGalaxy/yigalaxy-blog-new/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-blue)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
-![Tests](https://img.shields.io/badge/tests-462%20passing-success)
+![Tests](https://img.shields.io/badge/tests-463%20passing-success)
 ![Coverage](https://img.shields.io/badge/coverage-91%25-brightgreen)
 
 > 基于 Spring Boot 4 + MyBatis-Plus + JWT 的个人博客后端服务
 > Spring Boot 4.1.1 / Java 17 / MySQL 8 / Redis 7
 >
-> **462 个集成测试全部通过**（覆盖行 91.1%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
+> **463 个集成测试全部通过**（覆盖行 91.1%），测试自带 MySQL / Redis 容器，clone 下来即可验证。
 
 ## 项目简介
 
@@ -356,7 +356,7 @@
   文件存服务器本地磁盘，并用**具名卷**持久化。
   ⚠️ 附件响应强制 `Content-Disposition: attachment` + `nosniff`，白名单里也没有
   html / svg / xml / js —— 两道防线挡的是"在自家域名下执行脚本"（见「文件上传」章节）
-- 集成测试 **41 个类 462 个用例**，行覆盖率 **91.1%**
+- 集成测试 **41 个类 463 个用例**，行覆盖率 **91.1%**
 
 ### 🚧 规划中
 
@@ -1305,7 +1305,8 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 60 | PUT | `/admin/setting` | 保存站点设置（**单条更新，没有新建/删除**；`pageSize` 上限跟文章接口同为 50） | 是（ADMIN） |
 
 **共 60 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
-用本地磁盘存储时，上传的图片、音频与附件都通过 `GET /uploads/**` 公开读取（无需登录）——
+用本地磁盘存储时，上传的图片、音频与附件都通过 `GET /uploads/**`（以及 `HEAD /uploads/**`，
+见下面「为什么 HEAD 也要放行」）公开读取（无需登录）——
 图片在 `uploads/cover/`，音频在 `uploads/music/`，附件在 `uploads/attachment/`，
 同一个静态映射覆盖子目录，不需要额外配置。
 ⚠️ 三种文件的**响应头不同**：图片与音频内联展示/播放，附件强制
@@ -1367,7 +1368,19 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `PUT /admin/about` （只有这一个） | ❌ 401 | ❌ 403 | ✅ |
 | `PUT /admin/setting` （只有这一个） | ❌ 401 | ❌ 403 | ✅ |
 | `POST /upload`（图片 / 音频 / 附件都是它） | ❌ 401 | ❌ 403 | ✅ |
-| `GET /uploads/**`（本地存储的图片、音频与附件） | ✅ | ✅ | ✅ |
+| `GET /uploads/**`、`HEAD /uploads/**`（本地存储的图片、音频与附件） | ✅ | ✅ | ✅ |
+
+> ⚠️ **为什么 HEAD 也要单独放行（2026-09 补的一行）**：Spring Security 的
+> `requestMatchers(HttpMethod.GET, "/uploads/**")` 是**按方法精确匹配**的，HEAD 不在里面 ⇒
+> 对 `/uploads/**` 发 HEAD 会落到链尾的 `anyRequest().authenticated()` ⇒ 返回 **401**。
+> 浏览器看图、点附件下载用的都是 GET，所以这个洞在人工点页面时**看不出来**；
+> 但**监控探活、链接检查器、部分代理的预取**发的是 HEAD，它们会把 401 报成
+> "资源不可用 / 权限坏了"。（真实踩到过：给附件做冒烟测试时 `curl -sI` 拿 401，换 GET 就是 200。）
+> ⚠️ 代码里是两行而不是一个 matcher 带两个方法：`requestMatchers` 只有
+> "一个方法 + 若干路径"和"只给路径"两种重载，写 `requestMatchers(HttpMethod.GET, HttpMethod.HEAD, ...)`
+> 是编译不过的（第二个参数起是路径模式）。有用例守着（`UploadAdminTest` ㉓），
+> 且那条用例带**反向断言**：`HEAD /user/page` 必须仍然是 401 ——
+> 否则"把所有请求都 permitAll"也能让正向断言变绿，而那等于整站接口裸奔。
 
 **几个刻意的设计决定：**
 
@@ -3087,7 +3100,7 @@ mvn test
 `.github/workflows/ci.yml`，在 **push 到 master** 和 **PR** 时触发：
 
 1. 装 JDK **17**（与 `pom.xml` 的 `java.version=17` 一致）
-2. `./mvnw -B verify` —— 构建 + 跑 462 个用例 + 出覆盖率
+2. `./mvnw -B verify` —— 构建 + 跑 463 个用例 + 出覆盖率
 3. 上传 `surefire-reports` 与 `jacoco-report` 两个 artifact（`if: always()`，测试失败时报告最需要看）
 
 **CI 上不需要配置任何 MySQL / Redis 服务** —— 测试用 Testcontainers 自己拉起容器，
@@ -3099,14 +3112,14 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 > 自己拉起 MySQL 与 Redis 容器、跑完自动销毁，所以
 > **即使先执行 `docker compose down`，`mvn test` 也照样全绿** —— 只需要本机装了 Docker。
 >
-> 这意味着：任何人 clone 下来就能验证这 462 个用例，CI 上也能跑
+> 这意味着：任何人 clone 下来就能验证这 463 个用例，CI 上也能跑
 > （在此之前，测试直连本机 3310/6380，换台机器不先起容器就全红，CI 更是跑不了）。
 
-**42 个测试类文件（其中 41 个含用例，另 1 个是无用例的基类 `AbstractIntegrationTest`），462 个用例，全部通过：**
+**42 个测试类文件（其中 41 个含用例，另 1 个是无用例的基类 `AbstractIntegrationTest`），463 个用例，全部通过：**
 
 > 统计口径（这一行别改错）：下表**每个测试类文件一行**（基类也占一行，用例数记 0），
 > 所以**行数 = `src/test/java/com/yigalaxy/yiguixingtu/` 下的 .java 文件数（42）**，
-> **各行用例数之和 = 总数（462）**。新加测试类时必须同时改这三处：
+> **各行用例数之和 = 总数（463）**。新加测试类时必须同时改这三处：
 > 加一行、把该行数字填对、把「合计」与上面那句总数改掉 ——
 > 少改一处的表现是"文档里的数字和 CI 报的不一样"，而不会有任何测试变红。
 
@@ -3127,7 +3140,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleDetailCacheTest` | 11 | 详情缓存：走缓存、**浏览量不被冻住**、写操作后立刻更新、下架即 404、自愈重建、**12 线程并发只查库 1 次（防击穿）**、TTL 有效 |
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
-| `UploadAdminTest` | 22 | 上传的**图片与音频两套规则**：图片（类型/大小白名单、UUID 重命名、非管理员 403）；音频（`type=audio` 传 mp3 成功且**文件真的落盘、返回的 url 能匿名取到**、音频接口拒 png、默认接口拒 mp3、**大小上限按 type 分流**、超音频上限被拒、未知 type 被拒、音频同样只有管理员能传、`type` 大小写与空格容错、两个前缀各自取自配置）；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
+| `UploadAdminTest` | 23 | 上传的**图片与音频两套规则**：图片（类型/大小白名单、UUID 重命名、非管理员 403、**能被匿名 GET 到，且 `HEAD` 也要放行** —— ㉓ 带反向断言"`HEAD /user/page` 仍是 401"）；音频（`type=audio` 传 mp3 成功且**文件真的落盘、返回的 url 能匿名取到**、音频接口拒 png、默认接口拒 mp3、**大小上限按 type 分流**、超音频上限被拒、未知 type 被拒、音频同样只有管理员能传、`type` 大小写与空格容错、两个前缀各自取自配置）；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
 | `ArticleAttachmentTest` | 18 | 文章附件：**上传**（16 种白名单、返回 `{url,name,size}`、名字清洗与截断、超单文件上限被拒且不落盘、**html/htm/svg/xml/js/mjs/css 逐个被拒 + 白名单本身也不许出现它们**）、**数字钉死**（读 `application.properties` 原文核对 10MB / 100MB / 5GB / multipart 105MB）、**总容量护栏**（调成 6KB：压满后再传 1 字节也被拒，且提示里带"已用"）、**三套规则互不放宽**（图片/音频都拒 pdf、未知 type 报错）、**保存**（随表单落库、详情带 attachments、空数组 = 清空）、**整体替换**（旧行消失、新行出现、**被移除的文件真的被删**）、**校验**（数量 20 / 名字 100 字 / size 上限 / url 必须是本站地址，且**校验先于写入**：失败时原附件分毫未动）、**级联删除**（删文章 → 附件行 + 附件文件 + 封面 + 正文图全清；文章行仍是逻辑删除）、**★ 共用的图不误删**（两篇共用正文图与封面，删一篇后共用的留着、独占的删掉、另一篇仍打不开得开）、**共用附件同理**、**下载头**（附件强制 `Content-Disposition: attachment` + `nosniff`；图片与音频仍内联，附件目录里的 mp3 也强制下载） |
 | `AbstractIntegrationTest` | 0 | **基类（没有用例，占一行是为了让"行数 = 测试类文件数"这条能对账）**：singleton 容器模式起 MySQL/Redis、`@DynamicPropertySource` 注入连接、每个用例前重置限流器、`@Transactional` 自动回滚 |
 | `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |
@@ -3154,7 +3167,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `DeploymentMemoryBudgetTest` | 9 | 部署配置契约（**读 `docker-compose.prod.yaml` 与 `Dockerfile`，不起 Spring 上下文**）：四个服务都必须有 `mem_limit`、上限之和要给宿主机留余量、**Dockerfile 的 ENTRYPOINT 不许带 JVM 参数**（带了会静默覆盖 `JAVA_TOOL_OPTIONS`）、三个硬上限之和必须小于 `mem_limit`、堆转储与 GC 日志必须落在挂了卷的目录里、redis 必须是 `volatile-lru`（`allkeys-lru` 会淘汰没有 TTL 的浏览量增量 = 真丢数据）、mysql 必须关 `performance_schema` 且缓冲池是 128M 的整数倍（否则被静默取整成 256M）、**数据服务的镜像必须钉住小版本**（浮动 `mysql:8` 实测拉到了四年前的 8.0.27）、YAML 开启重复键检查 |
 | `ActuatorExposureContractTest` | 4 | 管理端点的暴露面契约（`/actuator/prometheus` 在应用层是**放行**的，只能靠部署挡住）：`location /api/` 必须剥掉前缀（这也是 `/api/actuator/` 会命中后端根路径的根因）、必须有把 `/api/actuator/` 返回 404 的 location、mysql/redis 不发布任何端口且 backend/frontend 只绑 `127.0.0.1`、上线核对清单里这一项必须写出**可判定的**预期结果（404） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |
-| **合计** | **462** | |
+| **合计** | **463** | |
 
 所有测试类都继承 `AbstractIntegrationTest`，它负责：
 启动容器 → 把容器地址通过 `@DynamicPropertySource` 注入 Spring → 事务自动回滚。

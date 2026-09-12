@@ -129,8 +129,22 @@ public class SecurityConfig {
                     //   而封面图是给【所有访客】看的（包括未登录的游客）。
                     //   不放行的话图片会返回 401，前台全变成裂图 ——
                     //   这种问题还特别隐蔽：后台上传明明成功了，前台就是不显示。
-                    //   注意只放行 GET（读图片），上传接口 POST /upload 依然要求管理员。
+                    //   注意只放行 GET 与 HEAD（读文件），上传接口 POST /upload 依然要求管理员。
+                    //
+                    //   ⚠️ 【为什么 HEAD 要单独放行（2026-09 补）】
+                    //     `requestMatchers(HttpMethod.GET, ...)` 是**按方法精确匹配**的：
+                    //     HEAD 不在里面 ⇒ 对 /uploads/** 发 HEAD 会落到链尾的
+                    //     `anyRequest().authenticated()` ⇒ 拿回 **401**。
+                    //     平时看不出来（浏览器看图、点附件下载用的都是 GET），
+                    //     但**监控探活、链接检查器、部分代理的预取**会发 HEAD ——
+                    //     它们拿到 401 会报"资源不可用/权限坏了"，而文件其实好好的。
+                    //     （真实踩到过：给附件做冒烟测试时 `curl -sI` 拿 401，换成 GET 就是 200。）
+                    //   ⚠️ 这里必须是两行：`requestMatchers` 只有"一个方法 + 若干路径"
+                    //     和"只给路径"两种重载，写成
+                    //     `requestMatchers(HttpMethod.GET, HttpMethod.HEAD, "/uploads/**")`
+                    //     是**编译不过**的（第二个参数起是路径模式）。
                     auth.requestMatchers(HttpMethod.GET, "/uploads/**").permitAll();
+                    auth.requestMatchers(HttpMethod.HEAD, "/uploads/**").permitAll();
 
                     // 【健康检查端点必须放行】
                     //   容器的健康检查（docker-compose.prod.yaml 里 backend 的 healthcheck）

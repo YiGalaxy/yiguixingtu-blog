@@ -7,6 +7,7 @@ import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.cache.BatchStrategies;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.cache.RedisCacheManager;
 import org.springframework.data.redis.cache.RedisCacheWriter;
@@ -322,7 +323,7 @@ public class RedisConfig {
         //      它由 @Cacheable(sync = true) + lockingRedisCacheWriter 一起提供：
         //      sync = true 会让 Spring 走 Cache.get(key, Callable) 那条路，
         //      而 locking 写入器在加载前会先抢一把 Redis 里的锁
-        //      （内部就是 SETNX + 超时释放），抢到的去查库、其余等锁后读缓存。
+        //      （内部就是 SETNX），抢到的去查库、其余等锁后读缓存。
         //
         //      【为什么用框架的，而不是自己写 SETNX + 双重检查】
         //        那正是 LockingRedisCacheWriter 内部在做的事，只是它把
@@ -334,7 +335,53 @@ public class RedisConfig {
         //      命中时不受影响（正常路径还是直接 GET）。
         //      对本项目"读多写少、缓存命中率极高"的形状来说，这个代价可以忽略；
         //      如果哪天缓存命中率很低，锁的开销就会变成负担，那时该重新评估。
-        RedisCacheWriter cacheWriter = RedisCacheWriter.lockingRedisCacheWriter(connectionFactory);
+        //
+        //      ============================================================
+        //      ⚠️【更正 + 修复】上面"它把锁超时处理好了"这句是错的，实测踩到
+        //      ============================================================
+        //      单参的 lockingRedisCacheWriter(connectionFactory) 用的是
+        //      DefaultRedisCacheWriterConfigurer 的默认值，其中
+        //      lockTtlFunction = TtlFunction.persistent() —— 【锁 key 永不过期】。
+        //      发出的命令是不带 EX/PX 的 SETNX；而拿不到锁时的等待
+        //      （checkAndPotentiallyWaitUntilUnlocked）是
+        //      while (锁还在) { Thread.sleep(间隔) } 的【无界循环】，没有重试上限。
+        //
+        //      【依据】反编译 spring-data-redis 4.1.1 的字节码逐条核对（defaultRedisCacheWriter
+        //      Configurer 的构造函数、doLock、checkAndPotentiallyWaitUntilUnlocked、
+        //      createCacheLockKey 四个方法），不是照文档猜的 —— 官方文档只写了
+        //      "支持防击穿"，没有任何一处说明锁默认不过期。
+        //
+        //      【更麻烦的是锁的粒度】createCacheLockKey(String) 只接收缓存名一个参数，
+        //      产出的 key 形如 "article:detail~lock"。也就是说这是 article:detail
+        //      这个名字下【所有文章共用】的一把锁，不是一篇文章一把。
+        //
+        //      ⇒ 后果：容器被 OOM-kill（compose 里 backend 的 mem_limit 是 640m）
+        //        或者重启，恰好落在"抢到锁 → 查库 → 写缓存"这三步中间，
+        //        那个 ~lock key 就永久留在 Redis 里。此后【每一篇文章】的详情请求
+        //        都在这里自旋，全站详情页一起打不开，而且不会自愈 ——
+        //        只能人工上 Redis 把那个 key 删掉。这是本项目唯一一个
+        //        "不依赖任何业务数据出错、只靠一次进程被杀就能导致整站读接口持续不可用"
+        //        的配置，所以下面的三项全部显式传，不再吃默认值。
+        //
+        //      【三个参数各自为什么是这个数】
+        //        · lockTtl = 10 秒 —— 锁只保护"查一次库 + 写一次缓存"。
+        //          详情查询实测是 0.05ms 量级；就算数据库慢到 Hikari 的
+        //          connection-timeout（3 秒，见 application.properties）上限，也远不到 10 秒。
+        //          反过来，真出事时最多等 10 秒就自愈，不需要人工介入。
+        //          这是"正常路径绝对不会误释放"和"故障恢复足够快"之间的取值。
+        //        · sleepTime = 50ms —— 默认值是 Duration.ZERO，即 Thread.sleep(0) 的
+        //          忙等：拿不到锁的线程会以 CPU 全速反复问 Redis"锁还在吗"，
+        //          既烧 CPU 又白打 Redis。50ms 是 Spring Data Redis 3.x 时期的默认值，
+        //          拿它当轮询间隔既有依据，也不会拖慢正常路径（锁的持有时间远小于它）。
+        //        · batchStrategy = SCAN(1000) —— 只在 clear() / clean() 时才被用到。
+        //          项目现在靠版本号失效、根本不调用 clear()（见上面 ②），所以传什么
+        //          当前都没有实际影响；不沿用默认的 BatchStrategies.keys() 是因为
+        //          KEYS 会阻塞 Redis 单线程（见上面 ① 里的教训），SCAN 分批更安全。
+        RedisCacheWriter cacheWriter = RedisCacheWriter.lockingRedisCacheWriter(
+                connectionFactory,
+                Duration.ofMillis(50),
+                RedisCacheWriter.TtlFunction.just(Duration.ofSeconds(10)),
+                BatchStrategies.scan(1000));
 
         // ---------------- 统计缓存的规则（只是 TTL 不同） ----------------
         // 列表缓存和统计缓存的序列化、前缀规则完全一样，只有过期时间不同，

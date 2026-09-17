@@ -438,4 +438,90 @@ class ArticleDetailCacheTest extends AbstractIntegrationTest {
         assertEquals(2, articleService.getPublishedDetail(second.getId()).getViewCount(),
                 "再读一次第二篇，也应当是 2");
     }
+
+    // ================================================================
+    //  七、防击穿的那把锁，自己会过期
+    // ================================================================
+
+    @Test
+    @DisplayName("⑪ 防击穿的锁带过期时间：进程被杀留下的锁会自己消失，不会永久卡死整个详情缓存")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void cacheLock_shouldHaveTtl_soACrashedInstanceCannotDeadlockTheDetailCache() throws Exception {
+        // 【这条用例守的是什么】
+        //   @Cacheable(sync = true) 的防击穿依赖 Redis 里的一把锁。而
+        //   RedisCacheWriter.lockingRedisCacheWriter(connectionFactory) 这个【单参】重载
+        //   用的是框架默认值 —— lockTtlFunction = TtlFunction.persistent()，
+        //   也就是【锁 key 永不过期】。锁的粒度又是整个缓存名
+        //   （createCacheLockKey 只接收缓存名，key 形如 article:detail~lock），
+        //   不是一篇文章一把。
+        //   ⇒ 进程恰好死在"抢到锁 → 查库 → 写缓存"之间（容器被 OOM-kill、
+        //     或者一次重启），那把锁就永久留在 Redis 里，此后【每一篇文章】的
+        //     详情请求都在这里自旋，全站详情页一起打不开，而且不自愈。
+        //   （完整推导与修复见 RedisConfig 里那段「更正 + 修复」注释。）
+
+        // 【为什么不写成"读配置字段、断言 lockTtl 不是 persistent"】
+        //   那种写法只能证明"我们传了参数"，证明不了"Redis 里的锁真的会过期"——
+        //   取值传错（比如传了 Duration.ZERO）照样能过。
+        //   所以这条用例是【真的去 Redis 问那把锁的 TTL】：
+        //   读到 -1 就说明锁是永久的（-1 正是"这个 key 没有过期时间"），
+        //   读到正数才算修复真的生效。
+        mark = uniqueMark();
+        Article a = insertArticle(mark + " 锁TTL", 1);
+        Long articleId = a.getId();
+
+        String lockKey = RedisConfig.CACHE_ARTICLE_DETAIL + "~lock";
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            clearDetailCache();
+            redis.delete(lockKey);   // 清掉上一次跑测试可能留下的残留
+
+            // 【为什么要人为拖慢查库】
+            //   锁只在"回源"这段时间里存在，而详情查询实测是 0.05ms 量级 ——
+            //   不拖慢的话锁在毫秒内就释放了，从外面根本观察不到它。
+            //   拖到 1.5 秒只是给下面轮询 TTL 留一个稳定的观察窗口，
+            //   它不改变"锁是怎么加的"，也不影响第⑦⑧条要证明的东西。
+            Mockito.doAnswer(invocation -> {
+                Thread.sleep(1500);
+                return invocation.callRealMethod();
+            }).when(spyArticleMapper).selectById(articleId);
+
+            CountDownLatch started = new CountDownLatch(1);
+            pool.submit(() -> {
+                started.countDown();
+                try {
+                    articleService.getPublishedDetail(articleId);
+                } catch (Exception ignored) {
+                    // 本用例只关心锁的 TTL，这一次取到的数据是什么与结论无关
+                }
+            });
+            started.await();
+
+            Long observedTtl = null;
+            long deadline = System.currentTimeMillis() + 5000;
+            while (System.currentTimeMillis() < deadline) {
+                Long ttl = redis.getExpire(lockKey);
+                if (ttl != null && ttl != -2) {   // -2 = 这个 key 此刻不存在，继续等
+                    observedTtl = ttl;
+                    break;
+                }
+                Thread.sleep(20);
+            }
+
+            assertNotNull(observedTtl,
+                    "整段观察窗口里都没见到锁 key（" + lockKey + "）—— 说明防击穿的锁根本没被加上，"
+                            + "那么第⑦条（sync = true）与第⑧条（并发只回源一次）的前提也不成立了");
+            assertTrue(observedTtl > 0,
+                    "锁 key 的 TTL 是 " + observedTtl + "，【负数表示这个 key 没有过期时间】。"
+                            + "一旦进程在持锁期间被杀，它会永久留在 Redis 里，"
+                            + "之后全站每一篇文章的详情请求都会在 " + RedisConfig.CACHE_ARTICLE_DETAIL
+                            + " 这个缓存名上自旋等待，且不会自愈。"
+                            + "修复方式见 RedisConfig 里四参的 lockingRedisCacheWriter。");
+        } finally {
+            Mockito.reset(spyArticleMapper);
+            pool.shutdownNow();
+            redis.delete(lockKey);
+            jdbcTemplate.update("DELETE FROM article WHERE id = ?", articleId);
+            clearDetailCache();
+        }
+    }
 }

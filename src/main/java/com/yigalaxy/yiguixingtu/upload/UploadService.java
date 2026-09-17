@@ -9,6 +9,7 @@ import org.springframework.util.unit.DataSize;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -135,22 +136,34 @@ public class UploadService {
         // ---- ⑤ 生成对象路径：{类型前缀}/{年}/{月}/{uuid}.{扩展名} ----
         String objectKey = buildObjectKey(extension, prefixOf(uploadType));
 
-        byte[] content;
-        try {
-            content = file.getBytes();
-        } catch (IOException e) {
-            log.error("读取上传文件失败", e);
-            throw new BusinessException(ResultCode.ERROR, "读取文件失败，请重试");
-        }
-
-        // Content-Type 优先用客户端声明的；没声明就按扩展名猜一个。
+        // ---- ⑥ Content-Type ----
+        // 优先用客户端声明的；没声明就按扩展名猜一个。
         // 它对本地存储的意义是"浏览器打开这个文件时是显示/播放还是下载"——
         // 缺了它（或猜成 application/octet-stream）浏览器会直接把文件当附件下载下来
         String contentType = StringUtils.hasText(file.getContentType())
                 ? file.getContentType()
                 : guessContentType(extension);
 
-        String url = fileStorage.store(content, objectKey, contentType);
+        // ---- ⑦ 落盘 ----
+        // 【为什么传流、不传 byte[]】
+        //   原来这里是 file.getBytes()，会把整个文件读成一个 byte[] 放进堆。
+        //   本项目附件上限 100MB，而容器内存上限 640m、堆约 384MB
+        //   （见 docker-compose.prod.yaml 的 mem_limit 与那里的 JAVA_TOOL_OPTIONS）
+        //   —— 三四个并发的大附件上传就足以把容器打 OOM，
+        //   症状是"上传到一半服务没了"，而且日志里看不出和上传有关。
+        //
+        //   getInputStream() 拿到的是流：Spring 对超过阈值的 multipart 会先落到
+        //   临时文件，之后整条路径是"磁盘 → 缓冲区 → 磁盘"，堆占用与文件大小无关。
+        //
+        //   流必须在这里关掉（try-with-resources）—— 按 FileStorage.store 的约定，
+        //   实现方不负责关闭它（实现里再关一次就成了二次关闭）。
+        String url;
+        try (InputStream content = file.getInputStream()) {
+            url = fileStorage.store(content, objectKey, contentType);
+        } catch (IOException e) {
+            log.error("读取上传文件失败", e);
+            throw new BusinessException(ResultCode.ERROR, "读取文件失败，请重试");
+        }
 
         // 名字单独跑一遍"清洗"再返回：前端要拿它去渲染附件列表，
         // 而且它会被存进 article_attachment.name（varchar(100)）

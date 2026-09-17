@@ -14,6 +14,7 @@ import com.yigalaxy.yiguixingtu.user.dto.UserVO;
 import com.yigalaxy.yiguixingtu.user.entity.User;
 import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -69,7 +70,20 @@ public class UserServiceImpl implements UserService {
         user.setStatus(1);
         user.setDeleted(0);
         //3.开始插入
-        userMapper.insert(user);
+        try {
+            userMapper.insert(user);
+        } catch (DuplicateKeyException e) {
+            // 并发下的兜底：两个请求同时通过上面的查重、一起 INSERT，
+            // 其中一个必然撞 uk_username。翻译成业务错误，而不是让用户看到 500。
+            // （和 TagServiceImpl.create / CategoryServiceImpl.create 是同一个处理。）
+            //
+            // 【为什么这条路径比别处更容易撞上】
+            //   /auth/register 是 permitAll 的公开接口，不需要登录就能调用 ——
+            //   用户连点两次提交、或者脚本扫，都能造出"同一个用户名同时进来两次"。
+            //   上面的查重在两次请求之间没有任何互斥，挡不住这种情况。
+            log.warn("注册时撞上用户名唯一索引（并发提交）: username={}", username);
+            throw new BusinessException(ResultCode.USERNAME_EXISTS);
+        }
         //4.返回成功信息
         log.info("注册用户成功:{}",username);
         return user;

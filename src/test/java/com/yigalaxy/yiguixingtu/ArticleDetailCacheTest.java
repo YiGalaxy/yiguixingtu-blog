@@ -183,20 +183,24 @@ class ArticleDetailCacheTest extends AbstractIntegrationTest {
     // ================================================================
 
     @Test
-    @DisplayName("③ 连续访问同一篇文章 -> 浏览量必须持续增长（增量在缓存外面合并）")
+    @DisplayName("③ 连续上报同一篇文章 -> 浏览量必须持续增长（增量在缓存外面合并）")
     void repeatedReads_shouldKeepIncrementingViewCount() {
         mark = uniqueMark();
         Article a = insertArticle(mark + " 浏览量不能冻住", 1);
 
-        int first = articleService.getPublishedDetail(a.getId()).getViewCount();
-        int second = articleService.getPublishedDetail(a.getId()).getViewCount();
-        int third = articleService.getPublishedDetail(a.getId()).getViewCount();
-
-        assertEquals(1, first, "第一次访问应当显示 1（包含本次）");
-        assertEquals(2, second,
-                "第二次必须显示 2 —— 如果还是 1，说明 INCR 被缓存的命中路径跳过了，"
+        // 上报三次。计数走的是和详情同一条缓存路径（recordView 内部先 load），
+        // 所以"计数被缓存的命中路径跳过"这个问题在这里同样会被抓到 ——
+        // 真被跳过的话，第二次就会停在 1，而不是 2。
+        assertEquals(1, articleService.recordView(a.getId()), "第一次上报应当返回 1");
+        assertEquals(2, articleService.recordView(a.getId()),
+                "第二次必须返回 2 —— 如果还是 1，说明计数被缓存的命中路径跳过了，"
                         + "浏览量会永远停在那个值上（这是本类最重要的一条断言）");
-        assertEquals(3, third, "第三次同理，必须继续增长");
+        assertEquals(3, articleService.recordView(a.getId()), "第三次同理，必须继续增长");
+
+        // 【读详情是纯读】它自己不计数，但必须把 Redis 里还没落库的增量合并进返回值 ——
+        //   否则用户会看到"我刷新了但数字不动"：库里的快照要等定时任务才更新。
+        assertEquals(3, articleService.getPublishedDetail(a.getId()).getViewCount(),
+                "详情必须把未落库的增量合并进来，不能只返回过期的库快照");
     }
 
     // ================================================================
@@ -418,25 +422,28 @@ class ArticleDetailCacheTest extends AbstractIntegrationTest {
         Article first = insertArticle(mark + " 第一篇", 1);
         Article second = insertArticle(mark + " 第二篇", 1);
 
-        // 【注意每条只读一次】浏览量每次读都会 +1，
-        //   所以断言"第一次读到的是 1"就必须保证在此之前没读过它。
-        //   （第一版这里就是先读了 title 再断言 viewCount=1，结果拿到 2 而变红。）
+        // 【注意每条只上报一次】浏览量现在是"上报一次 +1"，
+        //   所以断言"第一次上报后是 1"就必须保证在此之前没给它上报过。
+        //   （改版前这里靠"读详情"来计数，而读详情现在是纯读、不再计数了。）
         ArticleVO firstVo = articleService.getPublishedDetail(first.getId());
         ArticleVO secondVo = articleService.getPublishedDetail(second.getId());
 
         assertEquals(mark + " 第一篇", firstVo.getTitle(), "两篇文章应当各自取到自己的内容");
         assertEquals(mark + " 第二篇", secondVo.getTitle());
-        assertEquals(1, firstVo.getViewCount(), "第一篇第一次被读，浏览量应当是 1");
-        assertEquals(1, secondVo.getViewCount(), "第二篇第一次被读，浏览量也应当是 1（互不干扰）");
+        // 读详情是纯读：此刻还没上报过浏览，所以两篇都还是 0
+        assertEquals(0, firstVo.getViewCount(), "读详情不计浏览，此时应当是 0");
+        assertEquals(0, secondVo.getViewCount(), "另一篇同理");
 
         Set<String> keys = awaitDetailKeys(2, 2000);
         assertEquals(2, keys.size(), "两篇文章应当各有一条缓存，实际=" + keys);
 
-        // 再各读一次：两边的浏览量各自 +1，说明没有共用同一个计数器
-        assertEquals(2, articleService.getPublishedDetail(first.getId()).getViewCount(),
-                "再读一次第一篇，应当是 2（第二次读仍然走缓存，只是计数在缓存外面）");
-        assertEquals(2, articleService.getPublishedDetail(second.getId()).getViewCount(),
-                "再读一次第二篇，也应当是 2");
+        // 上报浏览：两边的浏览量各自 +1，说明没有共用同一个计数器
+        assertEquals(1, articleService.recordView(first.getId()),
+                "第一篇上报一次，浏览量应当是 1");
+        assertEquals(1, articleService.recordView(second.getId()),
+                "第二篇也应当是 1（互不干扰）");
+        assertEquals(2, articleService.recordView(first.getId()),
+                "第一篇再上报一次，应当是 2（两次各自累加，没有互相覆盖）");
     }
 
     // ================================================================

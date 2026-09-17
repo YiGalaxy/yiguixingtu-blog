@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -49,7 +50,7 @@ public class LocalFileStorage implements FileStorage {
     }
 
     @Override
-    public String store(byte[] content, String objectKey, String contentType) {
+    public String store(InputStream content, String objectKey, String contentType) {
         Path root = Paths.get(properties.getLocalDir()).toAbsolutePath().normalize();
         Path target = root.resolve(objectKey).normalize();
 
@@ -62,7 +63,15 @@ public class LocalFileStorage implements FileStorage {
         try {
             // 父目录可能还不存在（比如第一次上传、或者到了新的月份），先建出来
             Files.createDirectories(target.getParent());
-            Files.write(target, content);
+
+            // 【为什么是 copy(流) 而不是 write(byte[])】
+            //   write 要求整个文件已经在内存里；copy 是流式的，堆里只有一个
+            //   固定大小的缓冲区 —— 上传 100MB 附件时，两者的差别就是
+            //   "多占 100MB 堆"和"几乎不占堆"。完整推导见 FileStorage.store 的参数说明。
+            //
+            // ⚠️ 这里【不关闭】content：它是调用方（UploadService）传进来的，
+            //    那边用 try-with-resources 管着。这里关掉会变成二次关闭。
+            Files.copy(content, target);
         } catch (IOException e) {
             // 转成运行时异常交给全局异常处理器 → 500。
             // 附带说明：这里【不打日志输出文件内容或路径细节到用户可见的地方】，

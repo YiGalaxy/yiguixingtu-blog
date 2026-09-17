@@ -303,24 +303,24 @@ public class ArticleServiceImpl implements ArticleService {
         //   （第一版把它排在后面，全量测试立刻变红，正是这条用例抓出来的。）
         ArticleVO vo = publishedArticleCache.load(id);
 
-        // 【第二步：记一次浏览（只记 Redis，不写库）】
-        //   原来这里是一句 UPDATE article SET view_count = view_count + 1，
-        //   也就是"详情页是读接口，却在每次请求里写一次库"。
-        //   后果是热门文章被频繁打开时，这条 UPDATE 成为最热的写语句，
-        //   而且并发访问同一篇会在同一行上排队等锁 —— 看文章被写操作拖慢。
-        //   现在只做一次 Redis INCR（内存操作、无行锁），由定时任务批量落库。
+        // 【第二步：这里【不再】计浏览 —— 计数已经从这个接口挪走了】
+        //   这个接口以前在这里做一次 Redis INCR。那是"读接口带写副作用"，
+        //   而它带来的三条后果都不小：
+        //     ① 它永远不能被任何一层缓存 —— HTTP 缓存 / CDN / SWR 都不行，
+        //        因为一缓存，浏览量就停在某个值上不再增长；
+        //     ② 爬虫抓一次 = 一次浏览；
+        //     ③ NuxtLink 的预取（链接进入视口就抓一次目标页）也会被算成浏览 ——
+        //        用户只是滚动了一下首页，一批文章的浏览量就涨了。
+        //   现在计数走独立的 POST /article/{id}/view（见 recordView），
+        //   由前端在页面真正挂载之后上报一次。这个接口因此变成【纯读】，
+        //   可以放心加缓存 —— 至于加不加，是下一步的事。
         //
-        // ⚠️ 【这行必须在缓存外面】
-        //   它是带副作用的写操作，而缓存只能缓存"纯读且幂等"的结果。
-        //   如果把它连同下面的合并一起缓起来，命中缓存的请求就不会再 INCR，
-        //   浏览量会永远停在某个值上 —— 页面照常打开、数字照常显示，只是不再增长。
-        viewCounter.increment(id);
+        //   ⚠️ 返回的数字里【不再包含本次访问】，因为本次访问还没被上报。
+        //      前端拿到 recordView 的返回值后再更新显示，两边就一致了。
 
         // 【第三步：合并"库里的快照 + Redis 里还没落库的增量"再返回】
         //   只返回库里的值的话，用户会看到"我刷新了但数字不动"——
         //   因为最新的计数还没到落库时间。
-        //   顺序上"先 INCR 再读增量"，所以返回的数字【包含本次访问】，
-        //   用户刷新能看到自己这一下被算进去了。
         //
         // 【这里直接改 vo 会不会污染缓存】
         //   不会。缓存用的是 Redis + JSON 序列化，每次读出来都是一个【新对象】，
@@ -331,6 +331,43 @@ public class ArticleServiceImpl implements ArticleService {
         long dbCount = vo.getViewCount() == null ? 0L : vo.getViewCount();
         vo.setViewCount((int) (dbCount + viewCounter.pending(id)));
         return vo;
+    }
+
+    /**
+     * 记一次浏览，并返回这篇文章【含本次访问的最新总浏览量】。
+     *
+     * 【为什么它是一个独立接口，而不是塞在详情里】
+     *   完整推导见上面 getPublishedDetail 的"第二步"注释。一句话：
+     *   读接口带写副作用会让它永远不能被缓存，而且爬虫与预取都会被算成浏览。
+     *
+     * 【为什么这里仍然要先 load 一次（走的是详情缓存，不额外查库）】
+     *   顺序不能反：草稿和不存在的文章会在这里抛 404。
+     *   如果先 INCR 再校验，别人拿 id 挨个探测草稿也会留下浏览痕迹 ——
+     *   ArticleViewCountTest 里有一条用例专门盯着这件事。
+     *
+     * 【返回值怎么算的】
+     *   库里那份快照（vo.viewCount）+ INCR 返回的累计增量。
+     *   直接取 INCR 的返回值，而不是再去 GET 一次 ——
+     *   这正是 ArticleViewCounter.increment 改成有返回值的原因。
+     *   INCR 失败时它返回 -1，此时回退到 pending()：少算这一次，
+     *   但绝不能把浏览量算成一个负数。
+     *
+     * @return 含本次访问的最新总浏览量
+     */
+    @Override
+    public int recordView(Long id) {
+        ArticleVO vo = publishedArticleCache.load(id);
+
+        long pending = viewCounter.increment(id);
+        if (pending < 0) {
+            // Redis 出问题了（increment 自己已经记过日志）。
+            // 回退去读一次增量：读也失败的话 pending() 返回 0，
+            // 结果是"这次浏览没被算上" —— 宁可少算，也不要算错。
+            pending = viewCounter.pending(id);
+        }
+
+        long dbCount = vo.getViewCount() == null ? 0L : vo.getViewCount();
+        return (int) (dbCount + pending);
     }
 
     @Override
@@ -611,9 +648,6 @@ public class ArticleServiceImpl implements ArticleService {
                 .set(Article::getStatus, form.getStatus() == null ? exist.getStatus() : form.getStatus())
                 .set(Article::getIsTop, form.getIsTop() == null ? exist.getIsTop() : form.getIsTop()));
 
-        // 改完内容要让列表缓存失效（标题/摘要/分类/置顶都可能变，列表显示会跟着变）
-        articleCacheVersion.bump();
-
         // 3. 覆盖式地重写标签关联（把旧的全部清掉，再写入这次提交的那些）。
         //    标签不存在时它会先校验再抛异常（校验发生在任何写入之前，
         //    见 TagServiceImpl.replaceArticleTags 的注释），所以"保存失败"不会
@@ -626,13 +660,58 @@ public class ArticleServiceImpl implements ArticleService {
         //    "这次没再提交的文件"从磁盘上删掉 —— 那段推理在 replaceAttachments 里。
         replaceAttachments(id, attachments);
 
+        // 5.【让缓存失效 —— 位置是刻意放在这里的，不要往前挪】
+        //   改完内容要让列表缓存失效（标题/摘要/分类/置顶都可能变，列表会跟着变），
+        //   但【什么时候】推进版本号是有讲究的：
+        //
+        //   bump() 一执行，新的版本号对【所有实例】立刻可见。此刻若有并发读请求打进来，
+        //   它会用新版本号拼 key、未命中、然后去查库 —— 而本事务【还没提交】，
+        //   它查到的是改动前的数据，于是把旧数据写进新 key、缓存 5 分钟。
+        //   窗口 = bump 到 commit 之间的时长，所以正确做法是让它尽量短：
+        //   把 bump 放在【所有写库动作之后】，后面只剩一次发事件（微秒级）和提交本身。
+        //
+        //   ⚠️ 反例就是本方法改动前的样子：bump 排在文章 UPDATE 之后，
+        //      而后面还有标签重写（1 查 + 2 写）和附件重写（可能还有 3N 次引用检查），
+        //      窗口被拉到几十到几百毫秒 —— 用户"保存后立刻刷新列表"正好落在这个窗口里。
+        //
+        //   ⚠️【为什么不是挪到事务提交之后（afterCommit）】
+        //      那才是理论上最干净的时机，但代价落在测试语义上：
+        //      本项目测试默认带 @Transactional 且【从不提交】，afterCommit 回调
+        //      永远不会触发 —— 三个直接调 bump() 的用例
+        //      （ArticleArchiveTest / ArticleRssTest / TagTest）会集体失效，
+        //      而它们验证的是"缓存失效后能重新查到新数据"这件正事。
+        //      用"挪到最后一步"换到绝大部分收益、且不动测试语义，是这个位置的全部理由。
+        articleCacheVersion.bump();
+
         // 记一笔审计。detail 里带上"改成了什么标题"——
         // 只记"谁在什么时候改了哪篇"的话，事后想查"标题是被谁改成这样的"还是得去翻日志
         operationLogRecorder.record(OperationAction.UPDATE_ARTICLE, AuditTarget.ARTICLE, id,
                 "标题=" + form.getTitle().trim());
     }
 
+    /**
+     * 发布 / 下架一篇文章。
+     *
+     * 【为什么这个方法必须有 @Transactional】
+     *   它要写三处：数据库的 status、Redis 里的缓存版本号、审计表。
+     *   其中 {@code articleCacheVersion.bump()} 是【会抛异常】的
+     *   （见 ArticleCacheVersion.incr —— Redis 出错就直接往外抛，没有兜底）。
+     *   没有事务时，一次 Redis 抖动就会留下这条断裂：
+     *     库里的状态已经改了（发布/下架已经生效），但缓存版本号没推进
+     *   —— 表现是站长点了发布、接口报错、他以为失败了，但文章其实已经发布，
+     *      而前台因为缓存没失效、最长 5 分钟看不到它（反过来下架也一样：
+     *      后台显示已下架，前台还在列表里）。
+     *   加上事务之后，这两种情况会整体回滚：站长收到明确的失败、重试一次即可，
+     *   库和缓存始终一致。
+     *
+     *   ⚠️ 【不要照抄到 user 模块去】UserServiceImpl 的 updateStatus / updateRole /
+     *   resetPassword 同样没有事务，但那边是【成立的】—— 它们下游的
+     *   UserAuthCache.evict() 自己把异常 catch 掉了（见该类的 evict 方法），
+     *   不存在"库改了、缓存没清"这条断裂。两者形似而实不同，判据是
+     *   "下游那个清理动作会不会抛异常"，不是"长得像不像"。
+     */
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void updateStatus(Long id, Integer status) {
 
         // 校验状态值只能是 0 或 1

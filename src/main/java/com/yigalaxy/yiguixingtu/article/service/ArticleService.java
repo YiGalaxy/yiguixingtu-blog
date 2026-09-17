@@ -30,6 +30,17 @@ public interface ArticleService {
     ArticleVO getPublishedDetail(Long id);
 
     /**
+     * 【前台】记一次浏览，返回含本次访问的最新总浏览量。草稿一律当作"不存在"。
+     *
+     * 【为什么单独一个方法，而不是让 getPublishedDetail 顺手记】
+     *   那样等于"读接口带写副作用"：详情接口就永远不能加任何缓存
+     *   （一缓存，浏览量就停住不涨了），而且爬虫抓一次、NuxtLink 预取一次
+     *   都会被算成浏览。拆开之后详情接口是纯读，计数由前端在页面挂载后单独上报。
+     *   完整推导见 ArticleServiceImpl.recordView 与 getPublishedDetail 的注释。
+     */
+    int recordView(Long id);
+
+    /**
      * 【前台】站点统计：首页要显示的那三个数字（文章数 / 总浏览量 / 分类数）。
      *
      * 【为什么放在前台这一组】

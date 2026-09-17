@@ -1,5 +1,7 @@
 package com.yigalaxy.yiguixingtu.upload;
 
+import java.io.InputStream;
+
 /**
  * =====================================================================
  * 文件存储的抽象接口 —— "把一段内容存到一个 key 上，并返回可访问的 URL"
@@ -35,7 +37,24 @@ public interface FileStorage {
     /**
      * 保存一个文件。
      *
-     * @param content     文件内容（已读过大小限制校验）
+     * ============================================================
+     * 【⚠️ 参数为什么是 InputStream 而不是 byte[]】
+     * ============================================================
+     *   附件上限是 100MB（见 {@link UploadProperties#getAttachmentMaxSize()}）。
+     *   接口如果收 byte[]，调用方就必须【先把整个文件读进堆】才能调它 ——
+     *   而容器内存上限 640m、堆约 384MB
+     *   （见 docker-compose.prod.yaml 的 mem_limit 与那里的 JAVA_TOOL_OPTIONS），
+     *   三四个并发的大附件上传就足以把容器打 OOM。症状是"上传到一半服务没了"，
+     *   而且日志里看不出跟上传有关。
+     *   收流之后，整条链路（MultipartFile → 这里 → 磁盘）是流式拷贝，
+     *   堆占用与文件大小无关，只跟缓冲区大小有关。
+     *
+     * 【流的关闭责任在调用方，实现方不要关】
+     *   调用方用 try-with-resources 管着这个流；实现里再关一次就成了二次关闭
+     *   （有的流实现在二次关闭时会抛异常）。所以实现只负责"把它读完"。
+     *
+     * @param content     文件内容流。大小限制的校验【不在这里做】——
+     *                    UploadService 已经按类型校验过（图片 10MB / 音频 20MB / 附件 100MB）
      * @param objectKey   对象在存储里的唯一路径，形如 {@code cover/2026/09/xxxx.jpg}。
      *                    由调用方（UploadService）统一生成，
      *                    这样"文件放在哪"这件事对存储实现是透明的
@@ -44,7 +63,7 @@ public interface FileStorage {
      *                    不传或传错的话图片会变成下载文件
      * @return 可以直接放进 &lt;img src&gt; 的完整 URL
      */
-    String store(byte[] content, String objectKey, String contentType);
+    String store(InputStream content, String objectKey, String contentType);
 
     /**
      * 删除一个已保存的文件（文章被删除、或编辑文章时移除了某个附件时用）。

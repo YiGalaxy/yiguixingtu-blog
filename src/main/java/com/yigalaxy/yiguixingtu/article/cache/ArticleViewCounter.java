@@ -63,21 +63,32 @@ public class ArticleViewCounter {
     }
 
     /**
-     * 浏览量 +1。
+     * 浏览量 +1，并返回【自增之后的累计增量】。
+     *
+     * 【为什么要返回这个值，而不是像以前那样丢掉】
+     *   调用方（浏览上报接口 ArticleServiceImpl.recordView）要立刻回一个
+     *   "含本次访问的最新总数"给前端，而那个数 = 库里的快照 + 这个增量。
+     *   INCR 本来就返回自增后的值，直接用它就够 ——
+     *   原来丢掉返回值、紧接着再调一次 {@link #pending} 去 GET 同一个 key，
+     *   是白白多一次 Redis 往返。
      *
      * @param articleId 文章 ID
+     * @return 自增后的累计增量；Redis 出问题时返回 -1
+     *         （调用方据此回退到 {@link #pending} 或不更新显示）
      */
-    public void increment(Long articleId) {
+    public long increment(Long articleId) {
         if (articleId == null) {
-            return;
+            return -1L;
         }
         try {
-            redis.opsForValue().increment(key(articleId));
+            Long v = redis.opsForValue().increment(key(articleId));
+            return v == null ? -1L : v;
         } catch (Exception e) {
             // 【为什么这里只打日志不抛异常】浏览量是"锦上添花"的数据，
             // 它统计失败绝不该导致用户看不了文章 —— 那是拿次要功能换主要功能。
             // 代价是这次访问没被计数，可在日志里看到。
             log.warn("浏览量计数失败, articleId={}（不影响文章正常展示）: {}", articleId, e.getMessage());
+            return -1L;
         }
     }
 

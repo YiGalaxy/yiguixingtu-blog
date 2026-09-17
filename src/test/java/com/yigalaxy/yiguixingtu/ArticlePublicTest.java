@@ -22,6 +22,7 @@ import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -278,28 +279,35 @@ class ArticlePublicTest extends AbstractIntegrationTest {
     }
 
     @Test
-    @DisplayName("⑩ 浏览量：详情只记 Redis 不写库，但返回的数字包含本次访问")
-    void detail_shouldIncreaseViewCount() throws Exception {
+    @DisplayName("⑩ 浏览量：读详情是纯读，计数由独立的上报接口负责")
+    void viewCount_shouldBeReportedSeparately() throws Exception {
         Article a = insertArticle("浏览量文章", 1);
 
-        // 第一次访问：库里的快照是 0，加上"本次这一次" → 返回 1
+        // 【读详情不再计数】它就是纯读，返回库里的快照（此刻是 0）。
+        //   这正是这个接口能被缓存的前提 —— 见 ArticleServiceImpl.getPublishedDetail 的注释。
         mockMvc.perform(get("/article/{id}", a.getId()))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.viewCount").value(1));
+                .andExpect(jsonPath("$.data.viewCount").value(0));
+
+        // 上报浏览：库里的快照 0 + 本次 1 → 返回 1
+        mockMvc.perform(post("/article/{id}/view", a.getId()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data").value(1));
 
         // 第二次：库仍是 0，Redis 里累计 2 → 返回 2
-        mockMvc.perform(get("/article/{id}", a.getId()))
-                .andExpect(jsonPath("$.data.viewCount").value(2));
+        mockMvc.perform(post("/article/{id}/view", a.getId()))
+                .andExpect(jsonPath("$.data").value(2));
 
-        // 【这条断言跟着改动改了，说明为什么】
-        //   原来这里断言的是"库里 view_count == 2"，因为详情接口每次都 UPDATE 数据库。
-        //   现在详情接口【不再写库】了（这正是 §0.2 第 3 项那个缺口：
-        //   读接口里带写操作、并发时还要在同一行上等锁），
-        //   改成只做一次 Redis INCR，由 ViewCountSyncTask 每 5 分钟批量落库。
-        //   所以库里此刻应该【还是 0】—— 增量还在 Redis 里等着同步。
+        // 【这条断言跟着改动改过两次，把过程说清楚】
+        //   最早它断言"库里 view_count == 2"，因为详情接口每次都 UPDATE 数据库。
+        //   第一次改动把 UPDATE 换成"一次 Redis INCR + 定时批量落库"，
+        //   断言随之变成"库里还是 0"（增量在 Redis 里等着同步）。
+        //   第二次改动（就是这次）又把那次 INCR 挪到了独立的上报接口 ——
+        //   读接口带写副作用会让它永远不能被缓存，而且爬虫与 NuxtLink 预取
+        //   都会被算成浏览。所以库里此刻【仍然是 0】。
         //   想看"落库之后库里是多少"，见 ArticleViewCountTest 里那几条用例。
         assertEquals(0, articleMapper.selectById(a.getId()).getViewCount(),
-                "访问详情不该再写数据库；增量此时还在 Redis 里等着定时落库");
+                "上报浏览不该写数据库；增量此时还在 Redis 里等着定时落库");
     }
 
     // ================================================================

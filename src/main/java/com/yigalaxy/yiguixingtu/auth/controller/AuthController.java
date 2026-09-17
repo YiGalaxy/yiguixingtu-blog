@@ -10,7 +10,6 @@ import com.yigalaxy.yiguixingtu.common.Result;
 import com.yigalaxy.yiguixingtu.common.metrics.BusinessMetrics;
 import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
 import com.yigalaxy.yiguixingtu.user.entity.User;
-import com.yigalaxy.yiguixingtu.user.mapper.UserMapper;
 import com.yigalaxy.yiguixingtu.user.service.UserService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -37,17 +36,15 @@ public class AuthController {
 
     private final AuthenticationManager authenticationManager;
     private final JwtUtil jwtUtil;
-    private final UserMapper userMapper;
     private final UserService userService;
     private final TokenBlacklist tokenBlacklist;
     private final BusinessMetrics metrics;
 
     public AuthController(AuthenticationManager authenticationManager, JwtUtil jwtUtil,
-                          UserMapper userMapper, UserService userService,
+                          UserService userService,
                           TokenBlacklist tokenBlacklist, BusinessMetrics metrics) {
         this.authenticationManager = authenticationManager;
         this.jwtUtil = jwtUtil;
-        this.userMapper = userMapper;
         this.userService = userService;
         this.tokenBlacklist = tokenBlacklist;
         this.metrics = metrics;
@@ -162,18 +159,33 @@ public class AuthController {
 
     /**
      * 获取当前登录用户信息（需要带 token）
+     *
+     * 【为什么这里不再查一次数据库】
+     *   JwtAuthenticationFilter 在这个请求进来时，已经把用户的完整信息
+     *   （id / username / nickname / role / status）从 UserAuthCache 或数据库
+     *   取出来、装进了 LoginUser。这里再 selectById 一次，就是在同一个请求里
+     *   查了两遍同一行 —— 而且两次拿到的必然是同一份数据（缓存比刚才那次查库更新）。
+     *
+     * 【直接取那一份是安全的，理由是一致性策略，不是"应该没问题"】
+     *   UserAuthCache 的策略是"写时清除"：所有会改用户字段的方法
+     *   （UserServiceImpl 的 updateStatus / updateRole / resetPassword / removeUser）
+     *   都会调 evict 把缓存删掉；而项目里【根本没有"改昵称"的接口】。
+     *   所以缓存里的 nickname 不会滞后，那个 30 分钟的 TTL 只是"万一漏清"的兜底。
+     *
+     * 【password 不会被带出去】
+     *   JwtAuthenticationFilter 构造 LoginUser 之前已经执行了
+     *   {@code dbUser.setPassword(null)}（那行有它自己的理由：避免哈希在内存里被误用），
+     *   而 LoginVO 本来也不含密码字段 —— 两条加起来，不存在"返回哈希"的可能。
      */
     @Operation(summary = "获取当前登录用户")
     @GetMapping("/me")
     public Result<LoginVO> me() {
-        // 1. 当前登录用户（由 JwtAuthenticationFilter 放进 SecurityContext）
+        // 当前登录用户。它由 JwtAuthenticationFilter 放进 SecurityContext，
+        // 里面那个 User 就是本请求已经取到的那一份，不需要再查库
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         LoginUser loginUser = (LoginUser) authentication.getPrincipal();
+        User user = loginUser.getUser();
 
-        // 2. 从数据库查完整用户信息（token 里没存昵称等）
-        User user = userMapper.selectById(loginUser.getUser().getId());
-
-        // 3. 组装返回
         LoginVO vo = new LoginVO();
         vo.setId(user.getId());
         vo.setUsername(user.getUsername());

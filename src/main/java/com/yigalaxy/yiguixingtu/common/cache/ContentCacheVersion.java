@@ -1,7 +1,10 @@
 package com.yigalaxy.yiguixingtu.common.cache;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
+
+import java.util.UUID;
 
 /**
  * =====================================================================
@@ -51,6 +54,7 @@ import org.springframework.stereotype.Component;
  *   放 Redis 才能让所有实例看到同一个版本号。
  * =====================================================================
  */
+@Slf4j
 @Component
 public class ContentCacheVersion {
 
@@ -83,8 +87,25 @@ public class ContentCacheVersion {
      * @return 当前版本号字符串；Redis 里还没有时返回 "0"
      */
     public String current() {
-        String v = redis.opsForValue().get(VERSION_KEY);
-        return v == null ? INITIAL_VERSION : v;
+        try {
+            String v = redis.opsForValue().get(VERSION_KEY);
+            return v == null ? INITIAL_VERSION : v;
+        } catch (Exception e) {
+            // 【为什么这里必须自己兜住异常 —— 连 CacheErrorHandler 都指望不上】
+            //   完整推导（含 spring-context 源码行号）写在
+            //   ArticleCacheVersion.read 的注释里，一句话概括：
+            //   本方法是在 @Cacheable 的 SpEL key 表达式里被调用的，而 SpEL 求值
+            //   发生在 CacheAspectSupport.generateKey() 里、【在 try/catch 之外】——
+            //   异常会一路冒到接口层变成 500，而不是"缓存失效、回落查库"。
+            //   中招的是友链 / 项目 / 收藏 / 关于 / 音乐 / 站点设置这一整组缓存接口。
+            //
+            //   返回一个每次都不一样的值 ⇒ 拼出的 key 永不命中 ⇒ 自动降级为查库。
+            //   （为什么不能返回固定的 "0"：那会让故障期间所有请求去命中同一个 key，
+            //    而那个 key 里可能存着旧数据，表现是"缓存坏了但看起来一切正常"。）
+            log.warn("读取内容缓存版本号失败, key={} —— 本次返回一个不重复的值，缓存自动降级为查库: {}",
+                    VERSION_KEY, e.getMessage());
+            return "unavailable-" + UUID.randomUUID();
+        }
     }
 
     /**

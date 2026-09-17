@@ -1,7 +1,10 @@
 package com.yigalaxy.yiguixingtu.article.cache;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
+
+import java.util.UUID;
 
 /**
  * =====================================================================
@@ -76,6 +79,7 @@ import org.springframework.stereotype.Component;
  *       将来新增写接口时，照着写并在测试里补一条即可
  * =====================================================================
  */
+@Slf4j
 @Component
 public class ArticleCacheVersion {
 
@@ -136,9 +140,49 @@ public class ArticleCacheVersion {
         return read(DETAIL_VERSION_KEY);
     }
 
+    /**
+     * 读一个版本号计数器的当前值。
+     *
+     * ============================================================
+     * ⚠️【全项目唯一一处"必须自己兜住异常"的缓存读】
+     * ============================================================
+     * 这个方法会被 {@code @Cacheable} 的 SpEL key 表达式引用，例如
+     *     {@code key = "@articleCacheVersion.current() + ':' + #query.toCacheKey()"}
+     * 而 SpEL 的求值发生在 Spring 的 {@code CacheAspectSupport.generateKey()} 里，
+     * 那一步【在 try/catch 之外】：
+     *     CacheAspectSupport.java:451   Object key = generateKey(context, NO_RESULT);
+     *     CacheAspectSupport.java:471   getErrorHandler().handleCacheGetError(...);  ← 兜底在这里
+     * （依据：解压 spring-context 7.0.9 的 sources jar 逐行核对，不是照文档猜的。）
+     *
+     * ⇒ 结论有两层，第二层最容易漏：
+     *   ① Redis 读失败时异常会一路冒到接口层 —— 列表/详情/统计/分类/标签/归档/RSS
+     *      全部变成 500，而不是"缓存失效、回落查库"。
+     *   ② 【哪怕将来补上 CacheErrorHandler 也管不到这里】—— 它只包住
+     *      Cache.get/put 那一段，包不住 key 的生成。所以这一层兜底不能省。
+     *
+     * 项目在别处的口径是"缓存出问题绝不能影响主流程"
+     * （见 TokenBlacklist / UserAuthCache / ArticleViewCounter / IdempotencyService），
+     * 这里必须保持一致 —— 缓存是加速手段，不是依赖。
+     *
+     * ============================================================
+     * 【为什么返回一个每次都不一样的值，而不是返回 "0" / INITIAL_VERSION】
+     * ============================================================
+     * 返回值会被拼进缓存 key。返回固定值意味着"Redis 坏掉期间的所有请求
+     * 都去命中【同一个 key】"—— 而那个 key 里可能存着更早的数据，
+     * 于是故障期间所有人读到的是过期内容，且完全看不出是缓存出了问题。
+     * 返回每次都不同的值 ⇒ 拼出来的 key 永远不命中 ⇒ 相当于自动降级成
+     * "绕过缓存直接查库"：功能正确，代价只是这段时间缓存暂时不生效。
+     * 这是这个故障场景下唯一正确的行为。
+     */
     private String read(String key) {
-        String v = redis.opsForValue().get(key);
-        return v == null ? INITIAL_VERSION : v;
+        try {
+            String v = redis.opsForValue().get(key);
+            return v == null ? INITIAL_VERSION : v;
+        } catch (Exception e) {
+            log.warn("读取缓存版本号失败, key={} —— 本次返回一个不重复的值，缓存自动降级为查库: {}",
+                    key, e.getMessage());
+            return "unavailable-" + UUID.randomUUID();
+        }
     }
 
     /**

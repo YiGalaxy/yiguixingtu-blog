@@ -92,15 +92,36 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         // "Bearer ".length() 正好是 7，所以从下标 7 开始截取
         String token = header.substring(7);
 
+        // ============ 第2步：解析 token（纯本地校验，不碰任何外部资源）============
+        Claims claims;
+        Long userId;
         try {
-            // ============ 第2步：解析 token ============
             // parseToken 会做两件事：① 验签名（有没有被篡改）② 验过期时间
-            // 如果签名不对或已过期，这里会抛异常，跳到下面的 catch
-            Claims claims = jwtUtil.parseToken(token);
+            // 如果签名不对或已过期，这里会抛异常，跳到下面这个 catch
+            claims = jwtUtil.parseToken(token);
 
             // ============ 第3步：从 token 里取出用户 ID ============
-            Long userId = ((Number) claims.get("userId")).longValue();
+            userId = ((Number) claims.get("userId")).longValue();
 
+        } catch (Exception e) {
+            // 【这一类失败是预期内的】签名不对、已过期、格式不对、或者压根不是我们签的。
+            // 客户端拿着过期 token 来访问是正常现象，所以只记一行 warn、不打堆栈。
+            // 也不在这里写响应 —— 让 Security 的异常处理入口统一产出 401 的 JSON，
+            // 格式才和别处一致（和下面黑名单分支是同一个理由）
+            log.warn("解析 token 失败（无效 / 已过期 / 格式不对）: {}", e.getMessage());
+            filterChain.doFilter(request, response);
+            return;
+        }
+
+        // ============ 第3.5步 ~ 第7步：以下每一步都要访问 Redis 或 MySQL ============
+        // 【为什么从这里开始要单独一个 try，不和上面合并】
+        //   前后两段的失败原因分属两个完全不同的方向：
+        //     上面那段失败 = "token 有问题"    → 查 JWT 密钥、有效期、客户端拿的是什么
+        //     这里这段失败 = "基础设施有问题"  → 查 Redis / MySQL / 网络
+        //   混在同一个 catch 里、又只打 message 不打堆栈的后果（这正是改动前的情况）：
+        //   Redis 抖动时会写出 "解析token失败: Connection refused" ——
+        //   看日志的人会先去怀疑 token 和密钥，而真正的异常连堆栈都没留下。
+        try {
             // ============ 第3.5步：这个 token 是否已被登出拉黑 ============
             // 【为什么只查 UserAuthCache 不够】
             //   上面那套机制解决的是"用户的身份/权限变了"（被禁用、被删除、被降级），
@@ -182,9 +203,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             }
 
         } catch (Exception e) {
-            // token 无效/过期/格式错误，走到这里。不做认证设置，
-            // 后续 SecurityConfig 的 .anyRequest().authenticated() 会拦下来返回 401
-            log.warn("解析token失败: {}", e.getMessage());
+            // 【这是基础设施故障，不是 token 的问题】Redis / MySQL 挂了、超时、或者连接被拒。
+            // 打 error 级别并带上完整堆栈 —— "什么异常、打在哪一步"是排查的起点，
+            // 只留一句 message 的话，连是连接被拒还是读超时都分不出来。
+            // 同样不做认证设置：SecurityConfig 的 .anyRequest().authenticated()
+            // 会把请求拦下来返回 401。这是有意取向 ——
+            // 宁可让用户重新登录一次，也不要因为基础设施抖动就放行一个未经校验的请求。
+            log.error("认证过程中访问缓存/数据库失败（与 token 无关），本次按未认证处理, userId={}", userId, e);
         }
 
         // ============ 第8步：放行 ============

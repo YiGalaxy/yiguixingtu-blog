@@ -17,6 +17,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -84,39 +85,46 @@ class ArticleViewCountTest extends AbstractIntegrationTest {
     // ================================================================
 
     @Test
-    @DisplayName("① 连续访问 3 次详情 -> 数据库的 view_count【一点没变】（这就是本来的缺口）")
-    void detailVisits_shouldNotWriteDatabase() throws Exception {
+    @DisplayName("① 连续上报 3 次浏览 -> 数据库的 view_count【一点没变】（这就是本来的缺口）")
+    void viewReports_shouldNotWriteDatabase() throws Exception {
         for (int i = 0; i < 3; i++) {
-            mockMvc.perform(get("/article/{id}", article.getId()))
+            mockMvc.perform(post("/article/{id}/view", article.getId()))
                     .andExpect(status().isOk());
         }
 
         // 这一条是本类最重要的断言：证明"读接口里的写操作"已经挪走了。
         // 改成 Redis 计数之前，这里会是 3
         assertEquals(0, articleMapper.selectById(article.getId()).getViewCount(),
-                "访问详情不该再写数据库 —— 这正是这次改动要解决的问题");
+                "上报浏览不该写数据库 —— 这正是这次改动要解决的问题");
 
         // 增量应该都记在 Redis 上
         assertEquals(3L, viewCounter.pending(article.getId()),
-                "3 次访问应当都记在 Redis 的计数器上");
+                "3 次上报应当都记在 Redis 的计数器上");
     }
 
     @Test
-    @DisplayName("② 返回给前端的数字 = 库里的快照 + 还没落库的增量（不能显示旧数字）")
-    void detail_shouldReturnDatabaseCountPlusPendingDelta() throws Exception {
+    @DisplayName("② 上报返回的数字 = 库里的快照 + 还没落库的增量（不能显示旧数字）")
+    void viewReport_shouldReturnDatabaseCountPlusPendingDelta() throws Exception {
         // 先让库里的快照是 100，模拟"这篇已经被看过很多次"
         articleMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<Article>()
                 .eq(Article::getId, article.getId())
                 .set(Article::getViewCount, 100));
 
-        // 第一次访问：库 100 + 本次 1 = 101
+        // 【读详情是纯读】它只返回库里的快照，不含本次访问 ——
+        // 因为"本次访问"要等页面挂载后由上报接口记，读的时候还没发生。
+        // 这正是这个接口能加缓存的前提。
         mockMvc.perform(get("/article/{id}", article.getId()))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.viewCount").value(101));
+                .andExpect(jsonPath("$.data.viewCount").value(100));
 
-        // 第二次：库 100 + 累计 2 = 102
-        mockMvc.perform(get("/article/{id}", article.getId()))
-                .andExpect(jsonPath("$.data.viewCount").value(102));
+        // 上报浏览：库 100 + 本次 1 = 101
+        mockMvc.perform(post("/article/{id}/view", article.getId()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data").value(101));
+
+        // 再上报一次：库 100 + 累计 2 = 102
+        mockMvc.perform(post("/article/{id}/view", article.getId()))
+                .andExpect(jsonPath("$.data").value(102));
 
         // 而库里仍然是 100 —— 说明返回的数字确实把 Redis 的增量合并进来了，
         // 只读库是算不出 101/102 的
@@ -137,6 +145,13 @@ class ArticleViewCountTest extends AbstractIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(404));
 
+        // 【上报接口同样必须先校验可见性、再计数】
+        //   顺序反了的话，别人拿 id 挨个探测草稿也会留下浏览痕迹 ——
+        //   而"探测行为不该留痕"正是这条用例存在的理由。
+        mockMvc.perform(post("/article/{id}/view", draft.getId()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(404));
+
         assertEquals(0L, viewCounter.pending(draft.getId()),
                 "访问不到的文章不该被计数（否则探测草稿的行为会留下痕迹）");
     }
@@ -148,8 +163,12 @@ class ArticleViewCountTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("④ 同步任务把 Redis 的增量写进库，并把 Redis 清零（不重复累加）")
     void syncTask_shouldFlushDeltaAndClearRedis() throws Exception {
+        // 【这里直接用计数器造增量，不走 HTTP】
+        //   本用例关心的是"定时任务怎么把增量落进库"，不是"计数从哪个入口进来"——
+        //   计数入口本身由第①②③条端到端覆盖（它们走 POST /article/{id}/view）。
+        //   直接操作计数器，这个用例就不会因为入口以后再变而跟着红。
         for (int i = 0; i < 5; i++) {
-            mockMvc.perform(get("/article/{id}", article.getId()));
+            viewCounter.increment(article.getId());
         }
         assertEquals(5L, viewCounter.pending(article.getId()));
 
@@ -168,19 +187,16 @@ class ArticleViewCountTest extends AbstractIntegrationTest {
     }
 
     @Test
-    @DisplayName("⑤ 落库之后继续访问 -> 从新的基线往上加")
+    @DisplayName("⑤ 落库之后继续上报 -> 从新的基线往上加")
     void afterSync_furtherVisits_shouldContinueFromNewBase() throws Exception {
-        mockMvc.perform(get("/article/{id}", article.getId()))
-                .andExpect(jsonPath("$.data.viewCount").value(1));
+        viewCounter.increment(article.getId());
 
         syncTask.syncViewCounts();
         assertEquals(1, articleMapper.selectById(article.getId()).getViewCount());
 
-        // 再访问两次：库 1 + 增量 2 = 3
-        mockMvc.perform(get("/article/{id}", article.getId()))
-                .andExpect(jsonPath("$.data.viewCount").value(2));
-        mockMvc.perform(get("/article/{id}", article.getId()))
-                .andExpect(jsonPath("$.data.viewCount").value(3));
+        // 再累计两次：库 1 + 增量 2 = 3
+        viewCounter.increment(article.getId());
+        viewCounter.increment(article.getId());
 
         syncTask.syncViewCounts();
         assertEquals(3, articleMapper.selectById(article.getId()).getViewCount());
@@ -201,8 +217,8 @@ class ArticleViewCountTest extends AbstractIntegrationTest {
         Article other = insertPublishedArticle("另一篇浏览量文章", 0);
 
         // a 访问 2 次，other 访问 3 次
-        for (int i = 0; i < 2; i++) mockMvc.perform(get("/article/{id}", article.getId()));
-        for (int i = 0; i < 3; i++) mockMvc.perform(get("/article/{id}", other.getId()));
+        for (int i = 0; i < 2; i++) viewCounter.increment(article.getId());
+        for (int i = 0; i < 3; i++) viewCounter.increment(other.getId());
 
         syncTask.syncViewCounts();
 
@@ -222,7 +238,7 @@ class ArticleViewCountTest extends AbstractIntegrationTest {
         articleMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<Article>()
                 .eq(Article::getId, article.getId())
                 .set(Article::getViewCount, 50));
-        for (int i = 0; i < 3; i++) mockMvc.perform(get("/article/{id}", article.getId()));
+        for (int i = 0; i < 3; i++) viewCounter.increment(article.getId());
 
         syncTask.syncViewCounts();
 
@@ -244,7 +260,7 @@ class ArticleViewCountTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("⑩ 增量取走后 Redis 里不留 key（避免垃圾累积）")
     void drainAll_shouldRemoveKeys() throws Exception {
-        mockMvc.perform(get("/article/{id}", article.getId()));
+        viewCounter.increment(article.getId());
         assertTrue(Boolean.TRUE.equals(redis.hasKey(VIEW_KEY_PREFIX + article.getId())));
 
         syncTask.syncViewCounts();

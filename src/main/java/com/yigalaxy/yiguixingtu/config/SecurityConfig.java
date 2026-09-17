@@ -271,6 +271,29 @@ public class SecurityConfig {
                     //   防刷靠的是接口限流 + 默认待审核，见 CommentController 的类注释。
                     auth.requestMatchers(HttpMethod.POST, "/comment").permitAll();
 
+                    // 【浏览上报：第二个被放行的写接口，同样只放行这一条路径】
+                    //   POST /article/{id}/view —— 详情页在挂载之后上报一次，
+                    //   服务端把 Redis 里的浏览量计数器 +1（见 ArticleViewCounter）。
+                    //
+                    //   【为什么必须匿名可用】博客的绝大多数访客没登录。
+                    //   要求登录的话，浏览量就只统计到站长自己了。
+                    //
+                    //   【为什么放行是安全的 —— 和上面 /comment 那条逐个对照】
+                    //     · 它写的是 Redis 里的一个计数器，【完全不碰数据库】；
+                    //       真正的落库由 ViewCountSyncTask 每 5 分钟做一次
+                    //     · 它的唯一判断是"文章存在且已发布"，否则抛 404，
+                    //       没有任何别的副作用
+                    //     · 被刷的后果只是"数字虚高" —— 而这一点【并不比改之前差】：
+                    //       改之前 GET /article/{id} 自己就带计数，
+                    //       爬虫抓一次、NuxtLink 预取一次都会被算进去。
+                    //       拆出来之后反而少了这两类误计。
+                    //   ⚠️ 路径写全（不用 /article/**）的理由与 /comment 完全相同：
+                    //      避免以后往这个模块里加了管理接口被一起放行。
+                    //   ⚠️ 它也不做限流：额度定多少都很难说对（正常用户翻文章
+                    //      可能一分钟十几篇），而被刷的代价仅为"某个数字偏大"。
+                    //      真需要时按 IP 限流更合适，那是 Nginx 那一层的事。
+                    auth.requestMatchers(HttpMethod.POST, "/article/*/view").permitAll();
+
                     // authenticated = 必须登录（带了合法 token）才能访问
                     // 其余所有请求都要登录
                     auth.anyRequest().authenticated();

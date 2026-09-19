@@ -55,6 +55,13 @@ public class SettingVO {
     @Schema(description = "页脚版权（null 表示不显示）")
     private String copyright;
 
+    /**
+     * 首页滚动文字：null 表示首页不显示那条跑马灯。
+     * 与 announcement（公告条）是两块独立的东西，同时存在、互不影响。
+     */
+    @Schema(description = "首页滚动文字（null 表示不显示）")
+    private String noticeText;
+
     @Schema(description = "每页文章条数", example = "10")
     private Integer pageSize;
 

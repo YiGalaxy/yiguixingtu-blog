@@ -83,6 +83,13 @@ public class SettingServiceImpl implements SettingService {
     /** 版权文案长度上限（与 DTO 和列长度一致） */
     private static final int COPYRIGHT_MAX_LENGTH = 200;
 
+    /**
+     * 首页滚动文字长度上限（与 DTO 和列长度一致，200 与版权同一量级）。
+     * 【为什么单独一个常量】与 POLICE_MAX_LENGTH 同一条理由：它和版权是两个
+     * 独立的列，复用同一个常量会让"哪一列被改宽了"失去区分度。
+     */
+    private static final int NOTICE_MAX_LENGTH = 200;
+
     /** 那一行不存在时，评论开关给的默认值：开着（和"评论一直是开着的"这个现状一致） */
     private static final boolean DEFAULT_COMMENT_ENABLED = true;
 
@@ -141,6 +148,7 @@ public class SettingServiceImpl implements SettingService {
         // "哪一列被改宽了"这件事在校验上失去区分度（见 POLICE_MAX_LENGTH 的注释）
         String policeNumber = normalizeOptional(form.getPoliceNumber(), POLICE_MAX_LENGTH, "公安备案号");
         String copyright = normalizeOptional(form.getCopyright(), COPYRIGHT_MAX_LENGTH, "版权文案");
+        String noticeText = normalizeOptional(form.getNoticeText(), NOTICE_MAX_LENGTH, "首页滚动文字");
         int commentEnabled = normalizeCommentEnabled(form);
         int pageSize = normalizePageSize(form);
 
@@ -158,6 +166,9 @@ public class SettingServiceImpl implements SettingService {
                 //    "后台清空了、页脚还挂着旧备案号"，而接口返回 code 200
                 .set(SiteSetting::getPoliceNumber, policeNumber)
                 .set(SiteSetting::getCopyright, copyright)
+                // 首页滚动文字：同样必须显式 SET —— 它是一个"随时可能想清掉"的字段
+                //（不想要那条跑马灯了），漏在这里的表现是"后台清空了、首页还在滚"
+                .set(SiteSetting::getNoticeText, noticeText)
                 .set(SiteSetting::getPageSize, pageSize));
 
         // 受影响行数为 0 = 那一行不存在。
@@ -180,6 +191,9 @@ public class SettingServiceImpl implements SettingService {
             // 之后第一次保存，页脚会少掉公安那一行，而站长提交的表单里明明填了
             created.setPoliceNumber(policeNumber);
             created.setCopyright(copyright);
+            // 自愈写回同样要带上滚动文字：漏了的话，站长在"那一行不见了"之后
+            // 第一次保存，首页那条跑马灯会不见，而他提交的表单里明明填了
+            created.setNoticeText(noticeText);
             created.setPageSize(pageSize);
             settingMapper.insert(created);
         }
@@ -293,6 +307,9 @@ public class SettingServiceImpl implements SettingService {
         // （它们是两套独立的备案，页脚那两行的显示与否各自判断）
         vo.setPoliceNumber(setting.getPoliceNumber());
         vo.setCopyright(setting.getCopyright());
+        // 首页滚动文字：同样各自映射、不与他人互为兜底（它是首页顶部的另一块，
+        // 与 announcement 各显示各的）
+        vo.setNoticeText(setting.getNoticeText());
         vo.setPageSize(setting.getPageSize());
         vo.setUpdateTime(setting.getUpdateTime());
         return vo;

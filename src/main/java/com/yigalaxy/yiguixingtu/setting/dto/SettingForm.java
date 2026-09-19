@@ -73,6 +73,18 @@ public class SettingForm {
     @Schema(description = "页脚版权（可为空）")
     private String copyright;
 
+    /**
+     * 首页滚动文字（跑马灯）：可为空（留空 = 首页不显示那条跑马灯）。
+     *
+     * 【它和 announcement 不是一回事，别合并】
+     *   announcement 是不滚动的公告条；这一条是首页顶部一直滚动的装饰文字，
+     *   两者同时存在、互不影响。合并成一栏的话，"只想留公告、不想要跑马灯"
+     *   就表达不出来了。区分写在 SiteSetting.noticeText 的注释里。
+     */
+    @Size(max = 200, message = "首页滚动文字最长 200 字")
+    @Schema(description = "首页滚动文字（可为空）")
+    private String noticeText;
+
     /** 每页文章条数：1 ~ 文章接口的分页上限（理由见类注释） */
     @NotNull(message = "每页条数不能为空")
     @Min(value = 1, message = "每页条数至少 1")

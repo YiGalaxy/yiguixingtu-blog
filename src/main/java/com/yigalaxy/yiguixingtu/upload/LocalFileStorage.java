@@ -9,6 +9,10 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.stream.Stream;
 
 /**
  * =====================================================================
@@ -129,6 +133,61 @@ public class LocalFileStorage implements FileStorage {
     /** 去掉 baseUrl 结尾多余的斜杠，避免拼出 "http://x//uploads/..." 这种双斜杠 */
     private String trimTrailingSlash(String url) {
         return url != null && url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
+    }
+
+    /**
+     * 列出上传目录里的全部文件（见 {@link FileStorage#listAll}）。
+     *
+     * 【实现与 usedBytes 几乎是同一段遍历，为什么不抽成一个共用方法】
+     *   两者的**失败语义**不同，而那是它们唯一实质的区别：
+     *     · usedBytes 是上传路径上的护栏，单个文件读不到要跳过并继续
+     *       （"多一个读不到的文件"不该让用户的上传变成 500）
+     *     · 这个方法是后台清单页，读不到一个文件就少显示一行 —— 同样的取舍
+     *   抽成一个方法就得把"读不到时怎么办"当参数传进来，两边都变难读。
+     *   真要说重复，重复的是那五行 walk 样板，而不是规则。
+     *
+     * 【为什么按 objectKey 排序】清单页要稳定可复现：不排序的话，
+     *   两次刷新同一个目录返回的顺序可能不同（文件系统的哈希序），
+     *   排查时"我明明看到它在第三行"就没法复现。
+     *
+     * ⚠️ 【Stream 必须 try-with-resources】Files.walk 持有目录句柄，
+     *   不关在文件多时会耗尽句柄（Windows 上尤其明显）—— 与 usedBytes 同一条。
+     */
+    @Override
+    public List<StoredObject> listAll() {
+        Path root = Paths.get(properties.getLocalDir()).toAbsolutePath().normalize();
+        if (!Files.isDirectory(root)) {
+            // 从没上传过任何文件 = 空清单（与 usedBytes 返回 0 是同一条规则：
+            // "目录不存在"不是错误，统计类方法在这里不该抛异常）
+            return List.of();
+        }
+
+        List<StoredObject> objects = new ArrayList<>();
+        try (Stream<Path> paths = Files.walk(root)) {
+            for (Path path : paths.toList()) {
+                if (!Files.isRegularFile(path)) {
+                    continue;
+                }
+                try {
+                    objects.add(new StoredObject(
+                            // 相对路径转成正斜杠：它在 Windows 上是 cover\2f\x.png，
+                            // 而 objectKey 的形态必须是 cover/2f/x.png（urlOf 与 delete 都按它拼）
+                            root.relativize(path).toString().replace('\\', '/'),
+                            Files.size(path),
+                            Files.getLastModifiedTime(path).toInstant()));
+                } catch (IOException e) {
+                    // 单个文件读不到（并发删除、权限问题）：跳过它，不让整页报错。
+                    // 清单少一行是可以接受的偏差，"后台页面直接打不开"不可接受
+                    log.warn("列出上传目录时跳过读不到的文件: {}", path, e);
+                }
+            }
+        } catch (IOException e) {
+            log.error("遍历上传目录失败: {}", root, e);
+            throw new IllegalStateException("列出上传目录失败", e);
+        }
+
+        objects.sort(Comparator.comparing(StoredObject::objectKey));
+        return objects;
     }
 
     /**

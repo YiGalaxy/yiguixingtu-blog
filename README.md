@@ -15,7 +15,7 @@
 
 **yiguixingtu** 是一个个人博客系统的后端服务，已实现 **认证与用户管理**、**文章管理**、
 **分类**、**标签**、**评论与审核**、**友情链接 / 项目 / 收藏 / 关于页 / 音乐**、
-**站点设置**（站点名 / 首页公告 / 评论总开关 / 页脚版权与两个备案号（ICP + 公安网安）/ 每页条数）、**操作审计** 等模块，
+**站点设置**（站点名 / 首页公告 / 首页滚动文字 / 评论总开关 / 页脚版权与两个备案号（ICP + 公安网安）/ 每页条数）、**操作审计** 等模块，
 采用 **JWT 无状态认证**，**MySQL** 存储数据、**Redis** 缓存认证信息与文章缓存，接口文档由 **springdoc** 自动生成。
 
 前端为独立仓库 `yiguixingtu-web`（Nuxt 4 + Vue 3 + Element Plus），通过 HTTP 调用本服务。
@@ -295,7 +295,7 @@
 
 **站点设置**
 - `GET /setting`（公开，走 Redis 缓存）+ `PUT /admin/setting`（仅管理员，**单条更新**，没有新建 / 删除）
-- 七项：站点名 / 首页公告 / 评论总开关 / 页脚版权 / ICP 备案号 / **公安网安备案号** / 每页文章条数。
+- 八项：站点名 / 首页公告 / **首页滚动文字** / 评论总开关 / 页脚版权 / ICP 备案号 / **公安网安备案号** / 每页文章条数。
   在这之前它们全都写死在前端代码里 —— 改一个站点名要改五处 `.vue` 再重新构建部署，
   而备案号这种东西又必须能随时改（换域名、换主体）
 - ⚠️ **两个备案号是两列、两套备案体系**（`icp_number` / `police_number`，V13 加的后者）：
@@ -519,7 +519,8 @@ src/main/resources
     ├── V11__create_music_table.sql      # music（音乐；**刻意不插种子数据**，见脚本内说明）
     ├── V12__create_site_setting_table.sql # site_setting（站点设置；同样只有一行，种子值等于前端原本写死的值）
     ├── V13__add_police_number_to_site_setting.sql # site_setting 加公安网安备案号列（**刻意不写种子值**，见脚本内说明）
-    └── V14__create_article_attachment_table.sql # article_attachment（文章附件；**物理删除、不做逻辑删除**，为什么不在上传时插行见脚本内说明）
+    ├── V14__create_article_attachment_table.sql # article_attachment（文章附件；**物理删除、不做逻辑删除**，为什么不在上传时插行见脚本内说明）
+    └── V15__add_notice_text_to_site_setting.sql # 给 site_setting 加首页滚动文字（跑马灯）那一列
 
 src/test/java/com/yigalaxy/yiguixingtu
 ├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
@@ -1143,6 +1144,37 @@ curl -X POST "$API/upload/migrate-legacy" -H "Authorization: Bearer $TOKEN"
 > 以及 `LegacyUploadMigratorTest`。判断标准很简单 —— 再跑一次 `dryRun=true`，
 > 报告里 `legacyFiles` 是 0 就说明没有存量了。留着的话，下一个人会以为它是需要维护的能力。
 
+#### 存储管理（后台）
+
+后台上传的文件多了之后，有两个问题会慢慢浮现：**磁盘被什么占着**、
+**哪些文件其实已经没人用了**。后台的「存储管理」页回答这两件事：
+
+| 它显示什么 | 数据从哪来 |
+|---|---|
+| 已用空间 / 上限 | 与上传时那道 5GB 总容量护栏读的是同一个数（`FileStorage.usedBytes`） |
+| 每个文件的大小 / 类型 / 修改时间 | `FileStorage.listAll()`（遍历上传目录） |
+| **每个文件被哪些地方引用** | `UploadReferenceIndex` —— 每张表一条 SQL，一次把全站引用读出来建成反向索引 |
+| 哪些文件**没人引用** | 上一条的结果为空的就是 |
+
+**删除**只能删"此刻确实没人引用"的文件，判据是服务端**当场重算**的
+（`UploadReferenceChecker`，与删文章 / 删歌 / 删附件用的是同一套）——
+页面上那份引用清单是打开那一刻建的，而删除不可逆，判据不能信客户端。
+
+> ⚠️ **为什么"展示引用"和"判断能不能删"是两套实现（这是有意为之）**
+>
+> 展示要的是"被谁引用了"（一次全量扫描最划算），判据要的是"删了会不会坏"
+> （按 key 精确匹配、与删除路径共用）。两者的**口径必须一致**，
+> 所以有一条用例拿同一批数据同时问两边、把结论钉在一起
+> （`UploadStorageAdminTest` ④）—— 漂移的表现是"页面说没人用、点了删除却被拦住"。
+>
+> 加表加列时**两边都要动**：展示那份的清单是 `UploadReferenceIndex.SOURCES`，
+> 判据那份在各表 Mapper 的 `countReferencing` 上（`UploadReferenceChecker` 的注释里列全了）。
+
+> ⚠️ **为什么清单接口不分页**：引用清单是一次全量构建出来的，分页反而要多一层
+> "索引跨请求缓存"的状态；而文件数受上传总量护栏约束（5GB），
+> 个人博客量级下几百到几千个。真到了要分页的规模，正确的改法是把索引落成一张表，
+> 而不是给接口加 `page` 参数（那样每翻一页都要重建一次索引）。
+
 > ⚠️ **部署时最容易踩的一个坑：上传目录必须挂到卷上**
 >
 > 容器里的文件系统是**临时的**：容器一重建（改配置、升级版本、
@@ -1347,10 +1379,12 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 56 | POST | `/admin/music` | 新建音乐（`url` 来自 `POST /upload?type=audio`） | 是（ADMIN） |
 | 57 | PUT | `/admin/music/{id}` | 编辑音乐（曲名 / 歌手 / 音频地址 / 封面 / 歌词 / 排序 / 显示状态） | 是（ADMIN） |
 | 58 | DELETE | `/admin/music/{id}` | 删除音乐（逻辑删除；**音频文件在确认无人引用后一并清掉**，外链不碰） | 是（ADMIN） |
-| 59 | GET | `/setting` | 站点设置（单条对象；站点名 / 首页公告 / 评论总开关 / 页脚版权与两个备案号（`icpNumber` / `policeNumber`）/ 每页文章条数，**走 Redis 缓存**） | 否 |
+| 59 | GET | `/setting` | 站点设置（单条对象；站点名 / 首页公告 / 首页滚动文字 `noticeText` / 评论总开关 / 页脚版权与两个备案号（`icpNumber` / `policeNumber`）/ 每页文章条数，**走 Redis 缓存**） | 否 |
 | 60 | PUT | `/admin/setting` | 保存站点设置（**单条更新，没有新建/删除**；`pageSize` 上限跟文章接口同为 50） | 是（ADMIN） |
+| 61 | GET | `/admin/upload/storage` | **存储管理**：磁盘上的全部文件（大小 / 类型 / 时间）+ 每个文件**被哪些地方引用**（文章 / 附件 / 音乐 / 关于页 / 友链 / 项目 / 收藏） | 是（ADMIN） |
+| 62 | POST | `/admin/upload/delete-files` | **删除上传文件**：请求体 `{"keys": [...]}`。**只会删掉此刻确实没人引用的那些** —— 被引用的会原样保留并列在报告的 `skippedReferenced` 里 | 是（ADMIN） |
 
-**共 60 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
+**共 62 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
 用本地磁盘存储时，上传的图片、音频与附件都通过 `GET /uploads/**`（以及 `HEAD /uploads/**`，
 见下面「为什么 HEAD 也要放行」）公开读取（无需登录）——
 图片在 `uploads/cover/`，音频在 `uploads/music/`，附件在 `uploads/attachment/`，
@@ -1372,12 +1406,12 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 三种访问身份：**游客**（不带 token）、**普通用户**（GUEST + 合法 token）、**管理员**（ADMIN + 合法 token）。
 
-> **这张表应当覆盖上面全部 60 个接口**，账是这么对的：**18 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
+> **这张表应当覆盖上面全部 62 个接口**，账是这么对的：**18 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
 > `GET /article/page` `stats` `archive` `rss` `{id}`、`GET /category/list` `tag/list` `comment/list` `link/list` `project/list` `favorite/list` `music/list` `about` `setting`、`POST /comment`）
-> **+ 1 个只需登录**（`GET /auth/me`）**+ 41 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
+> **+ 1 个只需登录**（`GET /auth/me`）**+ 43 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
 > `/admin/tag/**` 4 + `/admin/comment/**` 3 + `/admin/category/**` 4 + `/admin/link/**` 4 +
 > `/admin/project/**` 4 + `/admin/favorite/**` 4 + `/admin/music/**` 4 + `/admin/about` 1 +
-> `/admin/setting` 1 + `POST /upload` 1）= 60。
+> `/admin/setting` 1 + `POST /upload` 1 + `/admin/upload/**` 2）= 62。
 > 以后加接口时这两处要一起改 —— 少一行不会有任何报错，只会让人在这张表里找不到那个接口的权限。
 
 | 接口 | 游客 | GUEST | ADMIN |
@@ -1414,6 +1448,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `PUT /admin/about` （只有这一个） | ❌ 401 | ❌ 403 | ✅ |
 | `PUT /admin/setting` （只有这一个） | ❌ 401 | ❌ 403 | ✅ |
 | `POST /upload`（图片 / 音频 / 附件都是它） | ❌ 401 | ❌ 403 | ✅ |
+| `/admin/upload/**`（存储管理 2 个：清单、删除） | ❌ 401 | ❌ 403 | ✅ |
 | `GET /uploads/**`、`HEAD /uploads/**`（本地存储的图片、音频与附件） | ✅ | ✅ | ✅ |
 
 > ⚠️ **为什么 HEAD 也要单独放行（2026-09 补的一行）**：Spring Security 的
@@ -1875,7 +1910,7 @@ operation_log 表（异步完成，请求早就返回了）
 | `favorite` | 收藏（含分组、显示/隐藏） | `idx_status_sort(status, sort)` | Flyway `V9__create_favorite_table.sql` |
 | `about` | 关于页信息（**全表只有一行，`id` 恒为 1**） | 主键 `id`（不需要别的索引） | Flyway `V10__create_about_table.sql`（含那一行的 INSERT） |
 | `music` | 音乐（含歌手 / 封面 / LRC 歌词原文；**迁移刻意不插种子数据**） | `idx_status_sort_id(status, sort, id)`（前台那条查询是 `WHERE status = 1 ORDER BY sort, id`，id 也进索引是为了消掉 filesort，见 V11 注释） | Flyway `V11__create_music_table.sql` |
-| `site_setting` | 站点设置（站点名 / 首页公告 / 评论总开关 / 页脚版权与两个备案号（ICP `icp_number`、公安网安 `police_number`）/ 每页文章条数；**全表只有一行，`id` 恒为 1**） | 主键 `id`（不需要别的索引） | Flyway `V12__create_site_setting_table.sql`（含那一行的 INSERT）+ `V13__add_police_number_to_site_setting.sql`（加公安网安备案号列，**刻意不写种子值**） |
+| `site_setting` | 站点设置（站点名 / 首页公告 / 首页滚动文字 `notice_text` / 评论总开关 / 页脚版权与两个备案号（ICP `icp_number`、公安网安 `police_number`）/ 每页文章条数；**全表只有一行，`id` 恒为 1**） | 主键 `id`（不需要别的索引） | Flyway `V12__create_site_setting_table.sql`（含那一行的 INSERT）+ `V13__add_police_number_to_site_setting.sql`（加公安网安备案号列，**刻意不写种子值**）+ `V15__add_notice_text_to_site_setting.sql`（加首页滚动文字列，同样**不写种子值**：那条跑马灯该不该出现由站长自己决定） |
 | `flyway_schema_history` | Flyway 自己的迁移记录表 | —— | Flyway 自动创建 |
 
 > `article` 上四个索引看着多，其实每个都有明确的归属，缺了会有可量化的退化：
@@ -3189,6 +3224,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
 | `UploadAdminTest` | 23 | 上传的**图片与音频两套规则**：图片（类型/大小白名单、文件名换成内容哈希（不含原始中文名）、非管理员 403、**能被匿名 GET 到，且 `HEAD` 也要放行** —— ㉓ 带反向断言"`HEAD /user/page` 仍是 401"）；音频（`type=audio` 传 mp3 成功且**文件真的落盘、返回的 url 能匿名取到**、音频接口拒 png、默认接口拒 mp3、**大小上限按 type 分流**、超音频上限被拒、未知 type 被拒、音频同样只有管理员能传、`type` 大小写与空格容错、两个前缀各自取自配置）；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
+| `UploadStorageAdminTest` | 9 | **存储管理**：权限（无 token 401 / 游客 403，清单与删除都拦）、清单列出磁盘文件并标出引用与孤儿、**引用能跨模块收集**（同一个文件同时被文章封面与音乐封面引用时两条都在）、**★ 展示索引与删除判据对同一批数据结论一致**（两份实现漂移的守卫）、删除真的删掉没人用的、**★ 删除不信任前端**（被引用的文件即使被传上来也必须拒绝且文件还在）、多个 key 逐个判定、空列表与超过 500 个被拒、不存在的 key 视为已完成（幂等） |
 | `LegacyUploadMigratorTest` | 6 | **一次性迁移工具**（存量文件改成哈希命名 + 改写库里的引用）：dryRun 不动任何东西、实跑后旧文件消失且内容逐字节不变、cover 与正文（绝对/相对两种形态）的引用都被改写、新地址真的取得到而旧地址 404、**幂等**（跑第二遍什么都不做）、内容相同的两个旧文件合并成一个、无引用的孤儿文件也被改名、已经是哈希命名的文件会被跳过 |
 | `ArticleAttachmentTest` ⑯⑰⑱⑲ | 4 | **内容寻址**：同一张图传两次只落一个文件且两次拿到同一个 URL（命中时仍返回本次的原始 name/size）、去重**不跨 type**（同字节当音频与当附件是两个文件）、**编辑文章换封面会把没人再用的旧封面删掉**、编辑时从正文删掉的图会被清理（仍被另一篇引用则保留） |
 | `ArticleAttachmentTest` | 18 | 文章附件：**上传**（16 种白名单、返回 `{url,name,size}`、名字清洗与截断、超单文件上限被拒且不落盘、**html/htm/svg/xml/js/mjs/css 逐个被拒 + 白名单本身也不许出现它们**）、**数字钉死**（读 `application.properties` 原文核对 10MB / 100MB / 5GB / multipart 105MB）、**总容量护栏**（调成 6KB：压满后再传 1 字节也被拒，且提示里带"已用"）、**三套规则互不放宽**（图片/音频都拒 pdf、未知 type 报错）、**保存**（随表单落库、详情带 attachments、空数组 = 清空）、**整体替换**（旧行消失、新行出现、**被移除的文件真的被删**）、**校验**（数量 20 / 名字 100 字 / size 上限 / url 必须是本站地址，且**校验先于写入**：失败时原附件分毫未动）、**级联删除**（删文章 → 附件行 + 附件文件 + 封面 + 正文图全清；文章行仍是逻辑删除）、**★ 共用的图不误删**（两篇共用正文图与封面，删一篇后共用的留着、独占的删掉、另一篇仍打不开得开）、**共用附件同理**、**下载头**（附件强制 `Content-Disposition: attachment` + `nosniff`；图片与音频仍内联，附件目录里的 mp3 也强制下载） |
@@ -3210,10 +3246,10 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `FriendLinkTest` | 20 | 友链：前台只含"显示"的（隐藏的不出现）、排序 sort + id 双段稳定、后台增删改（**清空可选字段真的写成 NULL**）、非法 URL（含 `javascript:`）与非法状态 400、逻辑删除（原生 SQL 验物理行与 deleted）、权限 401/403、缓存命中 / 写操作推进版本号 / key 带版本号且有 TTL |
 | `ProjectTest` | 23 | 项目：同友链那一整套，外加**本项目特有**的"在线地址与仓库地址至少填一个"（两个都空被拒、只填一个合法、编辑时把两个都清空被拒**且库里的旧值分毫未动**）、封面与简介与技术栈的长度边界 |
 | `FavoriteTest` | 21 | 收藏：同友链那一整套，外加 **`category` 是自由文本分组名**的语义（带斜杠合法、同一分组可多条、空串归一化成 NULL、只卡长度 50）、地址必填与格式白名单、备注与标题的长度边界 |
-| `AboutTest` | 16 | 关于页：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 返回空壳且保存能写回 / POST 是真 405）、迁移脚本已插好那一行、昵称与头像与 GitHub 与邮箱与长文本的长度与格式边界、一次性清空全部可选字段真的写成 NULL、权限 401/403、缓存命中与保存后失效 |
+| `AboutTest` | 16 | 关于页：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 返回空壳且保存能写回 / POST 是真 405）、迁移脚本已插好那一行、昵称与头像与 GitHub 与邮箱与长文本的长度与格式边界、一次性清空全部可选字段真的写成 NULL、权限 401/403、缓存命中与保存后失效；**首页滚动文字（V15 新列）**：库里真有这一列（类型 / 长度 200 / 可空 / 紧跟 `copyright` —— 插在两个备案号中间会让 `police_number` 那条顺序断言因为无关的原因变红）、脚本里没有任何种子值、能填能读能清空（清空后首页那条跑马灯就不渲染了）、200 字收下 201 被拒且报错指明是哪一栏、保存滚动文字不动公告那一列 |
 | `MusicTest` | 23 | 音乐：前台只含"显示"的（隐藏的不出现）、**排序两段稳定（sort 升序、sort 相同按 id 升序）**、列表为空返回空数组而不是 404、响应字段齐全（歌词是 LRC 原文、换行不丢）、**音频地址两种形态都合法（`/uploads/music/…` 与 http(s) 外链）而 `javascript:` 被拒**、曲名/歌手/歌词/地址/状态的长度与格式边界、约 5000 字歌词原样存取（守 TEXT 列不被改成短列）、增删改与逻辑删除（原生 SQL 验物理行与 deleted）、清空歌手与封面与歌词真的写成 NULL、权限 401/403、缓存命中 / 写操作推进版本号 / key 带版本号且 TTL 落在 300~360 秒（含抖动） |
 | `MusicFileCleanupTest` | 5 | 删歌时的音频文件清理：**外链地址不碰任何本地文件**（且不报错）、**独占的文件真的被删**（数据库行仍是逻辑删除 `deleted = 1`）、**★ 两首歌共用一个 mp3：删一首文件还在、删到最后一首才真删**、**★ 文章正文引用该 mp3 时删歌不删文件**（文章删掉后才清）、**★ 反向：歌还在时删文章不能删掉这个文件**（同时断言文章独占的封面确实被清，证明清理真的跑了而不是没执行） |
-| `SiteSettingTest` | 22 | 站点设置：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 给默认值且保存能写回 / POST 是真 405）、**迁移种子值读脚本原文核对**（守"上线这个功能本身不改变站点外观"）、七个字段逐个"能改、能读到、能清空"、**公安网安备案号（V13 新列）**：库里真有这一列（`information_schema` 查类型 / 可空 / 紧跟 `icp_number`）、脚本里**没有任何种子值**、能填能读能清空、50 字收下 51 被拒、保存后前台立刻读到新值（缓存 bump）、缺行兜底里是 `null`（展示类字段不编值）、**每页条数上限跟文章接口同为 50**（超了会变成"保存成功但不生效"）、**评论开关 0/1 与布尔的转换两个方向都断言**、**⑰ 评论总开关在后端真的生效**（关掉后 `POST /comment` 返回 code 403，且库里没有多出记录；再打开又能发）、权限 401/403、缓存命中与保存后失效 |
+| `SiteSettingTest` | 26 | 站点设置：**单条记录的三条不变量**（反复保存永远只有一行 / 那一行被物理删掉后 GET 仍 200 给默认值且保存能写回 / POST 是真 405）、**迁移种子值读脚本原文核对**（守"上线这个功能本身不改变站点外观"）、七个字段逐个"能改、能读到、能清空"、**公安网安备案号（V13 新列）**：库里真有这一列（`information_schema` 查类型 / 可空 / 紧跟 `icp_number`）、脚本里**没有任何种子值**、能填能读能清空、50 字收下 51 被拒、保存后前台立刻读到新值（缓存 bump）、缺行兜底里是 `null`（展示类字段不编值）、**每页条数上限跟文章接口同为 50**（超了会变成"保存成功但不生效"）、**评论开关 0/1 与布尔的转换两个方向都断言**、**⑰ 评论总开关在后端真的生效**（关掉后 `POST /comment` 返回 code 403，且库里没有多出记录；再打开又能发）、权限 401/403、缓存命中与保存后失效；**首页滚动文字（V15 新列）**：库里真有这一列（类型 / 长度 200 / 可空 / 紧跟 `copyright` —— 插在两个备案号中间会让 `police_number` 那条顺序断言因为无关的原因变红）、脚本里没有任何种子值、能填能读能清空（清空后首页那条跑马灯就不渲染了）、200 字收下 201 被拒且报错指明是哪一栏、保存滚动文字不动公告那一列 |
 | `DeploymentMemoryBudgetTest` | 9 | 部署配置契约（**读 `docker-compose.prod.yaml` 与 `Dockerfile`，不起 Spring 上下文**）：四个服务都必须有 `mem_limit`、上限之和要给宿主机留余量、**Dockerfile 的 ENTRYPOINT 不许带 JVM 参数**（带了会静默覆盖 `JAVA_TOOL_OPTIONS`）、三个硬上限之和必须小于 `mem_limit`、堆转储与 GC 日志必须落在挂了卷的目录里、redis 必须是 `volatile-lru`（`allkeys-lru` 会淘汰没有 TTL 的浏览量增量 = 真丢数据）、mysql 必须关 `performance_schema` 且缓冲池是 128M 的整数倍（否则被静默取整成 256M）、**数据服务的镜像必须钉住小版本**（浮动 `mysql:8` 实测拉到了四年前的 8.0.27）、YAML 开启重复键检查 |
 | `ActuatorExposureContractTest` | 4 | 管理端点的暴露面契约（`/actuator/prometheus` 在应用层是**放行**的，只能靠部署挡住）：`location /api/` 必须剥掉前缀（这也是 `/api/actuator/` 会命中后端根路径的根因）、必须有把 `/api/actuator/` 返回 404 的 location、mysql/redis 不发布任何端口且 backend/frontend 只绑 `127.0.0.1`、上线核对清单里这一项必须写出**可判定的**预期结果（404） |
 | `YiguixingtuApplicationTests` | 4 | 冒烟：上下文加载、数据库读写、JWT 签发解析、UserDetailsService、BCrypt |

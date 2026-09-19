@@ -22,6 +22,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -862,6 +863,137 @@ class SiteSettingTest extends AbstractIntegrationTest {
     }
 
     // ================================================================
+    //  八、首页滚动文字（V15 新增的那一列）
+    //
+    //  【它和公告（announcement）不是一回事，用例也要分得开】
+    //    两者都在首页顶部，但一块是不滚动的公告、一块是一直滚的跑马灯。
+    //    所以下面每条都顺带断言"没有动到公告那一列" —— 若哪天有人图省事把两者
+    //    合并成一列，这几条会立刻红。
+    //
+    //  【为什么整段追加在最后】与第七节同一个理由：不改动已通过的用例、
+    //    不打乱既有编号，审查时一眼能圈出"这次只动了这一段"。
+    // ================================================================
+
+    @Test
+    @DisplayName("㉓ 滚动文字：保存 -> 库里那一列真的有值，公开 GET 也读得到（且不动公告）")
+    void updateSetting_noticeText_shouldPersistAndBeReadable() throws Exception {
+        String announcement = "今晚 22:00 例行维护";
+        String notice = "欢迎来到测试站 · 好，支持，威武，有希望了！ ·";
+
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("滚动" + mark, announcement, true, null, null, null, notice, 10)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        // ① 落到数据库这一列的原生值上（不能只看接口返回）
+        assertEquals(notice, rawValue("notice_text", String.class),
+                "滚动文字必须真的写进 notice_text 这一列");
+        // ② 【公告那一列不能被动到】两者是首页顶部的两块，各有各的开关
+        assertEquals(announcement, rawValue("announcement", String.class),
+                "保存滚动文字不该把公告连带改掉（它们是两块，不是同一个字段的两种写法）");
+
+        // ③ 前台读得到（首页那条跑马灯用的就是 GET /setting 这一份）
+        SettingVO vo = settingService.get();
+        assertEquals(notice, vo.getNoticeText(), "公开读应当拿到刚保存的滚动文字");
+        assertEquals(announcement, vo.getAnnouncement(), "公告在 VO 里同样是独立的一项");
+    }
+
+    @Test
+    @DisplayName("㉔ 滚动文字：提交空串能被清空（库里与接口都变回 null，首页那条跑马灯随之消失）")
+    void updateSetting_noticeText_shouldBeClearable() throws Exception {
+        // 【为什么"能清空"必须单独有用例】它守的是"用 updateById 会清不掉"那个坑：
+        // updateById 跳过 null 字段，表现是"后台清空了、首页还在滚"，而接口返回 200。
+        // 对公告来说后果只是"通知下不掉"，对这条来说则是"站长不想要的话关不掉"。
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("滚动清空" + mark, null, true, null, null, null,
+                                "先填一句再清掉", 10)))
+                .andExpect(jsonPath("$.code").value(200));
+        assertNotNull(rawValue("notice_text", String.class), "前置条件：先把它填上");
+
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("滚动清空" + mark, null, true, null, null, null, "", 10)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        assertNull(rawValue("notice_text", String.class),
+                "空串必须真的写成 NULL —— 首页的 v-if 就是按 null 决定渲不渲染那一块的");
+        assertNull(settingService.get().getNoticeText(), "接口读回来也应当是 null");
+    }
+
+    @Test
+    @DisplayName("㉕ 滚动文字：200 字收下、201 字被拒（长度上限三处一致）")
+    void updateSetting_noticeText_shouldEnforceLength() throws Exception {
+        String ok = "滚".repeat(200);
+        mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("滚动长度" + mark, null, true, null, null, null, ok, 10)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+        assertEquals(200, rawValue("notice_text", String.class).length(), "刚好 200 字应当收下");
+
+        String tooLong = "滚".repeat(201);
+        String message = mockMvc.perform(put("/admin/setting")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(settingJson("滚动长度" + mark, null, true, null, null, null, tooLong, 10)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400))
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+        assertTrue(message.contains("首页滚动文字最长 200 字"),
+                "被拒时要指明是哪一栏超了（首页上不止一处文案），实际=" + message);
+    }
+
+    @Test
+    @DisplayName("㉖ V15 迁移：列存在、varchar(200) 可空、紧跟 copyright，且没有种子值")
+    void migrationV15_shouldAddNoticeTextColumn() throws Exception {
+        // 与第二节那条"读迁移脚本原文"同一套做法：既证明 V15 真的被执行了
+        // （Flyway 静默失效是踩过的坑），又不碰会漂的绝对位置
+        List<Map<String, Object>> column = jdbcTemplate.queryForList(
+                "SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE, ORDINAL_POSITION"
+                        + " FROM information_schema.COLUMNS"
+                        + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'site_setting'"
+                        + " AND COLUMN_NAME = 'notice_text'");
+        assertEquals(1, column.size(),
+                "V15 之后 site_setting 应当有 notice_text 这一列 —— 查不到说明这条迁移没真正执行");
+        assertEquals("varchar", column.get(0).get("DATA_TYPE"));
+        assertEquals(200L, ((Number) column.get(0).get("CHARACTER_MAXIMUM_LENGTH")).longValue(),
+                "长度 200（与 DTO 的 @Size、Service 的常量三处同一个数字）");
+        assertEquals("YES", column.get(0).get("IS_NULLABLE"),
+                "必须可空：留空 = 首页不显示那条跑马灯");
+        Long copyrightPosition = jdbcTemplate.queryForObject(
+                "SELECT ORDINAL_POSITION FROM information_schema.COLUMNS"
+                        + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'site_setting'"
+                        + " AND COLUMN_NAME = 'copyright'", Long.class);
+        assertEquals(copyrightPosition + 1,
+                ((Number) column.get(0).get("ORDINAL_POSITION")).longValue(),
+                "AFTER copyright：⚠️ 它【不能】插在两个备案号中间 —— "
+                        + "police_number 的 ORDINAL_POSITION 必须紧跟着 icp_number（见上一节的断言），"
+                        + "插进去会让那条断言因为一个与它无关的原因变红");
+
+        String v15 = readClasspathFile("db/migration/V15__add_notice_text_to_site_setting.sql");
+        assertTrue(v15.contains("ADD COLUMN `notice_text` varchar(200) DEFAULT NULL"),
+                "V15 应当加一列 notice_text varchar(200) DEFAULT NULL");
+        assertTrue(v15.contains("AFTER `copyright`"),
+                "新列的位置由 AFTER copyright 指定");
+        // 先把注释行剥掉再判断"有没有种子值"：脚本的中文注释里恰好会写到
+        // "不写种子值"这几个字，直接对全文 contains 会被自己的说明绊倒
+        String v15Sql = v15.lines()
+                .filter(line -> !line.trim().startsWith("--"))
+                .collect(Collectors.joining("\n"));
+        assertFalse(v15Sql.contains("INSERT"), "V15 不该 INSERT");
+        assertFalse(v15Sql.contains("UPDATE"),
+                "V15 不该 UPDATE 出种子值：这条文案该不该出现在首页由站长自己决定，"
+                        + "迁移脚本替他塞一句，他就永远清不掉了（前端在 null 时整块不渲染）");
+    }
+
+    // ================================================================
     //  工具方法
     // ================================================================
 
@@ -918,6 +1050,22 @@ class SiteSettingTest extends AbstractIntegrationTest {
      */
     private String settingJson(String siteName, String announcement, Boolean commentEnabled,
                                String icpNumber, String policeNumber, String copyright, Integer pageSize) {
+        return settingJson(siteName, announcement, commentEnabled, icpNumber, policeNumber, copyright, null, pageSize);
+    }
+
+    /**
+     * 【当前签名】多一个 {@code noticeText}（V15 加的首页滚动文字）。
+     *
+     * 【为什么是"再加一个重载"而不是直接改上面那个七参签名】
+     *   与当初加 policeNumber 时同一个取舍（见下面六参重载的注释）：
+     *   既有用例（①…㉒）的语义本来就是"只提交那几个字段"，签名与语义一一对应；
+     *   扩大签名会把一次"加一个字段"的改动变成横扫全文三十多处调用的 diff ——
+     *   而那个 diff 里任何一处抄错都不会被编译器发现（都是 String/Integer）。
+     *   参数是 null 时该字段【整个不出现在 JSON 里】，正是"这一栏我不提交"的语义。
+     */
+    private String settingJson(String siteName, String announcement, Boolean commentEnabled,
+                               String icpNumber, String policeNumber, String copyright,
+                               String noticeText, Integer pageSize) {
         StringBuilder sb = new StringBuilder("{");
         sb.append("\"siteName\":\"").append(siteName == null ? "" : siteName).append("\"");
         if (announcement != null) {
@@ -934,6 +1082,9 @@ class SiteSettingTest extends AbstractIntegrationTest {
         }
         if (copyright != null) {
             sb.append(",\"copyright\":\"").append(copyright).append("\"");
+        }
+        if (noticeText != null) {
+            sb.append(",\"noticeText\":\"").append(noticeText).append("\"");
         }
         if (pageSize != null) {
             sb.append(",\"pageSize\":").append(pageSize);

@@ -109,6 +109,24 @@ public class SiteSetting implements Serializable {
     @Schema(description = "页脚版权（可为空）")
     private String copyright;
 
+    /**
+     * 首页顶部那条【滚动的跑马灯】的文案，可为空（为空则整块不渲染）。
+     *
+     * 【它和 announcement 的区别（两者都在首页顶部，但不是一个东西）】
+     *   · {@link #announcement} 是不滚动的公告条，出现时机由站长控制
+     *   · 这一列是那条一直滚动的装饰文字
+     *   前端不合并它们，理由写在 index.vue 的模板注释里。
+     *
+     * 【2026-09 之前它是硬编码在前端源码里的】站长改一个字都要改代码、
+     * 重新构建前端镜像 —— 而它恰恰是首页上最可能被改的文案。
+     * 移到设置里之后，改完即时生效（走 update() 里的缓存版本号作废）。
+     *
+     * 【长度 200 的依据】它是一条横向滚动的文字，久了没人看完；
+     * 200 与 {@link #copyright} 同一个量级，够写两三句话。
+     */
+    @Schema(description = "首页滚动文字（可为空）")
+    private String noticeText;
+
     /** 每页文章条数，取值 1 ~ {@code ArticleQuery.MAX_PAGE_SIZE}（上限跟着接口走，见迁移脚本） */
     @Schema(description = "每页文章条数", example = "10")
     private Integer pageSize;

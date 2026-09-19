@@ -2,8 +2,6 @@ package com.yigalaxy.yiguixingtu.music.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
-import com.yigalaxy.yiguixingtu.article.mapper.ArticleAttachmentMapper;
-import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
 import com.yigalaxy.yiguixingtu.audit.AuditTarget;
 import com.yigalaxy.yiguixingtu.audit.OperationAction;
 import com.yigalaxy.yiguixingtu.audit.OperationLogRecorder;
@@ -15,6 +13,7 @@ import com.yigalaxy.yiguixingtu.music.dto.MusicForm;
 import com.yigalaxy.yiguixingtu.music.dto.MusicVO;
 import com.yigalaxy.yiguixingtu.music.entity.Music;
 import com.yigalaxy.yiguixingtu.music.mapper.MusicMapper;
+import com.yigalaxy.yiguixingtu.upload.UploadReferenceChecker;
 import com.yigalaxy.yiguixingtu.upload.UploadedFileCleaner;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.Cacheable;
@@ -94,37 +93,29 @@ public class MusicServiceImpl implements MusicService {
     private final UploadedFileCleaner uploadedFileCleaner;
 
     /**
-     * 文章 Mapper：用来问"有没有文章的正文/封面引用了这个音频地址"。
+     * "这个上传文件还有没有别处在用"的唯一判断入口。
      *
-     * 【为什么音乐模块要碰文章的表】音频地址是同源的 {@code /uploads/music/...}，
-     *   而文章正文是一段 Markdown —— 站长完全可以在里面嵌一段
-     *   {@code <audio src="/uploads/music/xxx.mp3">}（本站上传的音频、
-     *   本站的静态映射，嵌进去就能播）。那这条音频文件就不再是"音乐专属"的了。
-     *   跨模块直接用对方 Mapper 查询在本项目里有先例：ArticleServiceImpl 就注入
-     *   CategoryMapper 来取分类名 —— 单体的一个应用里，这比再造一层"跨模块服务"
-     *   要直白得多（SQL 本身写在 ArticleMapper 上，归属仍然清楚）。
+     * 【2026-09 从"注入文章/附件的 Mapper 自己拼判断"改成了注入这一个组件】
+     *   改造前这里只查文章与附件两张表（外加自己的 music 表），因为那时
+     *   每张图/每个音频各有各的 UUID 副本，"音乐封面与文章封面是同一份文件"
+     *   几乎不可能发生。改成内容寻址之后（同一份内容只存一份文件，
+     *   见 UploadService.buildObjectKey）共用成了常态，
+     *   判断要覆盖的表从 3 张涨到 7 张 —— 本类原来那条注释（"为一个只有几行的
+     *   判断引入一层间接、反而更难读"）在表数翻倍、且漏一张就会误删之后就反过来了。
+     *   完整清单与"为什么必须一张不落"见 UploadReferenceChecker 的类注释。
      */
-    private final ArticleMapper articleMapper;
-
-    /**
-     * 附件 Mapper：用来问"有没有文章的【附件行】引用了这个音频地址"。
-     * 附件的地址只要求落在本站上传目录之内、没有强制在 attachment/ 子目录，
-     * 所以理论上可以指向 music/ 下的文件 —— 见 ArticleAttachmentMapper.countReferencing。
-     */
-    private final ArticleAttachmentMapper articleAttachmentMapper;
+    private final UploadReferenceChecker uploadReferenceChecker;
 
     public MusicServiceImpl(MusicMapper musicMapper,
                             ContentCacheVersion contentCacheVersion,
                             OperationLogRecorder operationLogRecorder,
                             UploadedFileCleaner uploadedFileCleaner,
-                            ArticleMapper articleMapper,
-                            ArticleAttachmentMapper articleAttachmentMapper) {
+                            UploadReferenceChecker uploadReferenceChecker) {
         this.musicMapper = musicMapper;
         this.contentCacheVersion = contentCacheVersion;
         this.operationLogRecorder = operationLogRecorder;
         this.uploadedFileCleaner = uploadedFileCleaner;
-        this.articleMapper = articleMapper;
-        this.articleAttachmentMapper = articleAttachmentMapper;
+        this.uploadReferenceChecker = uploadReferenceChecker;
     }
 
     // =================================================================
@@ -315,30 +306,19 @@ public class MusicServiceImpl implements MusicService {
     }
 
     /**
-     * 这个上传文件还有没有别的地方在用？（曲目 / 文章正文与封面 / 文章附件，三处都查）
+     * 这个上传文件还有没有别的地方在用？（删歌前必须问这一句，理由见 delete 的长注释）
      *
-     * 【为什么三处都要查】见 delete 的长注释第二点。三处的 SQL 各自写在自己那张表的
-     * Mapper 上（MusicMapper / ArticleMapper / ArticleAttachmentMapper），
-     * 这里只负责把结论合起来 —— 判断规则集中在这一个方法里，读的人不用跳三个文件。
-     *
-     * 【⚠️ 与 ArticleServiceImpl.remove 里那段逻辑的关系】
-     *   那边也有一份"这个文件还有没有别人在用"的判断，但两边的"自己"不同
-     *   （那边要排除"正在删的这篇文章"，这边要排除"正在删的这首歌"），
-     *   而且查的表也不完全一样（那边不查 music 表，这边要查）。
-     *   强行抽一个共用组件就得传"我是谁、我在哪张表"这样的参数，
-     *   为一个只有几行的判断引入一层间接、反而更难读 —— 所以各自写清楚。
+     * 【实现已经搬到 UploadReferenceChecker】原来这里自己查三张表，而文章的删除路径
+     * 另写了一份。2026-09 改成内容寻址、引用检查要覆盖 7 张表之后，
+     * 两份手写的清单太容易漏 —— 收成一个组件，清单只维护一处。
+     * 这里保留一层薄封装：调用点读起来是音乐模块的业务语义，
+     * 不必知道那个组件的存在。
      *
      * @param objectKey 上传目录里的对象 key
      * @param musicId   正在删除的曲目 id（它自己不算"别人"）
      */
     private boolean referencedByOthers(String objectKey, Long musicId) {
-        if (musicMapper.countOthersReferencing(musicId, objectKey) > 0) {
-            return true;
-        }
-        if (articleMapper.countReferencing(objectKey) > 0) {
-            return true;
-        }
-        return articleAttachmentMapper.countReferencing(objectKey) > 0;
+        return uploadReferenceChecker.isReferencedBesidesMusic(objectKey, musicId);
     }
 
     // =================================================================

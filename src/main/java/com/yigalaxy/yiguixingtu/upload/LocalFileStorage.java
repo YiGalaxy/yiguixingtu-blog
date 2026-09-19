@@ -5,6 +5,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -21,6 +22,15 @@ import java.nio.file.Paths;
  *
  * 【什么时候用它】一直是它：本地开发、自动化测试、线上部署都是这套。
  *   见 README「文件上传」章节里"为什么不用对象存储"的取舍说明。
+ *
+ * 【⚠️ 2026-09 起：key 是内容哈希，不是随机 UUID】
+ *   文件名由 {@code UploadService.buildObjectKey} 按文件内容的 SHA-256 生成，
+ *   所以"同一个 key 已经有文件"= "要写的内容与磁盘上那份逐字节相同"。
+ *   这条性质在这里有两处直接后果：
+ *     · {@link #exists} 成了上传去重的判断依据（命中就不写盘）
+ *     · {@link #store} 把并发撞名（FileAlreadyExistsException）当【成功】处理，
+ *       而不是失败 —— 详细推导写在 store 的 catch 里
+ *   ⚠️ 若将来 key 改回随机命名，上面第二条必须一起改回去。
  *
  * 【用到的东西】
  *   · {@link Files#createDirectories} + {@link Files#write} —— JDK 自带的 NIO，
@@ -51,14 +61,7 @@ public class LocalFileStorage implements FileStorage {
 
     @Override
     public String store(InputStream content, String objectKey, String contentType) {
-        Path root = Paths.get(properties.getLocalDir()).toAbsolutePath().normalize();
-        Path target = root.resolve(objectKey).normalize();
-
-        // 【路径穿越防护】拼出来的路径必须仍然在根目录下面。
-        // 不检查的话，一个 "../../xxx" 形式的 key 就能把文件写到项目外面。
-        if (!target.startsWith(root)) {
-            throw new IllegalArgumentException("非法的存储路径: " + objectKey);
-        }
+        Path target = resolveWithinRoot(objectKey);
 
         try {
             // 父目录可能还不存在（比如第一次上传、或者到了新的月份），先建出来
@@ -71,7 +74,27 @@ public class LocalFileStorage implements FileStorage {
             //
             // ⚠️ 这里【不关闭】content：它是调用方（UploadService）传进来的，
             //    那边用 try-with-resources 管着。这里关掉会变成二次关闭。
+            //   ⚠️ 也【不带 REPLACE_EXISTING】：带上的话，"同一个 key 已经有文件"
+            //    会变成"先截断再重写"，而此刻可能正好有请求在读那个文件，
+            //    它会读到半截内容（图片裂开、mp3 播到一半断）。见下面的 catch。
             Files.copy(content, target);
+        } catch (FileAlreadyExistsException e) {
+            // ============================================================
+            // 【竞态：这个 key 已经有文件了 —— 在内容寻址下这是"命中"，不是错误】
+            //   key 是内容哈希（见 UploadService.buildObjectKey），所以"同一个 key
+            //   上已经有文件"意味着磁盘上那份与这次要写的内容【逐字节相同】。
+            //   成因是检查与写入之间的并发：同一张图被两个请求同时上传，
+            //   两边都问过 exists（都说没有），然后一起写。
+            //
+            //   为什么当作成功而不是失败：
+            //     · 要写的内容已经在磁盘上了，调用方要的结果【已经达成】
+            //     · 抛出去会让其中一个用户看到 500 —— 而他上传的图其实好好的，
+            //       这种"报错但其实成功了"最难解释
+            //   ⚠️ 这个"当成功"成立的前提是【key 必须是内容哈希】。
+            //      如果哪天又回到随机命名，这里就会把"两个不同文件撞名"
+            //      静默地变成"后传的丢了"—— 那时必须改成抛异常。
+            // ============================================================
+            log.info("目标文件已存在（并发上传同一内容），按命中处理: {}", target);
         } catch (IOException e) {
             // 转成运行时异常交给全局异常处理器 → 500。
             // 附带说明：这里【不打日志输出文件内容或路径细节到用户可见的地方】，
@@ -81,14 +104,71 @@ public class LocalFileStorage implements FileStorage {
         }
 
         // 返回可访问的 URL。真正的静态资源映射见 WebMvcConfig（/uploads/** → 这个目录）
-        String url = trimTrailingSlash(properties.getBaseUrl()) + "/uploads/" + objectKey;
+        String url = urlOf(objectKey);
         log.info("文件已保存到本地: {} -> {}", target, url);
         return url;
+    }
+
+    /**
+     * 看这个 key 上是不是已经有文件了（上传去重要用，见 {@link FileStorage#exists}）。
+     *
+     * 【为什么用 isRegularFile 而不是 exists】
+     *   {@code Files.exists} 对目录也返回 true。虽然 key 里带扩展名、正常不会
+     *   指向一个目录，但真发生那种情况时，"存在的目录"会被当成"文件已经在"，
+     *   于是上传被跳过一次写入、前台拿到一个 404 的地址。
+     *   isRegularFile 把判断收窄成"确实是一个文件"。
+     *
+     * 【为什么不吞异常】只读一次元数据，抛出的 IOException 属于"磁盘出问题了"，
+     *   应当照常变成 500，而不是在这里猜一个默认值。
+     */
+    @Override
+    public boolean exists(String objectKey) {
+        return Files.isRegularFile(resolveWithinRoot(objectKey));
     }
 
     /** 去掉 baseUrl 结尾多余的斜杠，避免拼出 "http://x//uploads/..." 这种双斜杠 */
     private String trimTrailingSlash(String url) {
         return url != null && url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
+    }
+
+    /**
+     * 一个 key 对应的对外访问地址（见 {@link FileStorage#urlOf}）。
+     *
+     * 【⚠️ 它只拼字符串，【不碰磁盘】】所以"文件其实不存在"它也会照常返回地址。
+     *   这是有意的：调用它的场景有两处 ——
+     *     · store 写完之后（文件刚写完，一定存在）
+     *     · 上传命中已有文件时（那个文件的存在性由 UploadService 先问过 exists）
+     *   再查一次盘既多余，也会让"存在性判断"出现两个真相来源。
+     *   真的拿到一个 404 地址，那是调用方跳过了 exists，问题在那边。
+     *
+     * 【这里仍然做路径校验】虽然不落盘、穿不出目录，但一个
+     * {@code ../../} 形式的 key 会拼出一个指向站外的 URL 返回给前端。
+     * 与 store / delete 用同一把尺子，成本是一次字符串比较。
+     */
+    @Override
+    public String urlOf(String objectKey) {
+        resolveWithinRoot(objectKey);
+        return trimTrailingSlash(properties.getBaseUrl()) + "/uploads/" + objectKey;
+    }
+
+    /**
+     * 把 objectKey 解析成根目录下的绝对路径，并确认它没有跑到根目录外面去。
+     *
+     * 【为什么抽出来】store / delete / exists / urlOf 四处原本各写一遍这三行
+     *   （取根目录、resolve、startsWith 检查）。它们是【安全边界】——
+     *   正是那种"各处抄一遍、哪天有人只改一处"最容易出事的地方
+     *   （删除比写入更不可逆：一个 "../../xxx" 的 key 能删掉目录外面的文件）。
+     *   收在一个方法里之后，"路径必须落在根目录内"这条规则只有一个实现。
+     *
+     * @throws IllegalArgumentException key 会落到根目录之外时
+     */
+    private Path resolveWithinRoot(String objectKey) {
+        Path root = Paths.get(properties.getLocalDir()).toAbsolutePath().normalize();
+        Path target = root.resolve(objectKey).normalize();
+        if (!target.startsWith(root)) {
+            throw new IllegalArgumentException("非法的存储路径: " + objectKey);
+        }
+        return target;
     }
 
     /**
@@ -114,12 +194,7 @@ public class LocalFileStorage implements FileStorage {
      */
     @Override
     public void delete(String objectKey) {
-        Path root = Paths.get(properties.getLocalDir()).toAbsolutePath().normalize();
-        Path target = root.resolve(objectKey).normalize();
-
-        if (!target.startsWith(root)) {
-            throw new IllegalArgumentException("非法的存储路径: " + objectKey);
-        }
+        Path target = resolveWithinRoot(objectKey);
 
         try {
             boolean deleted = Files.deleteIfExists(target);

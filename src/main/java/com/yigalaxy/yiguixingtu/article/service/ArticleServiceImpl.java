@@ -27,8 +27,8 @@ import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
 import com.yigalaxy.yiguixingtu.config.RedisConfig;
-import com.yigalaxy.yiguixingtu.music.mapper.MusicMapper;
 import com.yigalaxy.yiguixingtu.upload.UploadProperties;
+import com.yigalaxy.yiguixingtu.upload.UploadReferenceChecker;
 import com.yigalaxy.yiguixingtu.upload.UploadedFileCleaner;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.Cacheable;
@@ -128,15 +128,20 @@ public class ArticleServiceImpl implements ArticleService {
     private final UploadProperties uploadProperties;
 
     /**
-     * 音乐 Mapper：级联删文件时用来问"这个上传文件还有没有【还在的曲目】在用"。
+     * "这个上传文件还有没有别处在用"的唯一判断入口。
      *
-     * 【为什么文章模块要碰音乐的表】音频与图片都在同一个静态目录下
-     * （uploads/music/ 与 uploads/cover/），而文章正文里可以嵌音频地址 ——
-     * 那这个文件就不只属于音乐了。详见 referencedByOtherArticles 的注释。
-     * 跨模块用对方的 Mapper 查一次在本项目有先例（本类就注入 CategoryMapper 取分类名），
-     * 比为此再造一层"跨模块服务"直白得多（SQL 本身写在 MusicMapper 上，归属清楚）。
+     * 【2026-09 从"注入三个 Mapper 自己拼判断"改成了注入这一个组件】
+     *   改造前本类自己按 article / article_attachment / music 三张表拼判断，
+     *   音乐那边（MusicServiceImpl）另写了一份。那时表少，重复两份还看得住。
+     *   改成内容寻址之后（同一份内容只存一份文件，见 UploadService.buildObjectKey）
+     *   "多处共用同一个文件"成了常态，判断要覆盖的表从 3 张涨到 7 张 ——
+     *   两份各写一遍几乎必然漏一处，而漏的后果是**把别人正在用的图删掉**。
+     *   所以收成一个组件，清单只维护一处。
+     *   （原本 MusicServiceImpl 上有一条注释反对抽这个组件 —— 理由是"为一个几行的
+     *    判断引入一层间接、反而更难读"。那个判断在表数翻倍之后就反过来了，
+     *    见 UploadReferenceChecker 的类注释。）
      */
-    private final MusicMapper musicMapper;
+    private final UploadReferenceChecker uploadReferenceChecker;
 
     /** 浏览量计数器：详情页只写它（Redis），落库交给 ViewCountSyncTask */
     private final ArticleViewCounter viewCounter;
@@ -171,7 +176,7 @@ public class ArticleServiceImpl implements ArticleService {
                               ArticleAttachmentMapper articleAttachmentMapper,
                               UploadedFileCleaner uploadedFileCleaner,
                               UploadProperties uploadProperties,
-                              MusicMapper musicMapper,
+                              UploadReferenceChecker uploadReferenceChecker,
                               com.yigalaxy.yiguixingtu.tag.service.TagService tagService) {
         this.articleMapper = articleMapper;
         this.categoryMapper = categoryMapper;
@@ -182,7 +187,7 @@ public class ArticleServiceImpl implements ArticleService {
         this.articleAttachmentMapper = articleAttachmentMapper;
         this.uploadedFileCleaner = uploadedFileCleaner;
         this.uploadProperties = uploadProperties;
-        this.musicMapper = musicMapper;
+        this.uploadReferenceChecker = uploadReferenceChecker;
         this.tagService = tagService;
     }
 
@@ -660,6 +665,12 @@ public class ArticleServiceImpl implements ArticleService {
         //    "这次没再提交的文件"从磁盘上删掉 —— 那段推理在 replaceAttachments 里。
         replaceAttachments(id, attachments);
 
+        // 4.5【清理这次没再引用的旧封面 / 旧正文图】
+        //    ⚠️ 必须排在 UPDATE（第 2 步）之后：它内部的引用检查读的是库里的当前状态，
+        //    而"本文新正文/新封面是否还在用这个文件"正是判断要不要删的依据之一。
+        //    排在前面的话，库里还是旧内容，会得出错误的结论。
+        cleanupDroppedImages(exist, form, id);
+
         // 5.【让缓存失效 —— 位置是刻意放在这里的，不要往前挪】
         //   改完内容要让列表缓存失效（标题/摘要/分类/置顶都可能变，列表会跟着变），
         //   但【什么时候】推进版本号是有讲究的：
@@ -1038,9 +1049,16 @@ public class ArticleServiceImpl implements ArticleService {
             if (newKeys.contains(oldKey)) {
                 continue;
             }
-            // 别的文章还在用同一个文件：绝不能删（比如两篇文章共用了同一个附件）
-            if (referencedByOtherArticles(oldKey, articleId)) {
-                log.info("被移除的附件仍被其它文章引用，跳过删除: key={}, 文章id={}", oldKey, articleId);
+            // 还有人在用就绝不能删。⚠️ 这里用的是【不带排除】的那个方法，
+            // 不是 remove 用的 referencedByOtherArticles —— 因为此刻：
+            //   · article 行已经 UPDATE 成本次提交的正文/封面了
+            //   · article_attachment 行在上面已经换成新列表了
+            // 库里就是"保存之后的样子"，所以"本文自己还在引用"是**该留**的证据。
+            // 用错成"排除本文"那个方法的后果很具体：附件地址同时被写进正文时，
+            // 移除附件会把正文还在用的文件删掉（这个老问题 2026-09 一并修掉了）。
+            // 判据与完整推导见 UploadReferenceChecker.isReferenced 的注释。
+            if (uploadReferenceChecker.isReferenced(oldKey)) {
+                log.info("被移除的附件仍被引用，跳过删除: key={}, 文章id={}", oldKey, articleId);
                 continue;
             }
             removableKeys.add(oldKey);
@@ -1052,23 +1070,97 @@ public class ArticleServiceImpl implements ArticleService {
     }
 
     /**
+     * 编辑保存后，把"这次没再引用"的旧封面 / 旧正文插图从磁盘删掉。
+     *
+     * =====================================================================
+     * 【为什么要有这一步（2026-09 补的）】
+     *   改造前，编辑文章是唯一【完全不清理文件】的写路径：
+     *     · 换了封面 → 旧封面文件留在磁盘上，永远没人再引用它
+     *     · 从正文里删掉一张图 → 同上
+     *   而删除文章、移除附件都会清（见 remove / replaceAttachments）。
+     *   后果是 uploads 目录只涨不落：站长换十次封面就攒十张废图，
+     *   最后撞上总容量护栏（5GB），收到的提示却是"上传空间不足"，
+     *   完全看不出原因是一堆没人引用的旧图。
+     *   改成内容寻址之后这件事更值得做：去重让"多篇文章共用一张图"成为常态，
+     *   于是"哪些文件真的没人用了"变得可判断（见 UploadReferenceChecker）。
+     *
+     * 【⚠️ 这是本类里唯一一处"用户看不见的不可逆删除"】
+     *   从正文里删掉一段文字再保存，那张图就从磁盘上没了 —— 撤销不回来。
+     *   之所以认为可以接受，是因为它与"删掉整篇文章"的语义是一致的
+     *   （那个动作本来就该把文章独占的图一起清掉），而且下游有三重保护：
+     *     ① 只处理【这次保存前有、保存后没有】的差集 —— 没动过的图完全不进这个流程
+     *     ② 差集里每一个都还要过一遍全文引用检查（别的文章 / 附件 / 音乐 /
+     *        项目 / 友链 / 关于页 / 收藏），任何一处还在用就留下
+     *     ③ 删除发生在【事务提交之后】，提交失败则一个字节都不动
+     *
+     * 【为什么用 isReferenced（不排除本文），而不是 remove 用的那个排除版】
+     *   调用时机决定了这一点：本方法排在第 2 步的 UPDATE 之后，
+     *   库里已经是【保存后】的正文与封面 —— 这时"本文还在引用它"
+     *   恰恰是"该留"的证据（比如这张图从正文挪到了封面）。
+     *   完整判据见 UploadReferenceChecker.isReferenced 的注释。
+     *
+     * 【它不管附件】附件由 replaceAttachments 负责（那边比对的是一整份附件列表）。
+     *   两者可能算出同一个 key（比如某张图既在旧正文里、又是旧附件），
+     *   那也无妨：删除是幂等的（LocalFileStorage.delete 用 deleteIfExists），
+     *   而且两边用的是同一套引用检查，结论一致。
+     *
+     * @param old       数据库里【本次修改前】的那一行（注意：不是被 update 改过的对象）
+     * @param form      本次提交的表单
+     * @param articleId 文章 id（日志里要带上，方便回答"这张图是什么时候没的"）
+     */
+    private void cleanupDroppedImages(Article old, ArticleForm form, Long articleId) {
+
+        // ---- 第一步：本次修改前，这篇文章涉及哪些本站文件 ----
+        Set<String> oldKeys = new LinkedHashSet<>(uploadedFileCleaner.extractObjectKeys(old.getContent()));
+        String oldCoverKey = uploadedFileCleaner.toObjectKey(old.getCover());
+        if (oldCoverKey != null) {
+            oldKeys.add(oldCoverKey);
+        }
+        if (oldKeys.isEmpty()) {
+            // 老内容里本来就没有本站上传的文件（比如全文都是外链图）：
+            // 没什么可清的，也不必再查库
+            return;
+        }
+
+        // ---- 第二步：本次提交后还在用哪些 ----
+        Set<String> newKeys = new LinkedHashSet<>(uploadedFileCleaner.extractObjectKeys(form.getContent()));
+        String newCoverKey = uploadedFileCleaner.toObjectKey(form.getCover());
+        if (newCoverKey != null) {
+            newKeys.add(newCoverKey);
+        }
+
+        // ---- 第三步：差集逐个确认"真的没人用了"才删 ----
+        List<String> removableKeys = new ArrayList<>();
+        for (String oldKey : oldKeys) {
+            if (newKeys.contains(oldKey)) {
+                continue;       // 这次还在用（可能只是挪了个位置）
+            }
+            if (uploadReferenceChecker.isReferenced(oldKey)) {
+                // 留下是有意为之，不是漏删 —— 日志要能证明这一点
+                log.info("编辑时被移除的图片仍被引用，跳过删除: key={}, 文章id={}", oldKey, articleId);
+                continue;
+            }
+            removableKeys.add(oldKey);
+        }
+
+        // 删除时机与 remove / replaceAttachments 完全一致：事务提交之后才动磁盘
+        deleteFilesAfterCommit(removableKeys);
+    }
+
+    /**
      * 这个上传文件还有没有【别处在用】？
      *
-     * 【三张表各查一次，任何一个计数大于 0 就算"还有人用"】
-     *   ① article             —— 别的文章的正文/封面（ArticleMapper.countOthersReferencing）
-     *   ② article_attachment  —— 别的文章的附件行（ArticleAttachmentMapper.countOthersReferencing）
-     *   ③ music               —— 还在的曲目（MusicMapper.countReferencing）
+     * 【实现已经搬到 UploadReferenceChecker】原来这里自己查三张表
+     * （article / article_attachment / music），音乐那边另写了一份。
+     * 2026-09 改成内容寻址、引用检查要覆盖 7 张表之后，
+     * 两份手写的清单太容易漏 —— 收成一个组件，清单只维护一处。
      *
-     * 【③ 是 2026-09 补上的，它对应的坑值得记一笔】
-     *   音频地址是同源的 {@code /uploads/music/...}，站长完全可能既把它录进音乐列表、
-     *   又在某篇文章正文里嵌一段 {@code <audio src="...">}（从音乐列表复制地址最自然）。
-     *   只查文章那两张表的话，删这篇文章会得出"没人用这个文件"的结论 ——
-     *   然后把音乐列表里那首歌的音频删掉：歌还在、点开播不了，文件还回不来。
-     *   而删歌那边（MusicServiceImpl）查的是同样这三张表，两侧规则对称，
-     *   才不会出现"从哪一侧删会坏、从另一侧删不会坏"这种要靠运气的问题。
-     *
-     * 三条 SQL 的写法、为什么用 LOCATE、为什么比对 key 而不是整条 URL，
-     * 都写在各自 Mapper 的方法上（SQL 放在"它读的那张表"对应的 Mapper 里）。
+     * 【它只给"删文章"用（remove），编辑路径【不能】用它】
+     *   它把正在处理的这篇文章整个排除掉了 —— 这对删文章是对的
+     *   （那行数据马上就要没了，不能算成"还有人在用"），
+     *   但对编辑是错的：编辑时库里已经是保存后的内容，
+     *   本文如果还在引用这个文件，那正是"该留"的证据。
+     *   两条路径的区别与判据写在 UploadReferenceChecker.isReferenced 的注释里。
      *
      * ⚠️ 判断偏保守（宁可认为"还有人用"）：任何形态的字符串包含都算引用。
      *   理由见 remove 的长注释第二点 —— 误删不可逆，而多留一个文件只是浪费磁盘。
@@ -1077,14 +1169,7 @@ public class ArticleServiceImpl implements ArticleService {
      * @param articleId 当前正在处理的文章 id（它自己不算"别人"）
      */
     private boolean referencedByOtherArticles(String key, Long articleId) {
-        if (articleMapper.countOthersReferencing(articleId, key) > 0) {
-            return true;
-        }
-        if (articleAttachmentMapper.countOthersReferencing(articleId, key) > 0) {
-            return true;
-        }
-        // 曲目表：它没有"要撇开的那篇文章"这个概念，所以是另一个不带排除参数的方法
-        return musicMapper.countReferencing(key) > 0;
+        return uploadReferenceChecker.isReferencedBesidesArticle(key, articleId);
     }
 
     /**

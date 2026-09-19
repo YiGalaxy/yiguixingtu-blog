@@ -41,9 +41,11 @@ import org.springframework.web.multipart.MultipartFile;
 public class UploadController {
 
     private final UploadService uploadService;
+    private final LegacyUploadMigrator legacyUploadMigrator;
 
-    public UploadController(UploadService uploadService) {
+    public UploadController(UploadService uploadService, LegacyUploadMigrator legacyUploadMigrator) {
         this.uploadService = uploadService;
+        this.legacyUploadMigrator = legacyUploadMigrator;
     }
 
     /**
@@ -82,5 +84,35 @@ public class UploadController {
     public Result<UploadResult> upload(@RequestParam("file") MultipartFile file,
                                        @RequestParam(value = "type", required = false) String type) {
         return Result.success(uploadService.upload(file, type));
+    }
+
+    /**
+     * 【一次性迁移接口，用完即删】把存量文件从 UUID 命名改写成内容哈希命名，
+     * 并改写库里所有引用（详见 {@link LegacyUploadMigrator} 的类注释）。
+     *
+     * 【为什么要做成接口，而不是启动时自动跑】
+     *   · 它要动全站的引用数据，必须由人挑一个"没人在编辑"的时间点执行
+     *   · 启动时自动跑意味着"迁移失败 → 应用起不来"，把一次数据操作变成了可用性问题；
+     *     而且本地开发、CI、容器重建都会各跑一次
+     *   · 做成接口之后可以先跑 dryRun 看清单，确认无误再实跑，出问题还能重跑（幂等）
+     *
+     * 【为什么放在 UploadController 而不是新建一个 AdminXxxController】
+     *   它就是"文件上传"这件事的存量数据维护，权限要求（ADMIN）与这个类完全一致。
+     *   ⚠️ 与 {@link LegacyUploadMigrator} 一起，在迁移完成后的某次清理里删掉。
+     *
+     * 【用法】
+     *   {@code POST /upload/migrate-legacy?dryRun=true}   先看清单（不动任何东西）
+     *   {@code POST /upload/migrate-legacy}               实跑（dryRun 缺省为 false）
+     *
+     * @param dryRun 只预演、不落盘不改库（默认 false —— 少传一个参数万一是想实跑，
+     *               那个方向更符合"我调这个接口就是要迁移"的意图；
+     *               而真要预演的人会明确传 true）
+     * @return 迁移报告；dryRun 时 copied/updatedRows/deletedFiles 都是 0
+     */
+    @Operation(summary = "【一次性】把存量上传文件迁移为内容哈希命名并改写引用")
+    @PostMapping("/migrate-legacy")
+    public Result<LegacyUploadMigrator.MigrationReport> migrateLegacy(
+            @RequestParam(value = "dryRun", required = false, defaultValue = "false") boolean dryRun) {
+        return Result.success(legacyUploadMigrator.migrate(dryRun));
     }
 }

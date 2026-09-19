@@ -50,6 +50,12 @@ public interface MusicMapper extends BaseMapper<Music> {
      *   用整条 URL 比会在两种形态混用时得出"没人引用"的错误结论 —— 然后误删。
      *   key 是两种形态共同包含的那一段（见 UploadedFileCleaner.toObjectKey）。
      *
+     * 【2026-09 补上了 cover 列】原来两条 SQL 都只看 url。改造前这没问题
+     *   （封面与音源是两次独立上传，各有各的 UUID 文件名），而改造后
+     *   **同一张图被多处引用是常态**：一首曲目的封面完全可能就是另一首的封面、
+     *   或者某篇文章封面。只看 url 会让"删歌/删文章"得出"没人用这张图"的结论
+     *   然后把它删掉 —— 那些页面当场裂图，文件还回不来。
+     *
      * 【性能】LOCATE 是函数匹配（等价于前置通配符的 LIKE），走不了索引，会扫一遍 music 表。
      *   这张表是"几十首"的量级、而且只在删歌时执行一次，可以接受。
      *
@@ -62,7 +68,7 @@ public interface MusicMapper extends BaseMapper<Music> {
             FROM music
             WHERE deleted = 0
               AND id <> #{musicId}
-              AND LOCATE(#{key}, url) > 0
+              AND (LOCATE(#{key}, url) > 0 OR LOCATE(#{key}, cover) > 0)
             """)
     long countOthersReferencing(@Param("musicId") Long musicId, @Param("key") String key);
 
@@ -78,7 +84,9 @@ public interface MusicMapper extends BaseMapper<Music> {
      *   又在某篇文章的正文里嵌一段 {@code <audio src="...">}（从音乐列表复制地址最自然）。
      *   删那篇文章时如果只查文章自己的两张表，就会得出"没人用这个文件"的结论 ——
      *   然后把音乐列表里那首歌的音频删掉：歌还在、点开播不了，文件还回不来。
-     *   所以两侧（删歌 / 删文章）都必须查全部三张表，规则才是对称且不漏的。
+     *   所以两侧（删歌 / 删文章）都必须查同一批表，规则才是对称且不漏的。
+     *   （2026-09：那批表从三张扩到了全部可能存上传地址的表，
+     *    完整清单与"为什么必须一张不落"见 {@code UploadReferenceChecker}。）
      *
      * @param key 上传目录里的对象 key（不含 base-url 与 /uploads/ 前缀）
      * @return 有几条未删除的曲目在用这个文件（0 表示音乐这边没人用）
@@ -87,7 +95,7 @@ public interface MusicMapper extends BaseMapper<Music> {
             SELECT COUNT(*)
             FROM music
             WHERE deleted = 0
-              AND LOCATE(#{key}, url) > 0
+              AND (LOCATE(#{key}, url) > 0 OR LOCATE(#{key}, cover) > 0)
             """)
     long countReferencing(@Param("key") String key);
 }

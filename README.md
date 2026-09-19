@@ -348,7 +348,7 @@
 - **Flyway 数据库版本化迁移**：空库启动自动建表，表结构只有一份定义
 - **Testcontainers 容器化集成测试**：测试自带数据库与 Redis，clone 下来就能验证
 - **GitHub Actions 持续集成**：每次 push / PR 自动构建、跑测试、出覆盖率报告
-- **文件上传（图片 + 音频 + 附件三套规则）**：扩展名白名单 + 大小限制 + UUID 重命名 + 按日期分目录；
+- **文件上传（图片 + 音频 + 附件三套规则）**：扩展名白名单 + 大小限制 + **内容寻址（同一份内容只存一份）**；
   图片走 `type=image`（默认，**10MB**，存 `uploads/cover/`），音频走 `type=audio`
   （mp3，20MB，存 `uploads/music/`），附件走 `type=attachment`
   （16 种文档与媒体格式，**100MB**，存 `uploads/attachment/`）—— 三套规则**互不放宽**，
@@ -435,7 +435,9 @@ com.yigalaxy.yiguixingtu
 │   └── dto/                        # ArticleForm / ArticleQuery / ArticleVO / ArticleStatsVO / ArticleArchiveVO / ArticleRssVO / ArticleAttachmentVO / ArticleAttachmentForm
 ├── upload
 │   ├── controller/UploadController # POST /upload（ADMIN；返回 {url, name, size}）
-│   ├── service/UploadService       # 三种类型各自的白名单与上限 + 总容量护栏 + UUID 重命名 + 按日期分目录
+│   ├── service/UploadService       # 三种类型各自的白名单与上限 + 总容量护栏 + 内容寻址（哈希命名、同内容只存一份）
+│   ├── UploadReferenceChecker      # 删文件前的引用检查：7 张表全覆盖（去重之后"没有别处在用"才敢删）
+│   ├── LegacyUploadMigrator        # 【一次性】把存量 UUID 命名的文件迁移成哈希命名并改写引用
 │   ├── UploadType                  # 上传种类（image / audio / attachment，规则互不放宽）
 │   ├── FileStorage                 # 存储接口（存 / 删 / 统计占用；将来换对象存储时上传逻辑不用改）
 │   ├── LocalFileStorage            # 本地磁盘（唯一实现，见「文件上传」章节）
@@ -821,7 +823,7 @@ mybatis-plus.configuration.log-impl=org.apache.ibatis.logging.nologging.NoLoggin
 | `SERVER_PORT` | ⬜ | 默认 `8082` |
 | `UPLOAD_LOCAL_DIR` | ⬜ | 上传目录，compose 里已设成 `/app/uploads`（必须是挂载点路径） |
 | `UPLOAD_BASE_URL` | ⬜ | 图片对外地址前缀；compose 里复用 `PUBLIC_API_BASE`，保证与浏览器看到的地址一致 |
-| `UPLOAD_KEY_PREFIX` | ⬜ | 存储路径前缀，默认 `cover`（形如 `cover/2026/09/{uuid}.png`） |
+| `UPLOAD_KEY_PREFIX` | ⬜ | 存储路径前缀，默认 `cover`（形如 `cover/2f/{64 位内容哈希}.png`） |
 | `LOG_DIR` | ⬜ | 应用日志目录，compose 里已设成 `/app/logs`（必须是挂载点路径，否则"保留 15 天"是空话） |
 
 #### 跨域白名单（**上线必改这一项**）
@@ -957,7 +959,7 @@ spring.servlet.multipart.max-request-size=110MB
 |---|---|---|---|
 | 扩展名 | `jpg` `jpeg` `png` `gif` `webp` | `mp3` | `pdf` `zip` `7z` `rar` `doc` `docx` `xls` `xlsx` `ppt` `pptx` `txt` `md` `csv` `json` `mp3` `mp4`（共 16 项） |
 | 单文件上限 | **10MB** | 20MB | **100MB** |
-| 存储目录 | `uploads/cover/yyyy/MM/` | `uploads/music/yyyy/MM/` | `uploads/attachment/yyyy/MM/` |
+| 存储目录 | `uploads/cover/{哈希前两位}/` | `uploads/music/{哈希前两位}/` | `uploads/attachment/{哈希前两位}/` |
 | 访问行为 | 内联展示（前台卡片直接渲染） | 内联播放（`<audio>`） | **强制下载**（`Content-Disposition: attachment`） |
 | 返回 | `{"url", "name", "size"}`（**三者结构完全一样**） | 同左 | 同左 |
 
@@ -1071,31 +1073,75 @@ MySQL 写不进 redo/binlog、Redis 的 AOF 写不进去、应用日志也写不
 图片的完整地址形如：
 
 ```
-{UPLOAD_BASE_URL}/uploads/cover/2026/09/{uuid}.png
-                      └─ 按年月分目录 ─┘  └ UUID 重命名 ┘
+{UPLOAD_BASE_URL}/uploads/cover/2f/{64 位内容哈希}.png
+                      └ 类型 ┘ └哈希前两位分目录┘ └ 文件名=文件内容的 SHA-256 ┘
 ```
 
 音频同理，只是目录换成了 `music`：
 
 ```
-{UPLOAD_BASE_URL}/uploads/music/2026/09/{uuid}.mp3   ← 直接塞进 <audio src>
+{UPLOAD_BASE_URL}/uploads/music/ab/{64 位内容哈希}.mp3   ← 直接塞进 <audio src>
 ```
 
 附件再到 `attachment`：
 
 ```
-{UPLOAD_BASE_URL}/uploads/attachment/2026/09/{uuid}.pdf   ← 点它一定【下载】，不会就地打开
+{UPLOAD_BASE_URL}/uploads/attachment/c7/{64 位内容哈希}.pdf   ← 点它一定【下载】，不会就地打开
 ```
 
-- **按年月分目录**：单目录里堆几万个文件，`ls`/备份/排查都会变得很难受
-- **UUID 重命名**：用原名会撞名、还会把用户的文件名暴露在 URL 里 ——
-  音频这一点更明显（"周杰伦 - 夜曲 (Live).mp3" 这种名字直接进 URL 只会给编码找麻烦）；
-  附件同理（"毕业论文（终稿）.pdf" 这种名字会让 URL 编码很难受），
-  而**附件在页面上的显示名**来自数据库（`article_attachment.name`）——
-  用户看到的仍然是原始文件名，URL 里那个 UUID 他永远看不到
+- **文件名 = 文件内容的 SHA-256（内容寻址，2026-09 起）**：
+  同样的字节必然会算出同样的路径，所以**同一张图传两次只会在磁盘上存一份**，
+  第二次上传直接命中已有文件、一个字节都不写（见 `UploadService` 的 `buildObjectKey`）。
+  改造前每次上传都生成一个新 UUID，同一张图传两次就是两份逐字节相同的文件 ——
+  换一次封面留一张废图、同一张配图放进两篇文章又是两份，磁盘只涨不落。
+  - **为什么用哈希而不是 UUID**：UUID 只保证"不撞名"，哈希额外保证了"同内容同名字"，
+    去重就是靠这条性质成立的
+  - **URL 里仍然看不到用户的文件名**：哈希与文件名无关，
+    而附件在页面上的显示名来自数据库（`article_attachment.name`）——
+    用户看到的仍是"毕业论文（终稿）.pdf"，URL 里那串哈希他永远看不到
+  - **代价**：失去了"按上传时间清理旧文件"的能力（时间与内容寻址互相矛盾 ——
+    同一张图这个月传和下个月传必须落到同一个 key）。这个能力从来没有被用过
+    （项目里没有任何按时间清理的任务），而"同一份内容只占一份空间"每天都在生效
+- **按哈希前两位分一层目录**：单目录里堆几万个文件，`ls`/备份/排查都会变得很难受。
+  两位十六进制 = 256 个目录，几万文件量级下平均每目录一两百个
 - **三类分开目录**：图片是"文章封面"、音频是"曲目文件"、附件是"可下载的资料"，
   量与生命周期都不同，备份 / 清理 / 排查（"这个 mp3 是谁传的"）时按目录一眼分得开；
-  ⚠️ 而且**目录还是"要不要强制下载"的判断依据**（见上面那两道防线）
+  ⚠️ 而且**目录还是"要不要强制下载"的判断依据**（见上面那两道防线）。
+  也正因为如此，**去重的范围是"同一个 type 之内"**：同一段字节当图片传、又当附件传，
+  会各存一份 —— 它们必须落在不同目录下，否则附件会被浏览器就地打开、音频则播不出来
+- **⚠️ 去重带来的连带责任：删文件前必须确认"真的没人再用它了"**
+  改造前每处引用各有各的副本，删错也只影响自己；改造后多位站长共用同一份文件，
+  少查一张表就会把别人正在用的图删掉，而且**不可逆**。
+  所以引用检查覆盖了全部 7 张可能存上传地址的表（文章正文/封面/摘要、附件、
+  音乐音源与封面、关于页、友链、项目、收藏），统一收在
+  `UploadReferenceChecker` 里 —— 加新表时去那里加一行
+
+#### 存量文件的迁移（一次性，做完就删）
+
+内容寻址只对**新上传**的文件生效。磁盘上原来那些 UUID 命名的旧文件
+（以及同一张图各存一份的老副本）需要跑一次迁移，工具是
+`LegacyUploadMigrator`，入口是管理员接口：
+
+```bash
+# 1) 先预演：只报告会发生什么，不动磁盘也不动数据库
+curl -X POST "$API/upload/migrate-legacy?dryRun=true" -H "Authorization: Bearer $TOKEN"
+# → {"legacyFiles":37,"copied":0,"updatedRows":0,"mergedDuplicates":5,"unreferenced":3,...}
+
+# 2) 确认清单符合预期后实跑（⚠️ 挑没有人在后台编辑的时候）
+curl -X POST "$API/upload/migrate-legacy" -H "Authorization: Bearer $TOKEN"
+```
+
+它做三件事，顺序是**刻意**的（先复制成哈希名 → 再改写库里所有引用 → 最后删旧文件）：
+任何一步之间中断，都不会出现"库指向一个不存在的文件"，最坏只是多一份没人引用的副本。
+重复执行安全（幂等）。末尾还会推进两个缓存版本号，
+否则前台最长 5 分钟内仍在用旧地址、而旧文件已经被删了。
+
+报告里的 `unreferenced` 是个体检指标：那些是"从来没有任何页面引用过"的历史孤儿文件
+（上传了但没保存留下的），迁移会一并把它们改成哈希名，内容不丢。
+
+> **做完之后建议把这套东西删掉**：`LegacyUploadMigrator`、`UploadController` 里那个接口、
+> 以及 `LegacyUploadMigratorTest`。判断标准很简单 —— 再跑一次 `dryRun=true`，
+> 报告里 `legacyFiles` 是 0 就说明没有存量了。留着的话，下一个人会以为它是需要维护的能力。
 
 > ⚠️ **部署时最容易踩的一个坑：上传目录必须挂到卷上**
 >
@@ -2742,8 +2788,10 @@ server {
         #   那是给"接口响应"用的（接口数据确实不该被缓存），
         #   但对图片是灾难：浏览器每次都要重新下整张图。
         #   proxy_hide_header 把上游那个头藏掉，再用 add_header 换成长期缓存。
-        #   敢给 30 天是因为图片文件名是 UUID：内容永不改变，
-        #   换了图就是换了 URL，不存在"缓存了旧图"的问题。
+        #   敢给 30 天是因为文件名就是【内容哈希】：URL 与内容一一对应，
+        #   内容变了 URL 必然变，不存在"缓存了旧图"的问题。
+        #   （这条在改造前后都成立：UUID 命名时是"换了图就是换了 URL"，
+        #     内容寻址之后更是——哈希相同就是同一份内容，一个字节都不差。）
         proxy_hide_header Cache-Control;
         expires 30d;
         add_header Cache-Control "public, max-age=2592000, immutable";
@@ -3140,7 +3188,9 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleDetailCacheTest` | 11 | 详情缓存：走缓存、**浏览量不被冻住**、写操作后立刻更新、下架即 404、自愈重建、**12 线程并发只查库 1 次（防击穿）**、TTL 有效 |
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
-| `UploadAdminTest` | 23 | 上传的**图片与音频两套规则**：图片（类型/大小白名单、UUID 重命名、非管理员 403、**能被匿名 GET 到，且 `HEAD` 也要放行** —— ㉓ 带反向断言"`HEAD /user/page` 仍是 401"）；音频（`type=audio` 传 mp3 成功且**文件真的落盘、返回的 url 能匿名取到**、音频接口拒 png、默认接口拒 mp3、**大小上限按 type 分流**、超音频上限被拒、未知 type 被拒、音频同样只有管理员能传、`type` 大小写与空格容错、两个前缀各自取自配置）；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
+| `UploadAdminTest` | 23 | 上传的**图片与音频两套规则**：图片（类型/大小白名单、文件名换成内容哈希（不含原始中文名）、非管理员 403、**能被匿名 GET 到，且 `HEAD` 也要放行** —— ㉓ 带反向断言"`HEAD /user/page` 仍是 401"）；音频（`type=audio` 传 mp3 成功且**文件真的落盘、返回的 url 能匿名取到**、音频接口拒 png、默认接口拒 mp3、**大小上限按 type 分流**、超音频上限被拒、未知 type 被拒、音频同样只有管理员能传、`type` 大小写与空格容错、两个前缀各自取自配置）；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
+| `LegacyUploadMigratorTest` | 6 | **一次性迁移工具**（存量文件改成哈希命名 + 改写库里的引用）：dryRun 不动任何东西、实跑后旧文件消失且内容逐字节不变、cover 与正文（绝对/相对两种形态）的引用都被改写、新地址真的取得到而旧地址 404、**幂等**（跑第二遍什么都不做）、内容相同的两个旧文件合并成一个、无引用的孤儿文件也被改名、已经是哈希命名的文件会被跳过 |
+| `ArticleAttachmentTest` ⑯⑰⑱⑲ | 4 | **内容寻址**：同一张图传两次只落一个文件且两次拿到同一个 URL（命中时仍返回本次的原始 name/size）、去重**不跨 type**（同字节当音频与当附件是两个文件）、**编辑文章换封面会把没人再用的旧封面删掉**、编辑时从正文删掉的图会被清理（仍被另一篇引用则保留） |
 | `ArticleAttachmentTest` | 18 | 文章附件：**上传**（16 种白名单、返回 `{url,name,size}`、名字清洗与截断、超单文件上限被拒且不落盘、**html/htm/svg/xml/js/mjs/css 逐个被拒 + 白名单本身也不许出现它们**）、**数字钉死**（读 `application.properties` 原文核对 10MB / 100MB / 5GB / multipart 105MB）、**总容量护栏**（调成 6KB：压满后再传 1 字节也被拒，且提示里带"已用"）、**三套规则互不放宽**（图片/音频都拒 pdf、未知 type 报错）、**保存**（随表单落库、详情带 attachments、空数组 = 清空）、**整体替换**（旧行消失、新行出现、**被移除的文件真的被删**）、**校验**（数量 20 / 名字 100 字 / size 上限 / url 必须是本站地址，且**校验先于写入**：失败时原附件分毫未动）、**级联删除**（删文章 → 附件行 + 附件文件 + 封面 + 正文图全清；文章行仍是逻辑删除）、**★ 共用的图不误删**（两篇共用正文图与封面，删一篇后共用的留着、独占的删掉、另一篇仍打不开得开）、**共用附件同理**、**下载头**（附件强制 `Content-Disposition: attachment` + `nosniff`；图片与音频仍内联，附件目录里的 mp3 也强制下载） |
 | `AbstractIntegrationTest` | 0 | **基类（没有用例，占一行是为了让"行数 = 测试类文件数"这条能对账）**：singleton 容器模式起 MySQL/Redis、`@DynamicPropertySource` 注入连接、每个用例前重置限流器、`@Transactional` 自动回滚 |
 | `LogoutTokenTest` | 11 | 登出后旧 token 立即失效（jti 黑名单）、未登出的不受影响 |

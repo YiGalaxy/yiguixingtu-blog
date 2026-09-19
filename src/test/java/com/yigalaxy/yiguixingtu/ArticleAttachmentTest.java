@@ -37,6 +37,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
@@ -111,6 +112,18 @@ class ArticleAttachmentTest extends AbstractIntegrationTest {
             0, 0, 0, 0x0D, 'I', 'H', 'D', 'R',
             0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, (byte) 0xC4, (byte) 0x89
     };
+
+    /**
+     * 与 {@link #TINY_PNG} 只差一个字节的"另一张图"。
+     *
+     * 【为什么需要它（2026-09 加）】上传改成内容寻址之后（同一份内容只存一份文件，
+     *   见 UploadService.buildObjectKey），**用同一个 TINY_PNG 传两次得到的是同一个
+     *   文件、同一个 URL**。所以用例里凡是需要"两个互不相干的文件"的地方
+     *   （典型是"删掉 A 不能影响 B"），都必须让字节真的不同 ——
+     *   否则两条断言其实是在说同一件事，测不出任何东西。
+     *   这里只改最后一个字节：内容不同 → 哈希不同 → 两个文件。
+     */
+    private static final byte[] TINY_PNG_ALT = altOf(TINY_PNG);
 
     /** 一个最小的合法 mp3（ID3v2 头 + 一帧静音）—— 用来验证"附件目录里的 mp3 也强制下载" */
     private static final byte[] TINY_MP3 = new byte[]{
@@ -325,8 +338,15 @@ class ArticleAttachmentTest extends AbstractIntegrationTest {
     void totalCapacityGuard_shouldRejectWhenFull() throws Exception {
         // 上限 6KB（@TestPropertySource）。两个 3KB 正好压满：
         // 第二个是【边界】：3KB + 3KB == 6KB，等于上限应当放行（规则是"不能超过"）
-        upload("attachment", "a.pdf", "application/pdf", new byte[3 * 1024]);
-        upload("attachment", "b.pdf", "application/pdf", new byte[3 * 1024]);
+        //
+        // ⚠️ 【两个文件的字节必须不同（2026-09 改）】
+        //    原来两个都是 new byte[3 * 1024]（全零，内容一模一样）。上传改成
+        //    内容寻址去重之后，第二次上传会命中第一次那个文件、不落盘 ——
+        //    目录里只有 3KB，这条路就走不到容量边界上了。
+        //    这里用 A / B 两种填充让它们真的是两个文件（去重是按内容算的，
+        //    这也正是"该怎么造两个文件"的正确姿势）。
+        upload("attachment", "a.pdf", "application/pdf", filled(3 * 1024, 'A'));
+        upload("attachment", "b.pdf", "application/pdf", filled(3 * 1024, 'B'));
         assertEquals(2, countFiles(), "前置条件：两个附件都已经落盘");
 
         // 第三个：只要 1 个字节就会超过上限 —— 必须被拒
@@ -517,9 +537,11 @@ class ArticleAttachmentTest extends AbstractIntegrationTest {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     @DisplayName("⑫ 删文章 → 附件行、附件文件、封面图、正文引用的图【全都清掉】；文章行仍是逻辑删除")
     void deleteArticle_shouldCascadeToFiles() throws Exception {
-        Uploaded attachment = upload("attachment", "doc.pdf", "application/pdf", new byte[128]);
+        Uploaded attachment = upload("attachment", "doc.pdf", "application/pdf", filled(128, 'D'));
+        // 封面与正文图用【不同字节】的两张图：同字节的话去重后它们是同一个文件，
+        // "两个文件都被删掉"这条断言就退化成只说了一件事（见 TINY_PNG_ALT 的注释）
         Uploaded cover = upload(null, "cover.png", "image/png", TINY_PNG);
-        Uploaded contentImage = upload(null, "inline.png", "image/png", TINY_PNG);
+        Uploaded contentImage = upload(null, "inline.png", "image/png", TINY_PNG_ALT);
 
         String content = "正文 ![配图](" + contentImage.url() + ") 结束";
         long articleId = createArticle(title("级联删除"), content, cover.url(), attachmentArrayJson(attachment));
@@ -544,36 +566,40 @@ class ArticleAttachmentTest extends AbstractIntegrationTest {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     @DisplayName("⑬ ★★★ 共用的图不会被误删：两篇文章引用同一张图/同一个封面，删一篇之后另一篇完好")
     void sharedImages_shouldNotBeDeleted() throws Exception {
-        // 三张图 + 一个附件，覆盖三种引用关系：
-        //   shared     —— 两篇文章的正文都引用它（必须保留）
-        //   sharedCover—— 两篇文章都拿它当封面（必须保留）
-        //   exclusive  —— 只有被删的那一篇用（必须删掉）
+        // 【2026-09 重写】改造前这里靠"两次上传同一个 TINY_PNG"造出两张字节相同、
+        // 名字不同的文件，来模拟"两篇文章各有一份副本"。内容寻址之后那种情况
+        // 不复存在了 —— 同一份内容只会有一个文件、一个 URL。
+        // 所以"共用"现在要直接用【同一个 URL 被多处引用】来表达，
+        // 而且这也正是现在的常态：站长把同一张图既当封面又插进正文、
+        // 或者把地址复制到另一篇文章，都会落到同一个文件上。
+        //
+        // 两个文件覆盖两种关系：
+        //   shared    —— A 的正文、A 的封面、B 的正文都引用它（必须保留）
+        //   exclusive —— 只有 A 用（必须删掉）
         Uploaded shared = upload(null, "shared.png", "image/png", TINY_PNG);
-        Uploaded sharedCover = upload(null, "shared-cover.png", "image/png", TINY_PNG);
-        Uploaded exclusive = upload(null, "exclusive.png", "image/png", TINY_PNG);
+        Uploaded exclusive = upload(null, "exclusive.png", "image/png", TINY_PNG_ALT);
 
-        // A：正文引用 shared 与 exclusive，封面用 sharedCover
+        // A：正文引用两张图，封面又用了 shared（同一篇之内跨字段共用）
         long articleA = createArticle(title("共用图-A"),
                 "A 的正文 ![共用](" + shared.url() + ") ![独占](" + exclusive.url() + ")",
-                sharedCover.url(), null);
+                shared.url(), null);
 
-        // B：正文也引用 shared，封面也是 sharedCover，另外带一个自己的附件
-        Uploaded bAttachment = upload("attachment", "b-only.pdf", "application/pdf", new byte[64]);
+        // B：正文也引用 shared，封面也是 shared，另外带一个自己的附件
+        Uploaded bAttachment = upload("attachment", "b-only.pdf", "application/pdf", filled(64, 'B'));
         long articleB = createArticle(title("共用图-B"),
                 "B 的正文 ![共用](" + shared.url() + ")",
-                sharedCover.url(), attachmentArrayJson(bAttachment));
+                shared.url(), attachmentArrayJson(bAttachment));
 
         deleteArticle(articleA);
 
-        // 【核心断言】共用的两张图必须还在 —— 无脑删会把 B 的文章页删成裂图
+        // 【核心断言】共用的那张图必须还在 —— 无脑删会把 B 的文章页删成裂图
         assertTrue(Files.exists(fileOf(shared.url())),
-                "★ 被两篇文章正文共用的图【必须保留】（否则 B 的正文就裂了，而且文件删了就回不来）");
-        assertTrue(Files.exists(fileOf(sharedCover.url())),
-                "★ 被两篇文章当封面的图【必须保留】");
+                "★ 被两篇文章（且同时是 A 的封面）共用的图【必须保留】"
+                        + "（否则 B 的正文与封面就都裂了，而且文件删了就回不来）");
 
         // 【反向断言】A 独占的那张图必须真的被删掉。
         // 少了这一条，本用例会变成"永远为真"：一个【根本不删任何文件】的实现
-        // 也能让上面两条断言全绿 —— 那就测不出任何东西了
+        // 也能让上面那条断言全绿 —— 那就测不出任何东西了
         assertFalse(Files.exists(fileOf(exclusive.url())),
                 "只被 A 用的图应当被删掉（说明清理逻辑确实在干活，不是在偷懒）");
 
@@ -581,13 +607,13 @@ class ArticleAttachmentTest extends AbstractIntegrationTest {
         assertTrue(Files.exists(fileOf(bAttachment.url())), "B 的附件与 A 无关，必须留着");
         assertEquals(1, attachmentRows(articleB).size(), "B 的附件行也不能被清掉");
 
-        // 【端到端】B 的文章页仍然打得开，而且正文与封面都还指着那两张图
+        // 【端到端】B 的文章页仍然打得开，而且正文与封面都还指着那张共用的图
         String body = mockMvc.perform(get("/article/" + articleB))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.attachments.length()").value(1))
                 .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
         assertTrue(body.contains(shared.url()), "B 的正文里仍然引用着那张共用的图，实际=" + body);
-        assertTrue(body.contains(sharedCover.url()), "B 的封面仍然是那张共用的图");
+        assertTrue(body.contains(shared.url()), "B 的封面仍然是那张共用的图");
     }
 
     @Test
@@ -657,11 +683,125 @@ class ArticleAttachmentTest extends AbstractIntegrationTest {
     }
 
     // ================================================================
+    //  八、内容寻址去重（2026-09 新增：同一份内容只存一份）
+    // ================================================================
+
+    @Test
+    @DisplayName("⑯ ★ 同一张图传两次：只落一个文件、两次拿到同一个 URL，且 name/size 仍是各自的原始值")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void duplicateUpload_shouldReuseSameFile() throws Exception {
+        Uploaded first = upload(null, "first.png", "image/png", TINY_PNG);
+        int filesAfterFirst = (int) countFiles();
+
+        // 第二次换个文件名、内容一模一样 —— 这正是"同一张图又传了一遍"
+        Uploaded second = upload(null, "second.png", "image/png", TINY_PNG);
+
+        assertEquals(first.url(), second.url(),
+                "★ 同一份内容必须复用同一个地址（改造前这里会是两个不同的 UUID 地址、两份文件）");
+        assertEquals(filesAfterFirst, countFiles(),
+                "★ 第二次上传不该新增文件 —— 磁盘上只该有一份");
+
+        // 【响应契约】命中已有文件时，返回的 name / size 仍必须是【本次上传的原始名与大小】。
+        // 前端优先用后端回的 name 展示附件清单（见 web 端 useUpload.ts），
+        // 回落成哈希文件名的话用户根本认不出那是哪个文件
+        assertEquals("second.png", second.name(), "命中时也要回本次的原始文件名");
+        assertEquals(TINY_PNG.length, second.size(), "命中时也要回本次的文件大小");
+    }
+
+    @Test
+    @DisplayName("⑰ 去重【不跨 type】：同样的字节当音频传与当附件传是两个文件（下载响应头按目录前缀判定）")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void dedup_shouldNotCrossTypes() throws Exception {
+        Uploaded asAudio = upload("audio", "song.mp3", "audio/mpeg", TINY_MP3);
+        Uploaded asAttachment = upload("attachment", "talk.mp3", "audio/mpeg", TINY_MP3);
+
+        assertNotEquals(asAudio.url(), asAttachment.url(),
+                "★ 同一份字节在不同 type 下必须是两个地址：attachment/ 前缀会被强制下载"
+                        + "（Content-Disposition: attachment），音频若复用了它就播不出来");
+        assertEquals(2, countFiles(), "磁盘上应当有两份（各在一个前缀目录下）");
+        assertTrue(asAudio.url().contains("/uploads/music/"), "音频落在 music 下，实际=" + asAudio.url());
+        assertTrue(asAttachment.url().contains("/uploads/attachment/"), "附件落在 attachment 下，实际=" + asAttachment.url());
+    }
+
+    // ================================================================
+    //  九、编辑文章时的旧图清理（2026-09 新增）
+    // ================================================================
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    @DisplayName("⑱ ★ 编辑文章换封面：没人再用的旧封面从磁盘删掉（改造前它会永久留在 uploads 里）")
+    void updateArticle_shouldDeleteOldCover() throws Exception {
+        Uploaded oldCover = upload(null, "old.png", "image/png", TINY_PNG);
+        Uploaded newCover = upload(null, "new.png", "image/png", TINY_PNG_ALT);
+
+        long id = createArticle(title("换封面"), "正文", oldCover.url(), null);
+        assertTrue(Files.exists(fileOf(oldCover.url())), "前置条件：旧封面已经落盘");
+
+        updateArticle(id, title("换封面"), "正文", newCover.url(), "[]");
+
+        assertFalse(Files.exists(fileOf(oldCover.url())),
+                "★ 被换掉的旧封面已经没人引用，必须从磁盘删掉（否则 uploads 只涨不落，"
+                        + "最后撞上总容量护栏，而提示只会说「上传空间不足」）");
+        assertTrue(Files.exists(fileOf(newCover.url())), "新封面必须留着");
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    @DisplayName("⑲ ★ 编辑文章从正文删图：没人再用的删掉；仍被另一篇文章引用的必须保留")
+    void updateArticle_shouldCleanDroppedContentImages() throws Exception {
+        Uploaded onlyMine = upload(null, "mine.png", "image/png", TINY_PNG);
+        Uploaded alsoOthers = upload(null, "ours.png", "image/png", TINY_PNG_ALT);
+
+        // B 先建好：它的正文引用了 alsoOthers，所以那个文件"还有人用"
+        long articleB = createArticle(title("清理-B"),
+                "B 的正文 ![共用](" + alsoOthers.url() + ")", null, null);
+
+        long articleA = createArticle(title("清理-A"),
+                "A 的正文 ![独占](" + onlyMine.url() + ") ![共用](" + alsoOthers.url() + ")",
+                null, null);
+
+        // A 把两张图都从正文里删掉
+        updateArticle(articleA, title("清理-A"), "A 的正文（图都删了）", null, "[]");
+
+        assertFalse(Files.exists(fileOf(onlyMine.url())),
+                "★ 只被 A 用过的图，A 从正文里删掉之后应当从磁盘清理");
+        assertTrue(Files.exists(fileOf(alsoOthers.url())),
+                "★ 仍被 B 的正文引用的图【绝不能删】（删了 B 就裂图，而且不可逆）");
+
+        // 反向验证一下 B 那边确实还引用着（免得上面那条断言是因为 B 压根没建成功才通过的）
+        assertEquals(1, (int) jdbc.queryForObject(
+                "SELECT COUNT(*) FROM article WHERE id = ? AND content LIKE ?",
+                Integer.class, articleB, "%" + alsoOthers.url().substring(alsoOthers.url().indexOf("/uploads/")) + "%"),
+                "前置条件：B 的正文里确实写着这个文件的地址");
+    }
+
+    // ================================================================
     //  工具方法
     // ================================================================
 
     /** 上传结果（与 UploadResult 同形），供测试里拼 JSON 用 */
     private record Uploaded(String url, String name, long size) {
+    }
+
+    /**
+     * 造一段"填满同一个字节"的内容。
+     *
+     * 【什么时候需要它】内容寻址之后，两个文件能不能共存完全取决于字节是否相同 ——
+     *   {@code new byte[n]}（全零）与另一个 {@code new byte[n]} 是【同一份内容】，
+     *   上传两次只会得到一个文件。要造两个真的不同的文件，就得让内容不一样。
+     *   用它比每次手写 Arrays.fill 更不容易看漏"这两个其实是同一份"。
+     */
+    private static byte[] filled(int size, char fill) {
+        byte[] content = new byte[size];
+        Arrays.fill(content, (byte) fill);
+        return content;
+    }
+
+    /** 复制一份内容并改掉最后一个字节（造"另一张图"，理由见 TINY_PNG_ALT 的注释） */
+    private static byte[] altOf(byte[] source) {
+        byte[] copy = Arrays.copyOf(source, source.length + 1);
+        copy[source.length] = 0x42;
+        return copy;
     }
 
     /** 上传一个文件并断言成功，返回 url/name/size（type 传 null 表示"不传 type"，即图片规则） */

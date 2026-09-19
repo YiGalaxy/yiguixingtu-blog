@@ -108,6 +108,12 @@ public interface ArticleMapper extends BaseMapper<Article> {
      *   个人博客的文章数是几百到几千 —— 见 README「为什么没有给 title 建索引」
      *   里同一条"前置通配符用不上索引"的说明。
      *
+     * 【2026-09 补上了 summary 列】原来只查 cover 与 content。
+     *   summary 是"摘要留空时自动从正文截一段"生成的（见 buildSummary），
+     *   于是正文开头的 {@code ![](/uploads/cover/…) } 会原样落进摘要列 ——
+     *   它同样是"这篇文章在用这个文件"的证据。加它几乎不花钱：
+     *   同一张表、同一行、同一次扫描，只是多一个 LOCATE。
+     *
      * @param articleId 当前正在处理的文章 id（它自己不算"别人"）
      * @param key       上传目录里的对象 key（不含 base-url 与 /uploads/ 前缀）
      * @return 还有几篇文章在用这个文件（0 表示可以安全删除）
@@ -117,7 +123,9 @@ public interface ArticleMapper extends BaseMapper<Article> {
             FROM article
             WHERE deleted = 0
               AND id <> #{articleId}
-              AND (LOCATE(#{key}, cover) > 0 OR LOCATE(#{key}, content) > 0)
+              AND (LOCATE(#{key}, cover) > 0
+                   OR LOCATE(#{key}, content) > 0
+                   OR LOCATE(#{key}, summary) > 0)
             """)
     long countOthersReferencing(@Param("articleId") Long articleId, @Param("key") String key);
 
@@ -145,7 +153,9 @@ public interface ArticleMapper extends BaseMapper<Article> {
             SELECT COUNT(*)
             FROM article
             WHERE deleted = 0
-              AND (LOCATE(#{key}, cover) > 0 OR LOCATE(#{key}, content) > 0)
+              AND (LOCATE(#{key}, cover) > 0
+                   OR LOCATE(#{key}, content) > 0
+                   OR LOCATE(#{key}, summary) > 0)
             """)
     long countReferencing(@Param("key") String key);
 }

@@ -31,6 +31,20 @@ public class AdminCommentVO {
     @Schema(description = "评论者昵称")
     private String nickname;
 
+    /**
+     * 评论者的注册账号 id；**游客为 null**。
+     *
+     * 【后台为什么需要它】昵称是一个谁都能填的字符串 —— 光看昵称，
+     * 管理员分不出"这是注册用户发的"还是"游客随手填了个一样的名字"
+     * （也就是说任何人都能冒用站长的昵称发评论）。
+     * 这一列才是判断依据：不为 null 就说明它来自一个真实账号，可以照着 id 去用户管理里查。
+     *
+     * 【为什么只在后台 VO 里】公开接口的 CommentVO 里没有它（也不该有：
+     * 前台展示一条评论不需要、也不应该暴露它是哪个账号发的）。
+     */
+    @Schema(description = "评论者的注册账号 id（游客为 null）")
+    private Long userId;
+
     @Schema(description = "邮箱")
     private String email;
 

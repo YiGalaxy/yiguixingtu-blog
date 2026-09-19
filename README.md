@@ -520,7 +520,9 @@ src/main/resources
     ├── V12__create_site_setting_table.sql # site_setting（站点设置；同样只有一行，种子值等于前端原本写死的值）
     ├── V13__add_police_number_to_site_setting.sql # site_setting 加公安网安备案号列（**刻意不写种子值**，见脚本内说明）
     ├── V14__create_article_attachment_table.sql # article_attachment（文章附件；**物理删除、不做逻辑删除**，为什么不在上传时插行见脚本内说明）
-    └── V15__add_notice_text_to_site_setting.sql # 给 site_setting 加首页滚动文字（跑马灯）那一列
+    ├── V15__add_notice_text_to_site_setting.sql # 给 site_setting 加首页滚动文字（跑马灯）那一列
+    ├── V16__add_user_id_to_comment.sql        # 给 comment 加 user_id（这条评论是哪个注册账号发的）
+    └── V17__create_visit_log_table.sql        # visit_log（访问日志；**存 IP，保留 90 天后自动清理**）
 
 src/test/java/com/yigalaxy/yiguixingtu
 ├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
@@ -1175,6 +1177,37 @@ curl -X POST "$API/upload/migrate-legacy" -H "Authorization: Bearer $TOKEN"
 > 个人博客量级下几百到几千个。真到了要分页的规模，正确的改法是把索引落成一张表，
 > 而不是给接口加 `page` 参数（那样每翻一页都要重建一次索引）。
 
+#### 访问统计（后台「概览」）
+
+「概览」页有三块图：**按天的 PV/UV 曲线**（可切 7/30/90 天）、
+**三张构成饼图**（访客身份 / 来源 / 设备）、**两张排行榜**（最热页面 / 最热文章）。
+
+**数据怎么来的**：前端每次路由变化上报一次 `POST /visit`（只报路径），
+服务端补全 IP、来源、设备、登录身份后落库。之所以要前端报，是因为这是个 SPA ——
+站内点链接**根本不经过后端**，后端从自己的请求日志里看不出用户翻了几个页面。
+
+| 统计口径 | 怎么算的 | 为什么要这样 |
+|---|---|---|
+| PV | 记录条数 | —— |
+| **UV** | 按 IP 去重 | PV 会骗人（自己刷新十次就是十个），"多少个不同的人"才是真想知道的 |
+| 新访客 | 该 IP 的**首次**出现落在区间内 | 老读者回访和新读者到访是完全不同的信号 |
+| 来源 | Referer 的主机与本次请求的 Host 比对 | 站内跳转不算新读者，得单独看 |
+| 设备 | UA 里有没有 Mobile/Android/iPhone 等关键词 | 只分两档，够回答"手机上看着方不方便" |
+
+> ⚠️ **这张表存访客 IP（个人信息），所以保留期不是可选项**
+>
+> 默认 **90 天**（`app.visit.retention-days`），`VisitLogCleanupTask` 每天凌晨 4 点
+> 删掉过期的记录。**没有它，这张表就是一个无限增长的永久访客档案。**
+>
+> 保留期必须 **≥ 报表能查的最长跨度**（接口把 `days` 夹在 [1, 90]）——
+> 短了会看到曲线在某个日期之后突然断掉，而原因是数据被自己删了。
+>
+> 另外两条：页面路径**洗掉查询串**再入库（查询串里往往是用户的搜索词），
+> 来源只存**主机名**不存完整地址（地址上可能挂着别人的查询参数）。
+
+> **为什么没存 User-Agent 原文**：只留从它推导出的设备档位。原始 UA 串很长、
+> 隐私颗粒度更细（能指纹到具体机型与版本），而这个站要回答的只是"手机还是电脑"。
+
 > ⚠️ **部署时最容易踩的一个坑：上传目录必须挂到卷上**
 >
 > 容器里的文件系统是**临时的**：容器一重建（改配置、升级版本、
@@ -1383,8 +1416,10 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 60 | PUT | `/admin/setting` | 保存站点设置（**单条更新，没有新建/删除**；`pageSize` 上限跟文章接口同为 50） | 是（ADMIN） |
 | 61 | GET | `/admin/upload/storage` | **存储管理**：磁盘上的全部文件（大小 / 类型 / 时间）+ 每个文件**被哪些地方引用**（文章 / 附件 / 音乐 / 关于页 / 友链 / 项目 / 收藏） | 是（ADMIN） |
 | 62 | POST | `/admin/upload/delete-files` | **删除上传文件**：请求体 `{"keys": [...]}`。**只会删掉此刻确实没人引用的那些** —— 被引用的会原样保留并列在报告的 `skippedReferenced` 里 | 是（ADMIN） |
+| 63 | POST | `/visit` | **访问上报**（匿名，前端每次路由变化报一次）。服务端补全 IP / 来源 / 设备 / 身份，**永不打扰用户**（运行期失败一律吞掉） | 否 |
+| 64 | GET | `/admin/stats/visits` | **访问统计**：按天 PV/UV 曲线 + 访客身份 / 来源 / 设备构成 + 最热页面与文章。`days` 默认 30，超出会被夹到 [1, 90] | 是（ADMIN） |
 
-**共 62 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
+**共 64 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
 用本地磁盘存储时，上传的图片、音频与附件都通过 `GET /uploads/**`（以及 `HEAD /uploads/**`，
 见下面「为什么 HEAD 也要放行」）公开读取（无需登录）——
 图片在 `uploads/cover/`，音频在 `uploads/music/`，附件在 `uploads/attachment/`，
@@ -1406,12 +1441,12 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 三种访问身份：**游客**（不带 token）、**普通用户**（GUEST + 合法 token）、**管理员**（ADMIN + 合法 token）。
 
-> **这张表应当覆盖上面全部 62 个接口**，账是这么对的：**18 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
-> `GET /article/page` `stats` `archive` `rss` `{id}`、`GET /category/list` `tag/list` `comment/list` `link/list` `project/list` `favorite/list` `music/list` `about` `setting`、`POST /comment`）
-> **+ 1 个只需登录**（`GET /auth/me`）**+ 43 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
+> **这张表应当覆盖上面全部 64 个接口**，账是这么对的：**19 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
+> `GET /article/page` `stats` `archive` `rss` `{id}`、`GET /category/list` `tag/list` `comment/list` `link/list` `project/list` `favorite/list` `music/list` `about` `setting`、`POST /comment` `POST /visit`）
+> **+ 1 个只需登录**（`GET /auth/me`）**+ 44 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
 > `/admin/tag/**` 4 + `/admin/comment/**` 3 + `/admin/category/**` 4 + `/admin/link/**` 4 +
 > `/admin/project/**` 4 + `/admin/favorite/**` 4 + `/admin/music/**` 4 + `/admin/about` 1 +
-> `/admin/setting` 1 + `POST /upload` 1 + `/admin/upload/**` 2）= 62。
+> `/admin/setting` 1 + `POST /upload` 1 + `/admin/upload/**` 2 + `/admin/stats/visits` 1）= 64。
 > 以后加接口时这两处要一起改 —— 少一行不会有任何报错，只会让人在这张表里找不到那个接口的权限。
 
 | 接口 | 游客 | GUEST | ADMIN |
@@ -1449,6 +1484,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `PUT /admin/setting` （只有这一个） | ❌ 401 | ❌ 403 | ✅ |
 | `POST /upload`（图片 / 音频 / 附件都是它） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/upload/**`（存储管理 2 个：清单、删除） | ❌ 401 | ❌ 403 | ✅ |
+| `GET /admin/stats/visits`（只有这一个） | ❌ 401 | ❌ 403 | ✅ |
 | `GET /uploads/**`、`HEAD /uploads/**`（本地存储的图片、音频与附件） | ✅ | ✅ | ✅ |
 
 > ⚠️ **为什么 HEAD 也要单独放行（2026-09 补的一行）**：Spring Security 的
@@ -3224,6 +3260,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
 | `UploadAdminTest` | 23 | 上传的**图片与音频两套规则**：图片（类型/大小白名单、文件名换成内容哈希（不含原始中文名）、非管理员 403、**能被匿名 GET 到，且 `HEAD` 也要放行** —— ㉓ 带反向断言"`HEAD /user/page` 仍是 401"）；音频（`type=audio` 传 mp3 成功且**文件真的落盘、返回的 url 能匿名取到**、音频接口拒 png、默认接口拒 mp3、**大小上限按 type 分流**、超音频上限被拒、未知 type 被拒、音频同样只有管理员能传、`type` 大小写与空格容错、两个前缀各自取自配置）；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
+| `VisitLogTest` | 15 | **访问日志与统计**：路径必须洗干净（去查询串/锚点/绝对地址/超长截断）、非站内路径不落库、文章页记 article_id、登录用户与管理员各自身份与账号 id、来源三分（直接/站内/外链且只存主机名）、设备两档、IP 取 X-Forwarded-For 第一段、空路径按参数校验拦下（400）、上报无需登录、**统计接口只有管理员能用**、聚合口径（PV 数条数 / UV 按 IP 去重 / 新访客 / 三张构成 / 最热文章）、days 超范围被夹住而不是报错、**★ 保留期清理只删过期的、期内的分毫不动** |
 | `UploadStorageAdminTest` | 9 | **存储管理**：权限（无 token 401 / 游客 403，清单与删除都拦）、清单列出磁盘文件并标出引用与孤儿、**引用能跨模块收集**（同一个文件同时被文章封面与音乐封面引用时两条都在）、**★ 展示索引与删除判据对同一批数据结论一致**（两份实现漂移的守卫）、删除真的删掉没人用的、**★ 删除不信任前端**（被引用的文件即使被传上来也必须拒绝且文件还在）、多个 key 逐个判定、空列表与超过 500 个被拒、不存在的 key 视为已完成（幂等） |
 | `LegacyUploadMigratorTest` | 6 | **一次性迁移工具**（存量文件改成哈希命名 + 改写库里的引用）：dryRun 不动任何东西、实跑后旧文件消失且内容逐字节不变、cover 与正文（绝对/相对两种形态）的引用都被改写、新地址真的取得到而旧地址 404、**幂等**（跑第二遍什么都不做）、内容相同的两个旧文件合并成一个、无引用的孤儿文件也被改名、已经是哈希命名的文件会被跳过 |
 | `ArticleAttachmentTest` ⑯⑰⑱⑲ | 4 | **内容寻址**：同一张图传两次只落一个文件且两次拿到同一个 URL（命中时仍返回本次的原始 name/size）、去重**不跨 type**（同字节当音频与当附件是两个文件）、**编辑文章换封面会把没人再用的旧封面删掉**、编辑时从正文删掉的图会被清理（仍被另一篇引用则保留） |
@@ -3240,7 +3277,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `AdminBootstrapInitTest` | 5 | 管理员初始化引导（空库直接启动也能进后台） |
 | `TagTest` | 14 | 标签：前台标签云（带已发布文章数、草稿不计）、后台增删改、**物理删除**（原生 SQL 数物理行）、删标签连带清关联、名字查重与首尾空格、权限、缓存命中与失效 |
 | `ArticleTagTest` | 12 | 文章打标签与按标签筛选：覆盖式语义（换标签旧的不留）、**校验先于写入**（失败不动原有标签）、去重、草稿不泄漏、标签不存在返回空页、列表带标签、删文章清关联、打标签后标签云计数立刻 +1 |
-| `CommentTest` | 17 | 评论：游客可发但**默认待审核**、传 `status=0` 也拿不到待审核内容、审核通过才可见、草稿不能评论、XSS 转义、**常见符号（→ — … ©）不被转义**、**极端输入先转义再截断不报 500**、响应里带 `createTime`、公开响应体不含邮箱与 IP、后台带邮箱/IP/文章标题、审核参数校验、逻辑删除（原生 SQL 验物理行）、权限、限流 429、正序与分页 |
+| `CommentTest` | 20 | 评论：游客可发但**默认待审核**、**★ 注册用户的昵称取账号昵称（表单里填的被忽略）并记下账号 id**、**★ 管理员免审直接发布且前台立刻可见**、游客仍然必须自填昵称且 user_id 为空、传 `status=0` 也拿不到待审核内容、审核通过才可见、草稿不能评论、XSS 转义、**常见符号（→ — … ©）不被转义**、**极端输入先转义再截断不报 500**、响应里带 `createTime`、公开响应体不含邮箱与 IP、后台带邮箱/IP/文章标题、审核参数校验、逻辑删除（原生 SQL 验物理行）、权限、限流 429、正序与分页 |
 | `CategoryAdminTest` | 11 | 分类：新建/编辑/改名后前台立刻生效、重名与空格、**分类下有文章时拒绝删除**、**删掉后同名分类能重建**（名字被释放）、**文章逻辑删除后分类就能删**（守"手写 COUNT 要自己加 deleted=0"）、权限、前台仍公开 |
 | `OperationLogTest` | 20 | 操作审计：管理动作都留痕（含标签、评论、分类、友链、项目、收藏、音乐的增删改，以及关于页与站点设置的保存）、发表评论**不**记、回滚与失败不记账、审计行不含明文密码 |
 | `FriendLinkTest` | 20 | 友链：前台只含"显示"的（隐藏的不出现）、排序 sort + id 双段稳定、后台增删改（**清空可选字段真的写成 NULL**）、非法 URL（含 `javascript:`）与非法状态 400、逻辑删除（原生 SQL 验物理行与 deleted）、权限 401/403、缓存命中 / 写操作推进版本号 / key 带版本号且有 TTL |

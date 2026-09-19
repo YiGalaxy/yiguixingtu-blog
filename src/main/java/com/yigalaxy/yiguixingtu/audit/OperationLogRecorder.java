@@ -1,5 +1,6 @@
 package com.yigalaxy.yiguixingtu.audit;
 
+import com.yigalaxy.yiguixingtu.common.web.ClientIp;
 import com.yigalaxy.yiguixingtu.auth.LoginUser;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
@@ -119,14 +120,8 @@ public class OperationLogRecorder {
             if (!(attributes instanceof ServletRequestAttributes servletAttributes)) {
                 return null;
             }
-            HttpServletRequest request = servletAttributes.getRequest();
-
-            String forwarded = request.getHeader("X-Forwarded-For");
-            if (forwarded != null && !forwarded.isBlank()) {
-                String first = forwarded.split(",")[0].trim();
-                return truncate(first);
-            }
-            return truncate(request.getRemoteAddr());
+            // 解析规则收在 common/web/ClientIp（原先这里是三份实现中的一份）
+            return ClientIp.of(servletAttributes.getRequest());
         } catch (Exception e) {
             log.warn("记录操作审计时读取来源IP失败（该条记录的IP将为空）: {}", e.getMessage());
             return null;

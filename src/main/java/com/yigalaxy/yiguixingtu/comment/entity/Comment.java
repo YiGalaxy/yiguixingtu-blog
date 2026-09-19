@@ -44,6 +44,17 @@ public class Comment implements Serializable {
     @Schema(description = "所属文章ID")
     private Long articleId;
 
+    /**
+     * 评论者的注册账号 id；**游客为 null**（它们只填昵称）。
+     *
+     * 【它和 nickname 是两件事】nickname 是**用户自己填的字符串**，
+     * 谁都能填成任意值（包括冒用站长的昵称）；这个字段才是"到底是谁发的"——
+     * 由后端从 token 里取，用户改不了。
+     * ⚠️ 2026-09 之前的评论一律是 null：那时后端不读 token，没有信息可回溯。
+     */
+    @Schema(description = "评论者的注册账号 id（游客为 null）")
+    private Long userId;
+
     @Schema(description = "评论者昵称")
     private String nickname;
 

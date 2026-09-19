@@ -294,6 +294,24 @@ public class SecurityConfig {
                     //      真需要时按 IP 限流更合适，那是 Nginx 那一层的事。
                     auth.requestMatchers(HttpMethod.POST, "/article/*/view").permitAll();
 
+                    // 【访问上报：第三个被放行的写接口】
+                    //   POST /visit —— 前端每次路由变化上报一次（见 VisitController）。
+                    //
+                    //   【为什么必须匿名可用】与上面那条同一条理由：绝大多数访客没登录。
+                    //   要求登录的话，统计里只剩站长一个人。
+                    //
+                    //   【它比上面那条"重"在哪 —— 这条要说清楚】
+                    //     上一个写接口只碰 Redis；**这个是真的往数据库插一行**。
+                    //     所以它比那一条多两道约束：
+                    //       · 限流（visitRateLimiter，120/分钟）—— 防"脚本灌爆表"
+                    //       · 保留期清理（VisitLogCleanupTask）—— 行数有界
+                    //     ⚠️ 即便如此它仍然是一个"匿名可写库"的口子 —— 被刷的后果是
+                    //       访问统计虚高（与浏览量同类的代价），但它占磁盘。
+                    //       个人博客量级下这不是问题；真被盯上时该在 Nginx 按 IP 限流。
+                    //   ⚠️ 路径同样写全（不用 /visit/**）：以后这个模块加管理接口时
+                    //      不会被顺手放行。
+                    auth.requestMatchers(HttpMethod.POST, "/visit").permitAll();
+
                     // authenticated = 必须登录（带了合法 token）才能访问
                     // 其余所有请求都要登录
                     auth.anyRequest().authenticated();

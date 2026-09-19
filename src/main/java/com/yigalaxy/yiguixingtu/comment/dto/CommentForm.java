@@ -4,6 +4,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
+// ⚠️ NotBlank 仍然是需要的：content 与 articleId 上还在用它（只有 nickname 挪走了）
 import lombok.Data;
 
 /**
@@ -29,7 +30,17 @@ public class CommentForm {
     @jakarta.validation.constraints.NotNull(message = "文章ID不能为空")
     private Long articleId;
 
-    @NotBlank(message = "昵称不能为空")
+    /**
+     * 昵称：**游客必填、注册用户会被服务端忽略**（见下）。
+     *
+     * 【为什么这里去掉了 @NotBlank（2026-09）】
+     *   注册用户（含管理员）发评论时，昵称由后端从 token 里取账号昵称，
+     *   **表单里这个值根本不看**。而 {@code @NotBlank} 是在 Controller 入参上生效的
+     *   （早于 Service），留着它就会逼前端"必须传一个反正会被丢掉的值"——
+     *   哪天前端把它去掉了，注册用户就会收到一句莫名其妙的"昵称不能为空"。
+     *   ⇒ "游客必须填昵称"这条规则搬到 Service 里判（那里才知道你是不是游客），
+     *   报错文案与原来保持一字不差，前端与既有用例都不用改。
+     */
     @Size(max = 50, message = "昵称最长 50 字")
     @Schema(description = "昵称", example = "路过的读者")
     private String nickname;

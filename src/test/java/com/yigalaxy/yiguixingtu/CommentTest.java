@@ -21,6 +21,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -508,6 +509,93 @@ class CommentTest extends AbstractIntegrationTest {
     }
 
     // ================================================================
+    //  四、登录身份（2026-09 新增：注册用户与管理员走另一条路径）
+    //
+    //  【为什么单开一节】前面 ①…⑮ 全部是【不带 token】发的（游客路径），
+    //    而这一节测的是"带上 token 之后有什么不同"：昵称从哪来、记不记账号、
+    //    要不要审核。两者是同一条接口的两种身份，混在一起写会看不出边界。
+    // ================================================================
+
+    @Test
+    @DisplayName("⑱ 注册用户发评论：昵称取【账号昵称】（表单里填的被忽略），并记下账号 id，仍然待审核")
+    void registeredUserComment_shouldUseAccountNickname() throws Exception {
+        // 账号昵称与"表单里填的"刻意取成两个不同的值 —— 否则看不出到底用了哪一个
+        User reader = insertUserWithNickname("test_reader_comment", "GUEST", "老读者" + mark);
+        String readerToken = jwtUtil.generateToken(reader.getId(), reader.getUsername(), "GUEST");
+        Long articleId = insertArticle("登录身份评论", 1);
+
+        String body = mockMvc.perform(post("/comment")
+                        .header("Authorization", "Bearer " + readerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(commentJson(articleId, "我随便填的昵称", "受教了" + mark)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                // 注册用户仍然要审核（只有管理员免审，见下一条）
+                .andExpect(jsonPath("$.data.status").value(0))
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+
+        assertEquals("老读者" + mark, jsonField(body, "nickname"),
+                "★ 昵称必须来自账号，而不是表单里那个（谁都能把昵称填成站长的名字）");
+
+        Comment saved = findComment(articleId, "老读者" + mark);
+        assertNotNull(saved, "评论应当落库");
+        assertEquals(reader.getId(), saved.getUserId(),
+                "★ 必须记下账号 id —— 那是「到底是谁发的」的唯一依据");
+        assertEquals(Comment.STATUS_PENDING, saved.getStatus(), "注册用户发的评论仍然待审核");
+    }
+
+    @Test
+    @DisplayName("⑲ ★ 管理员发评论：直接发布（status=1）、前台立刻可见，也记下账号 id")
+    void adminComment_shouldBePublishedImmediately() throws Exception {
+        Long articleId = insertArticle("登录身份评论", 1);
+
+        String body = mockMvc.perform(post("/comment")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(commentJson(articleId, "随手填的", "谢谢支持" + mark)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.status").value(1))
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+
+        Comment saved = findComment(articleId, "评论测试用户");
+        assertNotNull(saved, "管理员的评论同样要落库");
+        assertEquals(Comment.STATUS_APPROVED, saved.getStatus(),
+                "★ 管理员免审：在自己站上回复读者不必再去后台点一次「通过」");
+        assertEquals(admin.getId(), saved.getUserId(), "同样要记下账号 id");
+
+        // 【端到端】不经过任何审核动作，它现在就该出现在前台列表里
+        mockMvc.perform(get("/comment/list").param("articleId", String.valueOf(articleId)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.records.length()").value(1))
+                .andExpect(jsonPath("$.data.records[0].content").value("谢谢支持" + mark));
+    }
+
+    @Test
+    @DisplayName("⑳ 游客评论：仍然要自己填昵称（这条没有任何放宽），账号 id 留空")
+    void guestComment_shouldStillRequireNickname() throws Exception {
+        Long articleId = insertArticle("登录身份评论", 1);
+
+        // ① 不带 token 且不填昵称 → 400，文案与改动前一字不差
+        //    （"昵称必填"这条规则从 DTO 的 @NotBlank 搬进了 Service，
+        //      因为只有在那里才知道你是不是游客）
+        String message = mockMvc.perform(post("/comment")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(commentJson(articleId, "   ", "没填昵称" + mark)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400))
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+        assertTrue(message.contains("昵称不能为空"),
+                "提示应当还是原来那句（前端与既有用例都按它写的），实际=" + message);
+
+        // ② 填了昵称就照常能发，且 user_id 为空
+        Long id = postComment(articleId, "路过的读者" + mark, "写得不错" + mark);
+        assertNotNull(id);
+        Comment saved = findComment(articleId, "路过的读者" + mark);
+        assertNull(saved.getUserId(), "游客没有账号，user_id 必须是 null");
+    }
+
+    // ================================================================
     //  工具方法
     // ================================================================
 
@@ -575,14 +663,31 @@ class CommentTest extends AbstractIntegrationTest {
     }
 
     private User insertUser(String usernamePrefix, String role) {
+        return insertUserWithNickname(usernamePrefix, role, "评论测试用户");
+    }
+
+    /**
+     * 造一个带指定【昵称】的用户。
+     *
+     * 【为什么需要它】insertUser 把昵称写死成"评论测试用户"，
+     * 而 ⑱ 要证明的恰恰是"昵称取的是账号昵称而不是表单里填的" ——
+     * 两者取同一个值的话，这条断言就分辨不出到底用了哪一个。
+     */
+    private User insertUserWithNickname(String usernamePrefix, String role, String nickname) {
         User u = new User();
         u.setUsername(usernamePrefix + "_" + mark);
         u.setPassword(passwordEncoder.encode("123456"));
-        u.setNickname("评论测试用户");
+        u.setNickname(nickname);
         u.setRole(role);
         u.setStatus(1);
         u.setDeleted(0);
         userMapper.insert(u);
         return u;
+    }
+
+    /** 从响应体里取一个字符串字段（本类只在需要看 data 内部字段时用） */
+    private String jsonField(String body, String field) throws Exception {
+        return new com.fasterxml.jackson.databind.ObjectMapper().readTree(body)
+                .get("data").get(field).asText();
     }
 }

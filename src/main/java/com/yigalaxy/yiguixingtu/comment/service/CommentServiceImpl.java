@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
+import com.yigalaxy.yiguixingtu.auth.LoginUser;
 import com.yigalaxy.yiguixingtu.audit.AuditTarget;
 import com.yigalaxy.yiguixingtu.audit.OperationAction;
 import com.yigalaxy.yiguixingtu.audit.OperationLogRecorder;
@@ -16,6 +17,7 @@ import com.yigalaxy.yiguixingtu.comment.entity.Comment;
 import com.yigalaxy.yiguixingtu.comment.mapper.CommentMapper;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
+import com.yigalaxy.yiguixingtu.common.web.ClientIp;
 import com.yigalaxy.yiguixingtu.setting.service.SettingService;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
@@ -77,9 +79,6 @@ public class CommentServiceImpl implements CommentService {
 
     /** 邮箱上限，与 DTO 校验、数据库列长度保持一致 */
     private static final int EMAIL_MAX_LENGTH = 100;
-
-    /** IP 列的长度上限（varchar(64)），超长的头要截断，不能让它把写入搞失败 */
-    private static final int IP_MAX_LENGTH = 64;
 
     private final CommentMapper commentMapper;
     private final ArticleMapper articleMapper;
@@ -145,7 +144,7 @@ public class CommentServiceImpl implements CommentService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public CommentVO create(CommentForm form, HttpServletRequest request) {
+    public CommentVO create(CommentForm form, HttpServletRequest request, LoginUser currentUser) {
 
         // 0. 站点级评论总开关：关掉之后【后端】拒绝新评论。
         //
@@ -180,15 +179,47 @@ public class CommentServiceImpl implements CommentService {
             throw new BusinessException(ResultCode.ARTICLE_NOT_FOUND);
         }
 
+        // 3. 身份判定：决定"昵称从哪来"与"要不要审核"
+        //
+        // 【为什么昵称不能继续用表单里那个（2026-09 改）】
+        //   原来无论登不登录，昵称都取表单里的字符串。问题是那个字符串**谁都能填成任意值**
+        //   —— 包括填成站长的昵称。于是"注册用户"这个身份在评论上没有任何体现，
+        //   后台审核时也分不出"这是注册用户发的"还是"游客随手填了个一样的名字"。
+        //   现在：登录了就以后端 token 里的账号昵称为准（表单里那个直接忽略），
+        //   同时把账号 id 记下来 —— 昵称是显示用的字符串，userId 才是依据。
+        Long userId = currentUser == null ? null : currentUser.getUser().getId();
+        boolean isAdmin = currentUser != null && "ADMIN".equals(currentUser.getUser().getRole());
+
+        String nickname;
+        if (currentUser == null) {
+            // 游客：昵称必须自己填。这条规则从 DTO 的 @NotBlank 搬到了这里
+            //（因为只有在这里才知道"你是游客"），报错文案一字不差，前端不用改
+            if (!StringUtils.hasText(form.getNickname())) {
+                throw new BusinessException(ResultCode.PARAM_ERROR, "昵称不能为空");
+            }
+            nickname = form.getNickname();
+        } else {
+            // 注册用户：用账号昵称。账号昵称为空时回落到用户名
+            //（user.nickname 是可空的，理论上可能没填 —— 那时用 username 兜底，
+            //  总比显示一个空白昵称强；两者都空是不可能的，username 有唯一约束且非空）
+            String accountNickname = currentUser.getUser().getNickname();
+            nickname = StringUtils.hasText(accountNickname)
+                    ? accountNickname
+                    : currentUser.getUser().getUsername();
+        }
+
         Comment comment = new Comment();
         comment.setArticleId(form.getArticleId());
-        comment.setNickname(escapeAndFit(form.getNickname(), NICKNAME_MAX_LENGTH));
+        comment.setUserId(userId);
+        comment.setNickname(escapeAndFit(nickname, NICKNAME_MAX_LENGTH));
         comment.setEmail(escapeAndFit(StringUtils.hasText(form.getEmail()) ? form.getEmail().trim() : null,
                 EMAIL_MAX_LENGTH));
         comment.setContent(escapeAndFit(form.getContent(), CONTENT_MAX_LENGTH));
         // 【默认待审核】这是防垃圾评论的第一道也是最主要的一道闸：
         // 提交成功不等于"别人能看见"，必须等管理员点通过。
-        comment.setStatus(Comment.STATUS_PENDING);
+        // ⚠️ 唯一的例外是管理员自己：在自己的站上回复读者还要去后台点一次"通过"
+        //    纯属多余（而且他本来就有直接改库的权限，那道闸对他不构成任何约束）。
+        comment.setStatus(isAdmin ? Comment.STATUS_APPROVED : Comment.STATUS_PENDING);
         comment.setIp(currentIp(request));
         // 【为什么要显式赋值，而不是靠列上的 DEFAULT CURRENT_TIMESTAMP】
         //   默认值确实会写进数据库，但 MyBatis-Plus 插入之后【不会把库生成的值回填到对象】——
@@ -199,8 +230,9 @@ public class CommentServiceImpl implements CommentService {
 
         commentMapper.insert(comment);
 
-        log.info("新增评论: id={}, articleId={}, nickname={}", comment.getId(), comment.getArticleId(),
-                comment.getNickname());
+        log.info("新增评论: id={}, articleId={}, nickname={}, userId={}, status={}",
+                comment.getId(), comment.getArticleId(), comment.getNickname(),
+                comment.getUserId(), comment.getStatus());
 
         // 【这里为什么不记操作审计】审计是给"管理动作"留痕的
         // （谁改了文章、谁封了账号）。评论本身就是内容，而且数量会持续增长 ——
@@ -326,23 +358,13 @@ public class CommentServiceImpl implements CommentService {
     /**
      * 取来源 IP。
      *
-     * 【为什么优先信 X-Forwarded-For】和审计模块里的做法一致：
-     * 线上请求先过 Nginx，getRemoteAddr() 拿到的是 Nginx 的地址（127.0.0.1），
-     * 记它没有任何意义。这个头本身可以被伪造，但本项目后端只绑回环地址、
-     * 只能经由宿主机的 Nginx 进来，而 Nginx 会覆盖这个头 —— 伪造的请求到不了这里。
+     * 【实现搬到了 common/web/ClientIp】这段解析原本在三个地方各有一份
+     *   （操作审计、评论、访问日志），而"读 X-Forwarded-For 的第几段、
+     *   超长怎么处理"是一条有安全含义的规则 —— 三份迟早会不一致，
+     *   而不一致的后果是把别人的 IP 记成你的。现在只有一处实现。
      */
     private String currentIp(HttpServletRequest request) {
-        if (request == null) {
-            return null;
-        }
-        String forwarded = request.getHeader("X-Forwarded-For");
-        String ip = StringUtils.hasText(forwarded)
-                ? forwarded.split(",")[0].trim()
-                : request.getRemoteAddr();
-        if (ip == null) {
-            return null;
-        }
-        return ip.length() > IP_MAX_LENGTH ? ip.substring(0, IP_MAX_LENGTH) : ip;
+        return ClientIp.of(request);
     }
 
     /**
@@ -441,6 +463,8 @@ public class CommentServiceImpl implements CommentService {
         vo.setArticleId(comment.getArticleId());
         vo.setArticleTitle(articleTitle);
         vo.setNickname(comment.getNickname());
+        // 账号 id 只有后台给：它回答"这是注册用户发的还是游客随手填的名字"
+        vo.setUserId(comment.getUserId());
         vo.setEmail(comment.getEmail());
         vo.setContent(comment.getContent());
         vo.setStatus(comment.getStatus());

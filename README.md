@@ -53,7 +53,7 @@
 ### ✅ 已实现
 
 **认证与用户**
-- 用户注册（BCrypt 密码加密，用户名唯一）
+- 用户注册（BCrypt 密码加密，用户名唯一，**邮箱必填**）
 - 用户登录（签发 JWT）、退出登录（**旧 token 立即失效**）、获取当前登录用户
 - JWT 无状态鉴权（请求头 `Authorization: Bearer <token>`）
 - 角色支持（`ADMIN` 管理员 / `GUEST` 游客），接口级权限用 `@PreAuthorize`
@@ -380,6 +380,8 @@ com.yigalaxy.yiguixingtu
 │   ├── ResultCode                  # 结果码枚举
 │   ├── cache/ContentCacheVersion    # 站点内容模块（友链/项目/收藏/关于/音乐）共用的缓存版本号
 │   ├── validation/UrlPatterns       # URL 入参白名单正则（http(s) 外链 / 站内路径）
+│   ├── web/ClientIp                 # 从请求里取真实客户端 IP（优先 X-Forwarded-For；全项目唯一一处解析规则）
+│   ├── web/IpRegionResolver         # IP → 归属地（ip2region 离线库：11MB 的 xdb 随 jar 打包，IP 不出服务器）
 │   ├── metrics/BusinessMetrics     # 自定义业务指标（浏览量落库 / 登录 / token 拉黑）
 │   ├── idempotency/IdempotencyService   # 接口幂等：SET NX 占位 + 结果缓存（见「接口幂等」章节）
 │   └── exception
@@ -522,12 +524,14 @@ src/main/resources
     ├── V14__create_article_attachment_table.sql # article_attachment（文章附件；**物理删除、不做逻辑删除**，为什么不在上传时插行见脚本内说明）
     ├── V15__add_notice_text_to_site_setting.sql # 给 site_setting 加首页滚动文字（跑马灯）那一列
     ├── V16__add_user_id_to_comment.sql        # 给 comment 加 user_id（这条评论是哪个注册账号发的）
-    └── V17__create_visit_log_table.sql        # visit_log（访问日志；**存 IP，保留 90 天后自动清理**）
+    ├── V17__create_visit_log_table.sql        # visit_log（访问日志；**存 IP，保留 90 天后自动清理**）
+    ├── V18__add_email_to_user.sql             # 给 user 加 email（注册必填；**老账号为 NULL，不加唯一索引**）
+    └── V19__add_region_to_visit_log.sql       # 给 visit_log 加 region（IP 归属地，写入时推导）
 
 src/test/java/com/yigalaxy/yiguixingtu
 ├── AbstractIntegrationTest         # 集成测试基类：起 MySQL/Redis 容器 + 注入连接信息
 ├── AuthLoginTest                   # 登录链路
-├── UserRegisterTest                # 注册
+├── UserRegisterTest                # 注册（含**邮箱必填与格式校验**）
 ├── JwtSecurityTest                 # JWT 与 Security 过滤链
 ├── GlobalExceptionHandlerTest      # 全局异常处理（含 404 / 405 的真实状态码）
 ├── UserAdminTest                   # 用户管理（含 token 即时失效）
@@ -1208,6 +1212,30 @@ curl -X POST "$API/upload/migrate-legacy" -H "Authorization: Bearer $TOKEN"
 > **为什么没存 User-Agent 原文**：只留从它推导出的设备档位。原始 UA 串很长、
 > 隐私颗粒度更细（能指纹到具体机型与版本），而这个站要回答的只是"手机还是电脑"。
 
+**访客 IP 列表（点「访客 IP」那个按钮）**
+
+上面那些图回答"这段时间怎么样"，这个回答"**都是谁**"：
+按 IP 聚合之后的访客、**归属地**、访问次数、最后访问时间，
+按访问次数倒序（同一个 IP 刷十次是一行，不是十行 —— 一眼就能看出是不是有人在刷）。
+
+| 它怎么做的 | 为什么 |
+|---|---|
+| 走 **`GET /admin/stats/visits/ips`**，与报表**分开一个接口** | 它带着完整 IP（个人信息）。合并进来的话，每次打开概览都会把访客 IP 传到浏览器，**哪怕没人点开** |
+| **点开才拉**，`days` 与上面那三张图共用同一个选择器 | 两个请求各按各的天数算的话，曲线说 3 个访客、列表里 15 行，看起来像统计坏了 |
+| 归属地由 **ip2region 离线库**解析（`common/web/IpRegionResolver`） | **IP 不出服务器**。在线 API 会把每个访客的 IP 发给第三方，换来的只是"多显示一个城市"；而且是纯内存查表，微秒级 —— 它挂在每次上报的路径上，一次网络往返都不可接受 |
+| **写入时解析并落库**（`visit_log.region`），读时对老记录兜底现算 | 与 `device` 从 UA 推导是同一个套路：原始串不入库、推导结果入库。老记录那一列是 NULL，读的时候现算，**只读不写回** |
+| 最多 **200** 条 | 这是"看一眼是谁"的表，不是全量导出。没有上限时，一个刷出十万个 IP 的脚本能让这个接口和浏览器一起卡死。界面上有一行小字写明被截断 |
+| IPv6、畸形值 → 归属地 **`—`**；内网地址 → **「内网」** | 「内网」是个有意义的信号：要么本机调试，要么反向代理没把 X-Forwarded-For 传对（那会让**所有访客变成同一个 IP**，UV 明显偏低） |
+
+> ⚠️ **归属地和 IP 一样是个人信息，生命周期完全一致**：它颗粒度到城市，
+> 不是"脱敏后的安全字段"，随整行在保留期到期时一起删除。
+> 加这一列没有改变保留期，只是让"看一眼来源分布"不用再连数据库。
+
+> **离线库怎么更新**：数据文件是 `src/main/resources/ip2region_v4.xdb`（11MB，**提交在仓库里**），
+> 从上游重新下载覆盖即可（`lionsoul2014/ip2region` 的 `data/ip2region_v4.xdb`，Apache-2.0）。
+> ⚠️ 它**随 jar 打包**，所以改完必须重新构建并部署 —— 改服务器上的文件没有用。
+> 库加载失败时只打一行 WARN、归属地全部为空，**应用照常启动**（那一列是锦上添花，不该让整站起不来）。
+
 > ⚠️ **部署时最容易踩的一个坑：上传目录必须挂到卷上**
 >
 > 容器里的文件系统是**临时的**：容器一重建（改配置、升级版本、
@@ -1349,12 +1377,12 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 ## 接口列表
 
-共 **60 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
+共 **65 个接口**。「是否需要登录」一列指**访问该接口本身**的要求，
 具体到角色见下方「接口 × 角色权限矩阵」。
 
 | # | 方法 | 路径 | 说明 | 是否需要登录 |
 |---|------|------|------|:---:|
-| 1 | POST | `/auth/register` | 用户注册 | 否 |
+| 1 | POST | `/auth/register` | 用户注册（`{"username","password","nickname","email"}`，**邮箱必填**） | 否 |
 | 2 | POST | `/auth/login` | 登录（返回 token，**有限流**：5 次/分钟） | 否 |
 | 3 | POST | `/auth/logout` | 退出登录（把当前 token 拉黑，幂等） | 否 |
 | 4 | GET | `/auth/me` | 获取当前登录用户 | 是 |
@@ -1418,8 +1446,9 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | 62 | POST | `/admin/upload/delete-files` | **删除上传文件**：请求体 `{"keys": [...]}`。**只会删掉此刻确实没人引用的那些** —— 被引用的会原样保留并列在报告的 `skippedReferenced` 里 | 是（ADMIN） |
 | 63 | POST | `/visit` | **访问上报**（匿名，前端每次路由变化报一次）。服务端补全 IP / 来源 / 设备 / 身份，**永不打扰用户**（运行期失败一律吞掉） | 否 |
 | 64 | GET | `/admin/stats/visits` | **访问统计**：按天 PV/UV 曲线 + 访客身份 / 来源 / 设备构成 + 最热页面与文章。`days` 默认 30，超出会被夹到 [1, 90] | 是（ADMIN） |
+| 65 | GET | `/admin/stats/visits/ips` | **访客 IP 列表**（统计页下钻）：按 IP 聚合的访客 + **归属地** + 访问次数 + 最后访问时间。`days` 同上；最多 200 条 | 是（ADMIN） |
 
-**共 64 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
+**共 65 个接口。** 接口文档（`/v3/api-docs`、`/swagger-ui/**`、`/swagger-ui.html`）也无需登录。
 用本地磁盘存储时，上传的图片、音频与附件都通过 `GET /uploads/**`（以及 `HEAD /uploads/**`，
 见下面「为什么 HEAD 也要放行」）公开读取（无需登录）——
 图片在 `uploads/cover/`，音频在 `uploads/music/`，附件在 `uploads/attachment/`，
@@ -1441,12 +1470,12 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 
 三种访问身份：**游客**（不带 token）、**普通用户**（GUEST + 合法 token）、**管理员**（ADMIN + 合法 token）。
 
-> **这张表应当覆盖上面全部 64 个接口**，账是这么对的：**19 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
+> **这张表应当覆盖上面全部 65 个接口**，账是这么对的：**19 个公开**（`/auth/register` `/auth/login` `/auth/logout`、
 > `GET /article/page` `stats` `archive` `rss` `{id}`、`GET /category/list` `tag/list` `comment/list` `link/list` `project/list` `favorite/list` `music/list` `about` `setting`、`POST /comment` `POST /visit`）
-> **+ 1 个只需登录**（`GET /auth/me`）**+ 44 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
+> **+ 1 个只需登录**（`GET /auth/me`）**+ 45 个管理员接口**（`/user/**` 5 + `/admin/article/**` 6 +
 > `/admin/tag/**` 4 + `/admin/comment/**` 3 + `/admin/category/**` 4 + `/admin/link/**` 4 +
 > `/admin/project/**` 4 + `/admin/favorite/**` 4 + `/admin/music/**` 4 + `/admin/about` 1 +
-> `/admin/setting` 1 + `POST /upload` 1 + `/admin/upload/**` 2 + `/admin/stats/visits` 1）= 64。
+> `/admin/setting` 1 + `POST /upload` 1 + `/admin/upload/**` 2 + `/admin/stats/visits/**` 2）= 65。
 > 以后加接口时这两处要一起改 —— 少一行不会有任何报错，只会让人在这张表里找不到那个接口的权限。
 
 | 接口 | 游客 | GUEST | ADMIN |
@@ -1484,7 +1513,7 @@ JWT 是**无状态**的：服务端签出去就不管了，所以 token 在过�
 | `PUT /admin/setting` （只有这一个） | ❌ 401 | ❌ 403 | ✅ |
 | `POST /upload`（图片 / 音频 / 附件都是它） | ❌ 401 | ❌ 403 | ✅ |
 | `/admin/upload/**`（存储管理 2 个：清单、删除） | ❌ 401 | ❌ 403 | ✅ |
-| `GET /admin/stats/visits`（只有这一个） | ❌ 401 | ❌ 403 | ✅ |
+| `/admin/stats/visits/**`（统计报表 + 访客 IP 列表，共 2 个） | ❌ 401 | ❌ 403 | ✅ |
 | `GET /uploads/**`、`HEAD /uploads/**`（本地存储的图片、音频与附件） | ✅ | ✅ | ✅ |
 
 > ⚠️ **为什么 HEAD 也要单独放行（2026-09 补的一行）**：Spring Security 的
@@ -1934,7 +1963,7 @@ operation_log 表（异步完成，请求早就返回了）
 
 | 表 | 说明 | 关键索引 | 建表者 |
 |----|------|---------|--------|
-| `user` | 用户 | `uk_username` 唯一 | Flyway `V1__init.sql` |
+| `user` | 用户（含 2026-09 起的 `email`：注册必填，**老账号为 NULL 且不加唯一索引**，见 V18） | `uk_username` 唯一 | Flyway `V1__init.sql` + `V18__add_email_to_user.sql` |
 | `category` | 文章分类 | `uk_name` 唯一 | Flyway `V1__init.sql` |
 | `article` | 文章（含草稿与浏览量） | `idx_status_top_create(status, is_top, create_time)`、`idx_status_create(status, create_time)`、`idx_deleted_status(deleted, status)`、`idx_category(category_id)` | Flyway `V1` + `V2` + `V3` |
 | `operation_log` | 操作审计（谁 / 何时 / 对什么 / 做了什么） | `idx_user_time(user_id, create_time)`、`idx_create_time(create_time)` | Flyway `V4__create_operation_log.sql` |
@@ -1947,6 +1976,7 @@ operation_log 表（异步完成，请求早就返回了）
 | `about` | 关于页信息（**全表只有一行，`id` 恒为 1**） | 主键 `id`（不需要别的索引） | Flyway `V10__create_about_table.sql`（含那一行的 INSERT） |
 | `music` | 音乐（含歌手 / 封面 / LRC 歌词原文；**迁移刻意不插种子数据**） | `idx_status_sort_id(status, sort, id)`（前台那条查询是 `WHERE status = 1 ORDER BY sort, id`，id 也进索引是为了消掉 filesort，见 V11 注释） | Flyway `V11__create_music_table.sql` |
 | `site_setting` | 站点设置（站点名 / 首页公告 / 首页滚动文字 `notice_text` / 评论总开关 / 页脚版权与两个备案号（ICP `icp_number`、公安网安 `police_number`）/ 每页文章条数；**全表只有一行，`id` 恒为 1**） | 主键 `id`（不需要别的索引） | Flyway `V12__create_site_setting_table.sql`（含那一行的 INSERT）+ `V13__add_police_number_to_site_setting.sql`（加公安网安备案号列，**刻意不写种子值**）+ `V15__add_notice_text_to_site_setting.sql`（加首页滚动文字列，同样**不写种子值**：那条跑马灯该不该出现由站长自己决定） |
+| `visit_log` | 访问日志（路径 / 身份 / **IP 与归属地 `region`** / 来源 / 设备；**唯一会被定时任务真正删数据的表**，保留 90 天） | `idx_create_time`、`idx_ip_create_time(ip, create_time)`、`idx_article(article_id)` | Flyway `V17__create_visit_log_table.sql` + `V19__add_region_to_visit_log.sql` |
 | `flyway_schema_history` | Flyway 自己的迁移记录表 | —— | Flyway 自动创建 |
 
 > `article` 上四个索引看着多，其实每个都有明确的归属，缺了会有可量化的退化：
@@ -3245,7 +3275,7 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | 测试类 | 用例数 | 覆盖 |
 |--------|:---:|------|
 | `AuthLoginTest` | 4 | 登录成功/失败、禁用账号、返回体结构 |
-| `UserRegisterTest` | 3 | 注册成功、用户名重复、参数校验 |
+| `UserRegisterTest` | 8 | 注册成功（**并确认邮箱真的落库**）、用户名重复、用户名为空、**★ 邮箱为空 / 缺字段 / 格式不对（含 `a@b`、`plain@localhost` 这类 @Email 单独拦不住的）都被拒绝且不留记录**、合法邮箱的各种形态（`+` 号、多级域名）要放行、超长邮箱拦下 |
 | `JwtSecurityTest` | 4 | JWT 签发/解析、无 token 401、游客 403 |
 | `GlobalExceptionHandlerTest` | 8 | 异常到统一返回体的映射（含「地址不存在 → 真 404」「方法用错 → 真 405」，以及**请求体不是合法 JSON / 缺必填参数 / 参数类型不对 → 400 而不是 500**） |
 | `UserAdminTest` | 21 | 用户管理全部接口 + 自我保护 + 分页夹取 + **禁用/删除/降级后的 token 即时失效** |
@@ -3260,7 +3290,8 @@ GitHub 的 ubuntu runner 自带 Docker。这正是把测试容器化的价值所
 | `ArticleIdempotencyTest` | 5 | 接口幂等：同键两次只创建一篇且返回同一 id、不同键各自创建、不带键保持旧行为、处理中返回 429、失败后能重试 |
 | `ArticleIndexTest` | 7 | 索引契约：V2/V3 迁移确实执行、列顺序正确、老索引没被误删、三条查询（数据 / 排序 / COUNT）都能用上对应索引 |
 | `UploadAdminTest` | 23 | 上传的**图片与音频两套规则**：图片（类型/大小白名单、文件名换成内容哈希（不含原始中文名）、非管理员 403、**能被匿名 GET 到，且 `HEAD` 也要放行** —— ㉓ 带反向断言"`HEAD /user/page` 仍是 401"）；音频（`type=audio` 传 mp3 成功且**文件真的落盘、返回的 url 能匿名取到**、音频接口拒 png、默认接口拒 mp3、**大小上限按 type 分流**、超音频上限被拒、未知 type 被拒、音频同样只有管理员能传、`type` 大小写与空格容错、两个前缀各自取自配置）；另两条守住"存储实现只有一种"与"配置改名后前缀仍生效" |
-| `VisitLogTest` | 15 | **访问日志与统计**：路径必须洗干净（去查询串/锚点/绝对地址/超长截断）、非站内路径不落库、文章页记 article_id、登录用户与管理员各自身份与账号 id、来源三分（直接/站内/外链且只存主机名）、设备两档、IP 取 X-Forwarded-For 第一段、空路径按参数校验拦下（400）、上报无需登录、**统计接口只有管理员能用**、聚合口径（PV 数条数 / UV 按 IP 去重 / 新访客 / 三张构成 / 最热文章）、days 超范围被夹住而不是报错、**★ 保留期清理只删过期的、期内的分毫不动** |
+| `VisitLogTest` | 19 | **访问日志与统计**：路径必须洗干净（去查询串/锚点/绝对地址/超长截断）、非站内路径不落库、文章页记 article_id、登录用户与管理员各自身份与账号 id、来源三分（直接/站内/外链且只存主机名）、设备两档、IP 取 X-Forwarded-For 第一段、空路径按参数校验拦下（400）、上报无需登录、**统计接口只有管理员能用**、聚合口径（PV 数条数 / UV 按 IP 去重 / 新访客 / 三张构成 / 最热文章）、days 超范围被夹住而不是报错、**★ 保留期清理只删过期的、期内的分毫不动**、**★ 归属地在写入时落库（公网出地名、内网出「内网」）**、**★ 访客 IP 列表按 IP 聚合（刷十次是一行）且老记录的归属地要现算出来**、访客 IP 列表的权限与区间口径 |
+| `IpRegionResolverTest` | 11 | **IP 归属地解析**（不启 Spring 上下文）：**★ 地址库真的在 classpath 上**（xdb 被误删时只有这一条会红）、国内 IP 不带「中国」前缀而境外带国家、**★ 内网/保留地址显示成「内网」**、**★ IPv6 / 畸形值 / null 一律返回 null 绝不抛异常**（它挂在每次访问上报的路径上） |
 | `UploadStorageAdminTest` | 9 | **存储管理**：权限（无 token 401 / 游客 403，清单与删除都拦）、清单列出磁盘文件并标出引用与孤儿、**引用能跨模块收集**（同一个文件同时被文章封面与音乐封面引用时两条都在）、**★ 展示索引与删除判据对同一批数据结论一致**（两份实现漂移的守卫）、删除真的删掉没人用的、**★ 删除不信任前端**（被引用的文件即使被传上来也必须拒绝且文件还在）、多个 key 逐个判定、空列表与超过 500 个被拒、不存在的 key 视为已完成（幂等） |
 | `LegacyUploadMigratorTest` | 6 | **一次性迁移工具**（存量文件改成哈希命名 + 改写库里的引用）：dryRun 不动任何东西、实跑后旧文件消失且内容逐字节不变、cover 与正文（绝对/相对两种形态）的引用都被改写、新地址真的取得到而旧地址 404、**幂等**（跑第二遍什么都不做）、内容相同的两个旧文件合并成一个、无引用的孤儿文件也被改名、已经是哈希命名的文件会被跳过 |
 | `ArticleAttachmentTest` ⑯⑰⑱⑲ | 4 | **内容寻址**：同一张图传两次只落一个文件且两次拿到同一个 URL（命中时仍返回本次的原始 name/size）、去重**不跨 type**（同字节当音频与当附件是两个文件）、**编辑文章换封面会把没人再用的旧封面删掉**、编辑时从正文删掉的图会被清理（仍被另一篇引用则保留） |

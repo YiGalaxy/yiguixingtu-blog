@@ -33,6 +33,20 @@ public class User implements Serializable {
     @Schema(description = "昵称", example = "意咖")
     private String nickname;
 
+    /**
+     * 邮箱。注册时必填（见 RegisterRequest 上的 @NotBlank + @Email）。
+     *
+     * 【为什么实体里允许为 null，而注册接口要求必填】
+     *   这一列是 2026-09 才加的，**存量账号没有邮箱**，也不可能凭空补 ——
+     *   所以数据库列可空，必填只加在注册入口上。`email == null` 有且只有一个
+     *   来源：这一列存在之前注册的老账号。
+     *
+     * 【为什么没有唯一索引】本期不发验证邮件，"这个邮箱真的是他的"从未被验证过，
+     *   一个没验证过的值不能当身份键。详见 V18 迁移脚本里的说明。
+     */
+    @Schema(description = "邮箱（注册必填；老账号可能为 null）", example = "someone@example.com")
+    private String email;
+
     @Schema(description = "角色：ADMIN管理员 / GUEST游客", example = "ADMIN")
     private String role;
 

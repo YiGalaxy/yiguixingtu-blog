@@ -90,6 +90,25 @@ public class VisitLog implements Serializable {
     @Schema(description = "来源 IP")
     private String ip;
 
+    /**
+     * IP 归属地（如 {@code 江苏省 南京市}）。
+     *
+     * 【它是从 ip 推导出来的缓存，不是独立的一份数据】写入时由
+     * {@link com.yigalaxy.yiguixingtu.common.web.IpRegionResolver} 解析一次落库，
+     * 后台的访客列表直接读它 —— 不必为了显示一列而对每一行再查一次库。
+     * 和 device（从 UA 推导）、refererType（从 Referer 推导）是同一个套路。
+     *
+     * ⚠️ 【它的生命周期必须和 ip 完全一致】它是从 IP 推出来的、颗粒度到城市 ——
+     *   知道某人某天在深圳，和知道他的 IP，对定位一个人的帮助没有量级差别。
+     *   所以它**不是**"脱敏后的安全字段"：保留期到期时随整行一起删除
+     *   （清理任务删的是整行，不需要为它单独做清理）。
+     *
+     * 为 null 的两种情况：① 这一列存在之前的历史记录；② 解析不出
+     *   （内网地址会给「内网」，但 IPv6 与畸形值给 null）。见 V19 的注释。
+     */
+    @Schema(description = "IP 归属地（写入时从 ip 推导；解析不出为 null）")
+    private String region;
+
     /** 见上面 REFERER_* 常量 */
     @Schema(description = "来源类型：INTERNAL / EXTERNAL / DIRECT")
     private String refererType;

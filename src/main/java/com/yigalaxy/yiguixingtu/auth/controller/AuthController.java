@@ -90,10 +90,20 @@ public class AuthController {
         return Result.success(vo);
     }
 
+    /**
+     * 用户注册。
+     *
+     * 【邮箱必填】校验在 RegisterRequest 上（@NotBlank + @Email），
+     *   走到这里时它已经合法；本方法只负责把它传下去。
+     *   ⚠️ 本期**不发验证邮件** —— 这个邮箱没有被验证过，
+     *   所以它既不能当身份键（不加唯一索引），也不能用于任何"凭邮箱取回账号"的流程。
+     *   详见 RegisterRequest 与 V18 迁移脚本里的说明。
+     */
     @Operation(summary = "用户注册")
     @PostMapping("/register")
     public Result<?> register(@Valid @RequestBody RegisterRequest request) {
-        userService.register(request.getUsername(), request.getPassword(), request.getNickname());
+        userService.register(request.getUsername(), request.getPassword(),
+                request.getNickname(), request.getEmail());
         log.info("注册成功：: {}", request.getUsername());
         return Result.success();
     }

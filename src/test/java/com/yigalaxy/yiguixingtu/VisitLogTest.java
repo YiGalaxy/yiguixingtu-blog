@@ -36,13 +36,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * =====================================================================
  * 访问日志与统计的用例
  *
- * 【这一组最要紧的三件事】
+ * 【这一组最要紧的四件事】
  *  ① **路径必须先洗干净再入库**：查询串里往往是用户的搜索词，原样存下来
  *     等于顺带记录了用户搜过什么（V17 的注释里写着这条）。而它写错是静默的
  *     —— 表里多几列字符串，没人会看。
  *  ② **IP 的保留期必须真的生效**：这张表存的是个人信息，"一直留着"和
  *     "留 90 天"是完全不同的两件事，而清理任务坏掉不会有任何报错。
  *  ③ **统计接口只有管理员能看**：它列的是全站的访问分布与访客 IP。
+ *  ④ **访客 IP 列表的口径**：按 IP 聚合（同一人刷十次是一行，不是十行）、
+ *     带归属地，且**老的、region 为空的历史记录也要显示得出归属地**
+ *     —— 最后这条覆盖的是"这一列是后加的"这个事实，漏了它历史行会一直是空的。
  *
  * 【⚠️ 上传/评论那套"用真提交的用例要 NOT_SUPPORTED"在这里同样适用】
  *   清理那条用例会真的删数据，所以它是 NOT_SUPPORTED + 自己收拾现场。
@@ -329,7 +332,79 @@ class VisitLogTest extends AbstractIntegrationTest {
     }
 
     // ================================================================
-    //  五、保留期清理（存的是 IP，这一条是功能得以存在的前提）
+    //  五、归属地与访客 IP 列表（统计页下钻出来的那一层）
+    // ================================================================
+
+    @Test
+    @DisplayName("⑯ ★ 上报时归属地就落库了（公网 IP 解析得出，内网 IP 是「内网」）")
+    void report_shouldStoreRegion() throws Exception {
+        report("/", null, null, null, "114.114.114.114");
+        VisitLog publicVisit = latest();
+        assertNotNull(publicVisit.getRegion(),
+                "★ 公网 IP 的归属地必须落库 —— 它是空的说明 IpRegionResolver 没被调、或者 xdb 没打进包");
+        assertFalse(publicVisit.getRegion().contains("Reserved"), "公网 IP 不该被当成保留地址");
+        assertFalse(publicVisit.getRegion().contains("|"),
+                "落库的应当是拼好的显示文本，不是 ip2region 的原始 5 段结果：" + publicVisit.getRegion());
+
+        // 内网地址显示成「内网」而不是 null —— 它是一个信号：
+        // 要么本机调试，要么反向代理没把真实 IP 传进来（那会让所有访客变成同一个 IP）
+        report("/", null, null, null, "192.168.1.5");
+        assertEquals("内网", latest().getRegion());
+    }
+
+    @Test
+    @DisplayName("⑰ ★ 访客 IP 列表：按 IP 聚合（刷十次是一行）、按次数倒序、带归属地")
+    void visitorIps_shouldAggregateByIp() throws Exception {
+        // 同一个 IP 来三次，另一个 IP 来一次。
+        // ⚠️ 前三次的 region 全是 NULL —— 模拟"这一列存在之前写进来的历史记录"。
+        //    这是本用例的重点：接口必须**现算**出归属地，不能把 NULL 原样返回去
+        //    （那样所有历史行在列表里永远是空的，而历史行正是最想看的那批）。
+        //    198.51.100.x 是 TEST-NET-2 文档专用网段，解析结果必然是「内网」，可预期。
+        insertVisit("198.51.100.1", "/old", LocalDateTime.now().minusDays(2), null);
+        insertVisit("198.51.100.1", "/b", LocalDateTime.now().minusHours(3), null);
+        insertVisit("198.51.100.1", "/c", LocalDateTime.now().minusMinutes(5), null);
+        insertVisit("198.51.100.2", "/d", LocalDateTime.now().minusMinutes(1), "内网");
+
+        List<Map<String, Object>> rows = ipsData(7);
+        assertEquals(2, rows.size(), "★ 两个不同的 IP 必须是两行 —— 刷十次是一行，不是十行");
+
+        Map<String, Object> top = rows.get(0);
+        assertEquals("198.51.100.1", top.get("ip"), "访问次数多的排前面");
+        assertEquals(3L, asLong(top.get("visits")));
+        assertNotNull(top.get("lastVisit"), "要带上最后一次访问时间（判断一个访客还在不在的依据）");
+        assertEquals("内网", top.get("region"),
+                "★ region 全为空的历史记录要现算归属地 —— 直接返回 null 的话历史行永远是空的");
+
+        assertEquals(1L, asLong(rows.get(1).get("visits")));
+        assertEquals("内网", rows.get(1).get("region"), "落库了 region 的记录直接用它，不用再解析");
+    }
+
+    @Test
+    @DisplayName("⑱ 访客 IP 列表只有管理员能用（它与统计报表同属后台数据）")
+    void visitorIps_shouldRequireAdmin() throws Exception {
+        mockMvc.perform(get("/admin/stats/visits/ips")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/admin/stats/visits/ips").header("Authorization", "Bearer " + readerToken))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("⑲ 访客 IP 列表的区间与统计报表同口径（days 超范围时被夹住，不是报错）")
+    void visitorIps_shouldRespectDayRange() throws Exception {
+        insertVisit("198.51.100.9", "/new", LocalDateTime.now().minusHours(1), "内网");
+        insertVisit("198.51.100.8", "/old", LocalDateTime.now().minusDays(10), "内网");
+
+        // 7 天区间：10 天前那个 IP 不该出现
+        assertEquals(1, ipsData(7).size(), "区间外的记录不能被算进访客列表");
+
+        // days 超范围：夹住而不是 400（与 GET /admin/stats/visits 同一个约定）
+        mockMvc.perform(get("/admin/stats/visits/ips").param("days", "9999")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+    }
+
+    // ================================================================
+    //  六、保留期清理（存的是 IP，这一条是功能得以存在的前提）
     // ================================================================
 
     @Test
@@ -398,6 +473,34 @@ class VisitLogTest extends AbstractIntegrationTest {
     /** 只清掉本用例造的数据（真实表，不清别人的） */
     private void wipeVisits() {
         jdbc.update("DELETE FROM visit_log");
+    }
+
+    /**
+     * 直接往表里塞一条访问记录。
+     *
+     * 【为什么不用 report() 接口而是写 SQL】访客列表这条链路要验的是
+     *   "同一 IP 的多次访问会被聚成一行、按次数倒序、带上最后一次时间"，
+     *   这需要**控制每条的访问时间**（接口上报只会写"此刻"）；
+     *   而且还要造出 region 为 NULL 的历史行 —— 那条路径接口根本走不到
+     *   （现在上报时一定会去解析归属地）。
+     *
+     * @param region 归属地；传 null 就是"这一列存在之前的老记录"
+     */
+    private void insertVisit(String ip, String path, LocalDateTime time, String region) {
+        jdbc.update("INSERT INTO visit_log (path, visitor_type, referer_type, device, ip, region, create_time)"
+                        + " VALUES (?,?,?,?,?,?,?)",
+                path, VisitLog.VISITOR_GUEST, VisitLog.REFERER_DIRECT, VisitLog.DEVICE_PC, ip, region, time);
+    }
+
+    /** 取访客 IP 列表（管理员身份），返回 {@code $.data} 那一层 */
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> ipsData(int days) throws Exception {
+        String body = mockMvc.perform(get("/admin/stats/visits/ips").param("days", String.valueOf(days))
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andReturn().getResponse().getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+        return com.jayway.jsonpath.JsonPath.read(body, "$.data");
     }
 
     @SuppressWarnings("unchecked")

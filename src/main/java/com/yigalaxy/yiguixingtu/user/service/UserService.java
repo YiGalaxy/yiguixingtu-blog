@@ -8,13 +8,15 @@ import com.yigalaxy.yiguixingtu.user.entity.User;
 public interface UserService {
 
     /**
-     * 用户注册
-     * @param username
-     * @param password
-     * @param nickname
-     * @return
+     * 用户注册。
+     *
+     * @param username 登录账号（唯一）
+     * @param password 明文密码，内部 BCrypt 加密后存储
+     * @param nickname 昵称（选填）
+     * @param email    邮箱（**必填**，格式由 RegisterRequest 校验；见该类的说明）
+     * @return 落库后的用户实体（不含明文密码，password 字段是哈希）
      */
-    User register(String username, String password, String nickname);
+    User register(String username, String password, String nickname, String email);
 
     /**
      * 根据账号来获取用户

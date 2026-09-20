@@ -27,6 +27,13 @@ public class UserVO {
     @Schema(description = "昵称", example = "意咖")
     private String nickname;
 
+    /**
+     * 邮箱。**可能为 null**（这一列存在之前注册的老账号）——
+     * 前端要显示成「—」，不能显示成空白，否则看起来像没加载出来。
+     */
+    @Schema(description = "邮箱（老账号可能为 null）", example = "someone@example.com")
+    private String email;
+
     @Schema(description = "角色：ADMIN管理员 / GUEST游客", example = "GUEST")
     private String role;
 

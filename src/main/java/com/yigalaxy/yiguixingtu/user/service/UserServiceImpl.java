@@ -49,14 +49,18 @@ public class UserServiceImpl implements UserService {
     }
 
     /**
-     * 用户注册
-     * @param username
-     * @param password
-     * @param nickname
-     * @return
+     * 用户注册。
+     *
+     * 【这里为什么不做邮箱查重】本期不发验证邮件，"这个邮箱是他的"从未被验证过，
+     *   所以它不是身份键 —— 拿它判重会造出一个用户无法理解的失败
+     *   （"我自己邮箱为什么不能用"），而真正的重复（同一个人用两个邮箱别名注册）
+     *   它又拦不住。详见 V18 迁移脚本里的说明。
+     *
+     * @param email 邮箱（必填）。格式校验在 RegisterRequest 上做，
+     *              走到这里时它已经是合法且非空的
      */
     @Override
-    public User register(String username, String password, String nickname) {
+    public User register(String username, String password, String nickname, String email) {
         //1.先查重
         if(getUserByUsername(username) != null){
             throw new BusinessException(ResultCode.USERNAME_EXISTS);
@@ -66,6 +70,7 @@ public class UserServiceImpl implements UserService {
         user.setUsername(username);
         user.setPassword(passwordEncoder.encode(password));
         user.setNickname(nickname);
+        user.setEmail(email);
         user.setRole("GUEST");
         user.setStatus(1);
         user.setDeleted(0);
@@ -208,6 +213,7 @@ public class UserServiceImpl implements UserService {
         vo.setId(user.getId());
         vo.setUsername(user.getUsername());
         vo.setNickname(user.getNickname());
+        vo.setEmail(user.getEmail());
         vo.setRole(user.getRole());
         vo.setStatus(user.getStatus());
         vo.setCreateTime(user.getCreateTime());

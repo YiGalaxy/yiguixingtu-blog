@@ -105,6 +105,33 @@ public interface VisitLogMapper extends BaseMapper<VisitLog> {
     List<Map<String, Object>> selectTopArticles(@Param("since") LocalDateTime since);
 
     /**
+     * 访客 IP 列表：按 IP 聚合成"一个人"，按访问次数倒序。
+     *
+     * 【MAX(region) 而不是裸 region】
+     *   同一个 IP 可能既有本列存在之前的老记录（region 为 NULL）、
+     *   也有新记录（region 有值）。直接 SELECT region 时，MySQL 会在分组内
+     *   任取一个值 —— 有可能取到 NULL，于是"这个 IP 有归属地却显示成空"。
+     *   MAX() 会忽略 NULL，正好是这里想要的行为。
+     *
+     * 【为什么不排除 ip 为 NULL 的行】WHERE 里排掉了：ip 为空的行根本
+     *   不是一个"访客"（正常路径上不会出现，只有 ClientIp 取不到值时才有），
+     *   把它们聚成一行 key 为 null 的"访客"没有意义。
+     *
+     * @param since 只统计这个时间之后的记录
+     * @param limit 最多返回多少个 IP（见 VisitLogService.visitorIps 里对上限的说明）
+     */
+    @Select("""
+            SELECT ip, MAX(region) AS region, COUNT(*) AS visits, MAX(create_time) AS last_visit
+            FROM visit_log
+            WHERE create_time >= #{since} AND ip IS NOT NULL
+            GROUP BY ip
+            ORDER BY visits DESC, last_visit DESC
+            LIMIT #{limit}
+            """)
+    List<Map<String, Object>> selectVisitorIps(@Param("since") LocalDateTime since,
+                                               @Param("limit") int limit);
+
+    /**
      * 区间内的总 PV。
      *
      * 【为什么要单独查一次，而不是把 selectDaily 的结果加起来】

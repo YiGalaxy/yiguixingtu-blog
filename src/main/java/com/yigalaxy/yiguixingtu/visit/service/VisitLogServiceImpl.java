@@ -2,7 +2,9 @@ package com.yigalaxy.yiguixingtu.visit.service;
 
 import com.yigalaxy.yiguixingtu.auth.LoginUser;
 import com.yigalaxy.yiguixingtu.common.web.ClientIp;
+import com.yigalaxy.yiguixingtu.common.web.IpRegionResolver;
 import com.yigalaxy.yiguixingtu.visit.dto.VisitStatsVO;
+import com.yigalaxy.yiguixingtu.visit.dto.VisitorIpVO;
 import com.yigalaxy.yiguixingtu.visit.entity.VisitLog;
 import com.yigalaxy.yiguixingtu.visit.mapper.VisitLogMapper;
 import jakarta.servlet.http.HttpServletRequest;
@@ -10,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
+import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -53,10 +56,27 @@ public class VisitLogServiceImpl implements VisitLogService {
     /** 判断手机 UA 的关键词。宁可只分两档：分得太细（机型/系统/浏览器）没人看，还要引 UA 解析库 */
     private static final String[] MOBILE_UA_KEYWORDS = {"Mobile", "Android", "iPhone", "iPad", "iPod"};
 
+    /**
+     * 访客 IP 列表最多返回多少条。
+     *
+     * 【为什么要有上限】它不是"导出全部访客"，而是"看一眼都是谁"——
+     *   按访问次数倒序之后，真正需要看的（常客、可疑的刷子）都在最前面，
+     *   第 300 个 IP 对判断没有任何影响。
+     *   而没有上限时，一个脚本刷出十万个不同 IP 就会让这个接口返回十万行、
+     *   前端一屏渲染十万个表格行 —— 那是一次点击就能把浏览器卡死。
+     *   ⚠️ 被截掉这件事必须在界面上说出来（前端有一行小字），
+     *   否则"列表里就这些人"会被当成事实。
+     */
+    private static final int VISITOR_IP_LIMIT = 200;
+
     private final VisitLogMapper visitLogMapper;
 
-    public VisitLogServiceImpl(VisitLogMapper visitLogMapper) {
+    /** IP → 归属地（离线库，只读）。见 common/web/IpRegionResolver */
+    private final IpRegionResolver ipRegionResolver;
+
+    public VisitLogServiceImpl(VisitLogMapper visitLogMapper, IpRegionResolver ipRegionResolver) {
         this.visitLogMapper = visitLogMapper;
+        this.ipRegionResolver = ipRegionResolver;
     }
 
     // =================================================================
@@ -85,6 +105,10 @@ public class VisitLogServiceImpl implements VisitLogService {
         }
 
         visit.setIp(ClientIp.of(request));
+        // 归属地是**从 IP 推导的缓存**（与 device 从 UA 推导同理）：
+        // 写入时算一次，后台的访客列表就能直接读，不必为每一行再查一次库。
+        // 解析不出（IPv6 / 畸形值 / 解析库没加载起来）时为 null，不影响这条记录落库
+        visit.setRegion(ipRegionResolver.resolve(visit.getIp()));
         classifyReferer(visit, request);
         visit.setDevice(deviceOf(request));
         // 【为什么显式赋值】与 Comment.createTime 同一条理由：插入后要拿它算聚合，
@@ -247,11 +271,8 @@ public class VisitLogServiceImpl implements VisitLogService {
 
     @Override
     public VisitStatsVO stats(int days) {
-        int span = Math.max(MIN_DAYS, Math.min(MAX_DAYS, days));
-        // 【为什么要按天取整】"最近 7 天"从今天零点算起才符合直觉：
-        //   按"此刻往前 168 小时"算的话，曲线最左边那天是残缺的半天，
-        //   看起来像一个突然的下跌
-        LocalDateTime since = LocalDate.now().minusDays(span - 1L).atStartOfDay();
+        int span = spanOf(days);
+        LocalDateTime since = sinceOf(days);
 
         List<VisitStatsVO.DailyPoint> daily = visitLogMapper.selectDaily(since).stream()
                 .map(row -> new VisitStatsVO.DailyPoint(
@@ -276,6 +297,54 @@ public class VisitLogServiceImpl implements VisitLogService {
                                 row.get("title") == null ? null : String.valueOf(row.get("title")),
                                 asLong(row.get("v"))))
                         .toList());
+    }
+
+    // =================================================================
+    //  三、访客 IP 列表（统计页下钻出来的那一层）
+    // =================================================================
+
+    @Override
+    public List<VisitorIpVO> visitorIps(int days) {
+        LocalDateTime since = sinceOf(days);
+
+        List<VisitorIpVO> visitors = new ArrayList<>();
+        for (Map<String, Object> row : visitLogMapper.selectVisitorIps(since, VISITOR_IP_LIMIT)) {
+            String ip = row.get("ip") == null ? null : String.valueOf(row.get("ip"));
+            Object stored = row.get("region");
+
+            // 【为什么读的时候还要解析一次】region 这一列是本功能上线时才加的，
+            //   在那之前写进来的记录它全是 NULL（见 V19）。回填要写一个一次性的迁移工具，
+            //   而收益只是"历史行也能看到归属地" —— 现算一次更简单，而且是**只读**的：
+            //   不写回库，所以这次读不会产生任何写放大。
+            //   一旦历史记录到期被清理掉（90 天），这条分支自然就再也走不到了。
+            String region = stored == null ? ipRegionResolver.resolve(ip) : String.valueOf(stored);
+
+            visitors.add(new VisitorIpVO(ip, region, asLong(row.get("visits")), asDateTime(row.get("last_visit"))));
+        }
+        return visitors;
+    }
+
+    /**
+     * 把报表区间夹到允许范围内，返回夹取后的天数。
+     *
+     * 【为什么单独一个方法】stats 需要这个数字本身（它要回给前端"这次是按几天算的"），
+     *   visitorIps 不需要。两者共用同一份夹取规则，才不会出现"曲线按 90 天上限、
+     *   IP 列表按别的上限"这种对不上的情况。
+     */
+    private int spanOf(int days) {
+        return Math.max(MIN_DAYS, Math.min(MAX_DAYS, days));
+    }
+
+    /**
+     * 区间的起点时刻。
+     *
+     * 【为什么要按天取整】"最近 7 天"从今天零点算起才符合直觉：
+     *   按"此刻往前 168 小时"算的话，曲线最左边那天是残缺的半天，
+     *   看起来像一个突然的下跌。
+     *   减去 span-1 而不是 span：今天也算在区间里（"最近 1 天"= 今天）。
+     */
+    private LocalDateTime sinceOf(int days) {
+        return LocalDate.now().minusDays(spanOf(days) - 1L).atStartOfDay();
     }
 
     /** 把 {@code (k, v)} 的查询结果转成 Slice（顺带丢掉分组键为空的行） */
@@ -310,6 +379,35 @@ public class VisitLogServiceImpl implements VisitLogService {
             return Long.parseLong(String.valueOf(value));
         } catch (NumberFormatException e) {
             return 0L;
+        }
+    }
+
+    /**
+     * 把 JDBC 回来的时间值转成 {@link LocalDateTime}。
+     *
+     * 【为什么需要它 —— 和上面 asLong 是同一条理由】
+     *   聚合查询走的是 {@code Map<String, Object>}，字段类型由驱动决定：
+     *   MySQL 的 {@code MAX(create_time)} 回来的可能是 {@code LocalDateTime}
+     *   （Connector/J 8 起的默认），也可能是 {@code java.sql.Timestamp}
+     *   （老写法 / 改了连接参数）。直接强转会变成"在某一条 SQL 上炸、
+     *   还挑驱动版本"的运行时错误。这里几种都认，认不出就返回 null ——
+     *   前端显示成「—」，比让整个接口 500 好。
+     */
+    private LocalDateTime asDateTime(Object value) {
+        if (value instanceof LocalDateTime dateTime) {
+            return dateTime;
+        }
+        if (value instanceof Timestamp timestamp) {
+            return timestamp.toLocalDateTime();
+        }
+        if (value == null) {
+            return null;
+        }
+        try {
+            // 兜底：JDBC 的字符串形式是 "2026-09-20 11:30:00"，ISO 要的是 T
+            return LocalDateTime.parse(String.valueOf(value).replace(' ', 'T'));
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 }

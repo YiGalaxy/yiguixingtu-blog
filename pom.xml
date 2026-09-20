@@ -295,6 +295,33 @@
             <artifactId>micrometer-tracing-bridge-brave</artifactId>
         </dependency>
 
+        <!-- ==================== IP 归属地（ip2region 离线库） ==================== -->
+        <!--
+          【用途】后台「访问统计 → 访客 IP」那一列，把 IP 翻成"江苏省 南京市"。
+          挂在每次访问上报的路径上（VisitLogServiceImpl.record），所以查询必须是
+          纯内存的 —— 它是个离线库，不做任何网络请求。
+
+          【为什么不用在线 API（ip-api、高德那类）】
+            ① 每个访客的 IP 都要发给第三方。这张表本来就在留 IP（个人信息），
+               再把它发给外部服务是把这个面又扩大一圈，换来的只是"多显示一个城市"
+            ② 有速率限制、对方可能挂掉，而这条路径上一次网络往返都不可接受
+          参见 IpRegionResolver 的类注释。
+
+          【为什么显式写版本，而 resilience4j / springdoc 也写了】
+          ip2region 不在 spring-boot-starter-parent 的依赖管理里，
+          不写版本会直接构建失败（与 jacoco 那条同理）。
+          这个库的版本与数据文件版本是【两回事】：库是 3.3.x，
+          数据文件（resources/ip2region_v4.xdb）单独从上游下载，见那个文件的来源说明。
+
+          【为什么它很轻】jar 只有 36KB，且 pom 里除了 test 作用域的 junit
+          没有任何依赖 —— 不会有传递依赖把它自己带进来。
+          真正占地方的是那份 11MB 的 xdb 数据文件，它在 resources 下随 jar 打包。
+        -->
+        <dependency>
+            <groupId>org.lionsoul</groupId>
+            <artifactId>ip2region</artifactId>
+            <version>3.3.7</version>
+        </dependency>
 
     </dependencies>
 

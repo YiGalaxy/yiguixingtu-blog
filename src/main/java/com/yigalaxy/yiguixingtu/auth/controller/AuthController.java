@@ -98,8 +98,12 @@ public class AuthController {
      *   ⚠️ 本期**不发验证邮件** —— 这个邮箱没有被验证过，
      *   所以它既不能当身份键（不加唯一索引），也不能用于任何"凭邮箱取回账号"的流程。
      *   详见 RegisterRequest 与 V18 迁移脚本里的说明。
+     *
+     * 【限流】注册是匿名写库入口，而且每次成功都会执行 BCrypt。
+     *   给它独立配额，避免与登录额度互相挤占；按 IP 的限制仍由 Nginx 负责。
      */
-    @Operation(summary = "用户注册")
+    @Operation(summary = "用户注册（有限流）")
+    @RateLimiter(name = "registerRateLimiter")
     @PostMapping("/register")
     public Result<?> register(@Valid @RequestBody RegisterRequest request) {
         userService.register(request.getUsername(), request.getPassword(),

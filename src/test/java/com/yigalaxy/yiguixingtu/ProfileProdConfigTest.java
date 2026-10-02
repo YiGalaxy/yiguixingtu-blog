@@ -45,7 +45,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "DB_USERNAME=placeholder",
         "DB_PASSWORD=placeholder",
         "REDIS_HOST=placeholder",
-        "REDIS_PASSWORD=placeholder"
+        "REDIS_PASSWORD=placeholder",
+        "JWT_SECRET=prod-test-jwt-secret-that-is-at-least-32-bytes"
 })
 class ProfileProdConfigTest extends AbstractIntegrationTest {
 
@@ -90,7 +91,8 @@ class ProfileProdConfigTest extends AbstractIntegrationTest {
         // 判断方式：读配置文件原文，确认这几个占位符确实是"裸的"（没有 :默认值）。
         String prodConfig = readClasspathFile("application-prod.properties");
 
-        for (String key : new String[]{"DB_URL", "DB_USERNAME", "DB_PASSWORD", "REDIS_HOST", "REDIS_PASSWORD"}) {
+        for (String key : new String[]{"DB_URL", "DB_USERNAME", "DB_PASSWORD", "REDIS_HOST",
+                "REDIS_PASSWORD", "JWT_SECRET"}) {
             assertTrue(prodConfig.contains("${" + key + "}"),
                     "prod 配置里 " + key + " 必须是裸占位符 ${" + key + "}（不给默认值），"
                             + "否则忘配环境变量时会带着默认凭据悄悄上线");

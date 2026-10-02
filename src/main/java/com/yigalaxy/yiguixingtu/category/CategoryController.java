@@ -12,14 +12,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 
-/**
- * 分类接口（前台公开）。
- *
- * 【注意】这个类上【没有】@PreAuthorize —— 因为它提供的是公开读取能力，
- * 而且 SecurityConfig 里已经把 GET /category/list 放行了。
- * 对比一下 UserController 类上那个 @PreAuthorize("hasRole('ADMIN')")，
- * 就能看出"公开接口"和"后台接口"的区别。
- */
+/** 前台公开分类接口。 */
 @Slf4j
 @Tag(name = "分类（前台）", description = "分类列表，无需登录")
 @RestController

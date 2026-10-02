@@ -53,6 +53,7 @@ class RateLimitTest extends AbstractIntegrationTest {
 
     /** 和 AuthController 上 @RateLimiter(name = ...) 保持一致 */
     private static final String LOGIN_LIMITER = "loginRateLimiter";
+    private static final String REGISTER_LIMITER = "registerRateLimiter";
     private static final String PAGE_LIMITER = "articlePageRateLimiter";
 
     @Autowired
@@ -63,6 +64,7 @@ class RateLimitTest extends AbstractIntegrationTest {
 
     /** 用例开始时记下原始配置，结束时恢复 —— 不能把线上的配额改小了留给下一个用例 */
     private RateLimiterConfig originalLoginConfig;
+    private RateLimiterConfig originalRegisterConfig;
     private RateLimiterConfig originalPageConfig;
 
     /**
@@ -94,8 +96,10 @@ class RateLimitTest extends AbstractIntegrationTest {
 
     private void rememberAndShrink() {
         originalLoginConfig = rateLimiterRegistry.rateLimiter(LOGIN_LIMITER).getRateLimiterConfig();
+        originalRegisterConfig = rateLimiterRegistry.rateLimiter(REGISTER_LIMITER).getRateLimiterConfig();
         originalPageConfig = rateLimiterRegistry.rateLimiter(PAGE_LIMITER).getRateLimiterConfig();
         replaceWithLimit(LOGIN_LIMITER, 2);
+        replaceWithLimit(REGISTER_LIMITER, 2);
         replaceWithLimit(PAGE_LIMITER, 2);
     }
 
@@ -104,6 +108,10 @@ class RateLimitTest extends AbstractIntegrationTest {
     void restoreConfig() {
         if (originalLoginConfig != null) {
             rateLimiterRegistry.replace(LOGIN_LIMITER, RateLimiter.of(LOGIN_LIMITER, originalLoginConfig));
+        }
+        if (originalRegisterConfig != null) {
+            rateLimiterRegistry.replace(REGISTER_LIMITER,
+                    RateLimiter.of(REGISTER_LIMITER, originalRegisterConfig));
         }
         if (originalPageConfig != null) {
             rateLimiterRegistry.replace(PAGE_LIMITER, RateLimiter.of(PAGE_LIMITER, originalPageConfig));
@@ -153,6 +161,30 @@ class RateLimitTest extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.code").value(ResultCode.BAD_CREDENTIALS.getCode()));
     }
 
+    @Test
+    @DisplayName("注册接口配额用完 -> 第 3 次返回 HTTP 429")
+    void register_beyondLimit_shouldReturn429() throws Exception {
+        rememberAndShrink();
+
+        for (int i = 1; i <= 2; i++) {
+            String body = "{\"username\":\"register_rl_" + i
+                    + "\",\"password\":\"123456\",\"email\":\"register_rl_"
+                    + i + "@example.com\"}";
+            mockMvc.perform(post("/auth/register")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value(200));
+        }
+
+        mockMvc.perform(post("/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"register_rl_3\",\"password\":\"123456\","
+                                + "\"email\":\"register_rl_3@example.com\"}"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(jsonPath("$.code").value(ResultCode.TOO_MANY_REQUESTS.getCode()));
+    }
+
     // ================================================================
     //  二、文章列表接口
     // ================================================================
@@ -199,18 +231,20 @@ class RateLimitTest extends AbstractIntegrationTest {
     // ================================================================
 
     @Test
-    @DisplayName("⑤ 两个限流实例都真的被创建了（防止注解名字写错导致限流静默失效）")
+    @DisplayName("⑤ 关键限流实例都真的被创建了（防止注解名字写错导致限流静默失效）")
     void limiters_shouldBeRegistered() {
         // 【为什么这条值得单独测】
         //   @RateLimiter(name=...) 里的名字如果和配置里的实例名对不上，
         //   Resilience4j 的行为取决于配置（可能创建默认实例、也可能抛错）。
         //   最糟的情况是"用了默认配置"——额度是默认值，跟我们在
         //   application.properties 里精心定的数字完全无关，而且不会报错。
-        //   所以直接断言"这两个名字的实例存在，且配额不是默认值"。
+        //   所以直接断言关键名字对应的实例都存在。
         RateLimiter login = rateLimiterRegistry.rateLimiter(LOGIN_LIMITER);
+        RateLimiter register = rateLimiterRegistry.rateLimiter(REGISTER_LIMITER);
         RateLimiter page = rateLimiterRegistry.rateLimiter(PAGE_LIMITER);
 
         org.junit.jupiter.api.Assertions.assertNotNull(login);
+        org.junit.jupiter.api.Assertions.assertNotNull(register);
         org.junit.jupiter.api.Assertions.assertNotNull(page);
 
         // 登录的配额必须明显小于列表的配额 —— 这是配置里刻意的差别
@@ -226,6 +260,8 @@ class RateLimitTest extends AbstractIntegrationTest {
         org.junit.jupiter.api.Assertions.assertEquals(Duration.ZERO,
                 login.getRateLimiterConfig().getTimeoutDuration(),
                 "配额用完应当立刻拒绝，而不是让请求等待（等待只会把压力转成线程堆积）");
+        org.junit.jupiter.api.Assertions.assertEquals(Duration.ZERO,
+                register.getRateLimiterConfig().getTimeoutDuration());
         org.junit.jupiter.api.Assertions.assertEquals(Duration.ZERO,
                 page.getRateLimiterConfig().getTimeoutDuration());
     }

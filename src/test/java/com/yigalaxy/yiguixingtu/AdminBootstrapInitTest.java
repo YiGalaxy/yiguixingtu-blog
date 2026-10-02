@@ -103,9 +103,9 @@ class AdminBootstrapInitTest extends AbstractIntegrationTest {
     }
 
     @Test
-    @DisplayName("空库 + 用户名已存在（是 GUEST）-> 提升为 ADMIN，且不改它的密码")
+    @DisplayName("已有账号的配置密码匹配 -> 提升为 ADMIN，且不改它的密码")
     void whenUsernameExistsAsGuest_shouldPromoteWithoutChangingPassword() {
-        // 模拟"先注册了一个普通账号，再想把它变成管理员"这个很常见的部署场景
+        // 引导只能提升运维已经能认证的账号，不能只凭用户名把任意 GUEST 提权
         User guest = new User();
         guest.setUsername("my_account");
         guest.setPassword(passwordEncoder.encode("OriginalPass123"));
@@ -116,7 +116,7 @@ class AdminBootstrapInitTest extends AbstractIntegrationTest {
         userMapper.insert(guest);
         String passwordHashBefore = guest.getPassword();
 
-        String result = runner.bootstrapAdminIfAbsent("my_account", "BrandNewPass456", "新昵称");
+        String result = runner.bootstrapAdminIfAbsent("my_account", "OriginalPass123", "新昵称");
 
         assertEquals("PROMOTED", result);
         User after = findByUsername("my_account");
@@ -128,9 +128,28 @@ class AdminBootstrapInitTest extends AbstractIntegrationTest {
         assertEquals(passwordHashBefore, after.getPassword(),
                 "提升角色时不应该改动已有账号的密码");
         assertTrue(passwordEncoder.matches("OriginalPass123", after.getPassword()),
-                "原来的密码仍然应当可用");
-        assertTrue(!passwordEncoder.matches("BrandNewPass456", after.getPassword()),
-                "配置里那个新密码不该被写进去（它只在新建账号时才生效）");
+                "匹配的配置密码仍可用于登录，且不会被重置");
+    }
+
+    @Test
+    @DisplayName("已存在账号的配置密码不匹配 -> 不得提权或启用账号")
+    void whenExistingAccountPasswordDoesNotMatch_shouldNotPromote() {
+        User guest = new User();
+        guest.setUsername("pre_registered");
+        guest.setPassword(passwordEncoder.encode("GuestPass123"));
+        guest.setNickname("普通用户");
+        guest.setRole("GUEST");
+        guest.setStatus(0);
+        guest.setDeleted(0);
+        userMapper.insert(guest);
+
+        String result = runner.bootstrapAdminIfAbsent("pre_registered", "BootstrapSecret456", "站长");
+
+        assertEquals("SKIPPED_USERNAME_TAKEN", result);
+        User after = findByUsername("pre_registered");
+        assertEquals("GUEST", after.getRole());
+        assertEquals(0, after.getStatus());
+        assertTrue(passwordEncoder.matches("GuestPass123", after.getPassword()));
     }
 
     @Test

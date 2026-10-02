@@ -30,6 +30,7 @@ public class RegisterRequest {
 
     @Schema(description = "用户名",example = "yigalaxy")
     @NotBlank(message = "用户名不能为空")
+    @Size(max = 64, message = "用户名最长 64 字")
     private String username;
 
     @Schema(description = "密码",example = "123456")
@@ -38,6 +39,7 @@ public class RegisterRequest {
     private String password;
 
     @Schema(description = "昵称", example = "小亿同学")
+    @Size(max = 64, message = "昵称最长 64 字")
     private String nickname;
 
     /**

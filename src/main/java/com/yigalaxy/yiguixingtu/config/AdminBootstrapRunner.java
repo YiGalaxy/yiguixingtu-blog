@@ -106,7 +106,7 @@ public class AdminBootstrapRunner implements ApplicationRunner {
      *   | 有 | —— | 什么都不做（不是每次启动都去建账号） |
      *   | 没有 | 是 | 什么都不做，但打一条【警告】，提示后台将无法登录 |
      *   | 没有 | 否，且该用户名不存在 | 新建一个 ADMIN |
-     *   | 没有 | 否，且该用户名已存在但角色是 GUEST | 把它提升为 ADMIN，**不改它的密码** |
+     *   | 没有 | 否，且该用户名已存在 | 仅当配置密码匹配现有账号时才提升，不改密码 |
      *   | 没有 | 否，且该用户名已经是 ADMIN | 视同"已有管理员"，什么都不做 |
      *
      * 【为什么"提升已有账号"时不改密码】
@@ -142,14 +142,20 @@ public class AdminBootstrapRunner implements ApplicationRunner {
         String name = username.trim();
         User existing = findByUsername(name);
 
-        // ---- 情形四：用户名已存在（说明之前注册过这个人）→ 只提升角色，不动密码 ----
+        // ---- 情形四：用户名已存在 → 先证明调用方知道该账号当前密码，再提权 ----
         if (existing != null) {
+            if (!StringUtils.hasText(existing.getPassword())
+                    || !passwordEncoder.matches(rawPassword, existing.getPassword())) {
+                log.warn("引导用户名 [{}] 已存在，但配置密码与现有账号不匹配，拒绝提权", name);
+                return "SKIPPED_USERNAME_TAKEN";
+            }
+
             userMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<User>()
                     .eq(User::getId, existing.getId())
                     .set(User::getRole, ROLE_ADMIN)
                     // 被禁用的账号提升成管理员也没用（登录会被拒），顺手启用
                     .set(User::getStatus, 1));
-            log.info("已把已有账号 [{}] 提升为管理员（密码未改动，仍用它原来的密码登录）", name);
+            log.info("已把已有账号 [{}] 提升为管理员（密码匹配，原密码未改动）", name);
             return "PROMOTED";
         }
 

@@ -1,0 +1,9 @@
+# 本地构建镜像后部署到低内存服务器时使用。
+# 先在本地 docker buildx 构建并 docker save，再在服务器 docker load。
+services:
+  backend:
+    image: yiguixingtu-backend:local
+    build: !reset null
+  frontend:
+    image: yiguixingtu-frontend:local
+    build: !reset null

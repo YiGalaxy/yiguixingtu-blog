@@ -125,7 +125,11 @@ docker exec -i -e DBNAME="$DB_NAME" "$DB_CONTAINER" sh -c \
 #   · gzip -t 失败     → 文件被截断（磁盘满 / 进程被杀）
 #   · 没有 CREATE TABLE → mysqldump 把错误信息写进了文件
 gzip -t "$DB_FILE.tmp" || fail "备份文件解不开（多半只写了一半）"
-zcat "$DB_FILE.tmp" | grep -q 'CREATE TABLE' || fail "备份里没有 CREATE TABLE，内容可疑"
+# grep -q 命中后立刻退出，zcat 会收到 SIGPIPE（退出码 141），pipefail 下会被误判成失败。
+# 用 if 包一层，避免“备份其实是好的”被判成可疑。
+if ! zcat "$DB_FILE.tmp" | grep -q 'CREATE TABLE'; then
+  fail "备份里没有 CREATE TABLE，内容可疑"
+fi
 
 # 表数量对账：备份里的建表语句条数 = 库里实际的表数（少一张就说明导出中途断过）
 LIVE_TABLES="$(on_db_mysql "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME'" | tr -d '\r')"

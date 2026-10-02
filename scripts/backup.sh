@@ -125,15 +125,16 @@ docker exec -i -e DBNAME="$DB_NAME" "$DB_CONTAINER" sh -c \
 #   · gzip -t 失败     → 文件被截断（磁盘满 / 进程被杀）
 #   · 没有 CREATE TABLE → mysqldump 把错误信息写进了文件
 gzip -t "$DB_FILE.tmp" || fail "备份文件解不开（多半只写了一半）"
-# grep -q 命中后立刻退出，zcat 会收到 SIGPIPE（退出码 141），pipefail 下会被误判成失败。
-# 用 if 包一层，避免“备份其实是好的”被判成可疑。
-if ! zcat "$DB_FILE.tmp" | grep -q 'CREATE TABLE'; then
-  fail "备份里没有 CREATE TABLE，内容可疑"
-fi
+# 【为什么先落盘再校验】grep -q 命中即退出，zcat 会收到 SIGPIPE；
+#   在 pipefail 下这会被判成失败 —— “备份其实是好的”会被误判成可疑。
+DB_PROBE="$(mktemp)"
+zcat "$DB_FILE.tmp" > "$DB_PROBE" || fail "备份文件解不开"
+grep -q 'CREATE TABLE' "$DB_PROBE" || fail "备份里没有 CREATE TABLE，内容可疑"
 
 # 表数量对账：备份里的建表语句条数 = 库里实际的表数（少一张就说明导出中途断过）
 LIVE_TABLES="$(on_db_mysql "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME'" | tr -d '\r')"
-DUMP_TABLES="$(zcat "$DB_FILE.tmp" | grep -c '^CREATE TABLE' || true)"
+DUMP_TABLES="$(grep -c '^CREATE TABLE' "$DB_PROBE" || true)"
+rm -f "$DB_PROBE"
 [ -n "$LIVE_TABLES" ] || fail "读不到线上表数量，无法对账"
 [ "$LIVE_TABLES" = "$DUMP_TABLES" ] \
     || fail "表数量对不上：线上 $LIVE_TABLES 张，备份里 $DUMP_TABLES 张"

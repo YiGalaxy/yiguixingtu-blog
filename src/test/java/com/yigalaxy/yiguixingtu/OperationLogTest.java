@@ -5,7 +5,7 @@ import com.yigalaxy.yiguixingtu.about.entity.About;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
-import com.yigalaxy.yiguixingtu.article.service.ArticleService;
+import com.yigalaxy.yiguixingtu.article.service.ArticleWriteService;
 import com.yigalaxy.yiguixingtu.audit.OperationLog;
 import com.yigalaxy.yiguixingtu.audit.mapper.OperationLogMapper;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
@@ -135,7 +135,7 @@ class OperationLogTest extends AbstractIntegrationTest {
     private JwtUtil jwtUtil;
 
     @Autowired
-    private ArticleService articleService;
+    private ArticleWriteService articleWriteService;
 
     /** 用来建一个"外层事务"，专门演示回滚场景（见第⑪条） */
     @Autowired
@@ -950,7 +950,7 @@ class OperationLogTest extends AbstractIntegrationTest {
         //   最后 setRollbackOnly 模拟"业务走到最后一步失败了"。
         //   注意：此刻事件【已经发布了】，审计功能到底会不会记账，就靠这条用例说话。
         template.execute(status -> {
-            articleService.create(form(rolledBackTitle, category.getId()), admin.getId());
+            articleWriteService.create(form(rolledBackTitle, category.getId()), admin.getId());
             status.setRollbackOnly();
             return null;
         });
@@ -959,7 +959,7 @@ class OperationLogTest extends AbstractIntegrationTest {
         //   同一段代码、同样的调用方式，只是这次让它正常提交。
         //   有这一步，上面那条"没记账"才排得掉另一种解释：
         //   "其实审计根本没写进去，和回滚没关系"。
-        Long committedId = articleService.create(form(committedTitle, category.getId()), admin.getId());
+        Long committedId = articleWriteService.create(form(committedTitle, category.getId()), admin.getId());
 
         OperationLog committed = awaitLog("CREATE_ARTICLE", committedId);
         assertNotNull(committed, "正常提交的创建应当被记账（对照组，证明审计本身是好的）");

@@ -7,6 +7,7 @@ import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
 import com.yigalaxy.yiguixingtu.article.service.ArticleService;
+import com.yigalaxy.yiguixingtu.article.service.ArticleWriteService;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
 import com.yigalaxy.yiguixingtu.common.exception.BusinessException;
 import com.yigalaxy.yiguixingtu.config.RedisConfig;
@@ -56,6 +57,9 @@ class ArticleDetailCacheTest extends AbstractIntegrationTest {
 
     @Autowired
     private ArticleService articleService;
+
+    @Autowired
+    private ArticleWriteService articleWriteService;
 
     @Autowired
     private ArticleMapper articleMapper;
@@ -215,7 +219,7 @@ class ArticleDetailCacheTest extends AbstractIntegrationTest {
         form.setTitle(mark + " 旧标题");
         form.setContent("正文");
         form.setStatus(1);
-        Long id = articleService.create(form, 1L);
+        Long id = articleWriteService.create(form, 1L);
 
         assertEquals(mark + " 旧标题", articleService.getPublishedDetail(id).getTitle());
 
@@ -223,7 +227,7 @@ class ArticleDetailCacheTest extends AbstractIntegrationTest {
         updated.setTitle(mark + " 新标题");
         updated.setContent("正文");
         updated.setStatus(1);
-        articleService.update(id, updated);
+        articleWriteService.update(id, updated);
 
         assertEquals(mark + " 新标题", articleService.getPublishedDetail(id).getTitle(),
                 "编辑之后详情应当立刻是新标题（版本号让详情缓存一起失效了）");
@@ -237,11 +241,11 @@ class ArticleDetailCacheTest extends AbstractIntegrationTest {
         form.setTitle(mark + " 先发布再下架");
         form.setContent("正文");
         form.setStatus(1);
-        Long id = articleService.create(form, 1L);
+        Long id = articleWriteService.create(form, 1L);
 
         assertNotNull(articleService.getPublishedDetail(id));
 
-        articleService.updateStatus(id, 0);
+        articleWriteService.updateStatus(id, 0);
 
         BusinessException e = assertThrows(BusinessException.class,
                 () -> articleService.getPublishedDetail(id),

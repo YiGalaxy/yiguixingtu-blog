@@ -292,7 +292,7 @@ public class MusicServiceImpl implements MusicService {
             return;
         }
 
-        if (referencedByOthers(objectKey, id)) {
+        if (uploadReferenceChecker.isReferencedBesidesMusic(objectKey, id)) {
             // 日志把 key 也带上：将来站长问"为什么删了歌磁盘没变小"，
             // 这行日志能直接回答"它当时还被谁用着"
             log.info("删除音乐: id={}, title={}（文件仍被别处引用，跳过删除）objectKey={}",
@@ -303,22 +303,6 @@ public class MusicServiceImpl implements MusicService {
         log.info("删除音乐: id={}, title={}（音频文件将在事务提交后删除）objectKey={}",
                 id, exist.getTitle(), objectKey);
         uploadedFileCleaner.deleteAfterCommit(List.of(objectKey));
-    }
-
-    /**
-     * 这个上传文件还有没有别的地方在用？（删歌前必须问这一句，理由见 delete 的长注释）
-     *
-     * 【实现已经搬到 UploadReferenceChecker】原来这里自己查三张表，而文章的删除路径
-     * 另写了一份。2026-09 改成内容寻址、引用检查要覆盖 7 张表之后，
-     * 两份手写的清单太容易漏 —— 收成一个组件，清单只维护一处。
-     * 这里保留一层薄封装：调用点读起来是音乐模块的业务语义，
-     * 不必知道那个组件的存在。
-     *
-     * @param objectKey 上传目录里的对象 key
-     * @param musicId   正在删除的曲目 id（它自己不算"别人"）
-     */
-    private boolean referencedByOthers(String objectKey, Long musicId) {
-        return uploadReferenceChecker.isReferencedBesidesMusic(objectKey, musicId);
     }
 
     // =================================================================

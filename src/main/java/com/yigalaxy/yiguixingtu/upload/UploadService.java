@@ -10,93 +10,13 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 
-/**
- * =====================================================================
- * 文件上传服务 —— 负责【校验】与【生成对象路径】，真正的存储交给 FileStorage
- *
- * 【它和 FileStorage 的分工】
- *   · 这个类管"能不能传"：大小、类型、文件名
- *   · FileStorage 管"存到哪"：本地磁盘还是 OSS
- *   分开的好处是校验逻辑与存储无关，测试时不需要真的往任何地方写文件，
- *   而且换存储不影响校验规则。
- *
- * 【三种上传种类（type=image / audio / attachment），规则各自独立】
- *   图片：{@code jpg/jpeg/png/gif/webp} + 10MB + 存到 cover/ 目录
- *   音频：{@code mp3} + 20MB + 存到 music/ 目录
- *   附件：{@code pdf/zip/7z/rar/doc…/mp3/mp4} 共 16 种 + 100MB + 存到 attachment/ 目录
- *   ⚠️ 这三套【不会互相放宽】：给附件开 100MB 不会让图片也能传 100MB，
- *   给附件加 pdf 也不会让图片接口接受 pdf 文件。为什么必须这样，见 {@link UploadType}。
- *   两个方向各有一条用例钉着（UploadAdminTest ⑭ 与 ⑮），另有一条证明"上限真的按 type 分流"（⑰）；
- *   附件那一套同方向的两条在 ArticleAttachmentTest（"type=image 传 pdf 被拒"等）。
- *
- * 【⚠️ 三套上限之外还有一道"总闸"（不是按种类的第四套规则）】
- *   上面三个 maxSize 管的是"一个文件多大"，而整个上传目录还有 5GB 的总量上限
- *   （见 UploadProperties.maxTotalSize）：几十个各 100MB 的附件都是【合法的单个文件】，
- *   单文件那一层永远拦不住它们把 40GB 的磁盘写满。磁盘写满会让
- *   MySQL / Redis / 日志一起写不进去 —— 那是整站级别的故障，
- *   所以这里在上传前先量一次目录占用，超了就明确拒绝。
- *   它的实现与代价见 usedBytesOfStorage 与 LocalFileStorage.usedBytes 的注释。
- *
- * 【⚠️ 2026-09 改造：文件名从随机 UUID 换成【内容哈希】，同一份内容只存一份】
- *   上传前先算文件内容的 SHA-256，用它当文件名（+ 前两位做一层目录），
- *   于是"同一张图传两次"第二次会命中已有文件、一个字节都不写。
- *   完整推导（为什么是 SHA-256、为什么不再按年月分目录、
- *   为什么不同 type / 不同扩展名仍会各存一份）写在 {@link #buildObjectKey} 上。
- *   ⚠️ 这条改动有一个【不受本类控制】的前提：删除文件前必须确认真没人再引用它 ——
- *   改造前"每篇文章各有各的副本"，改造后多位站长共用同一份，
- *   少查一张表就会把别人正在用的图删掉。引用检查因此从 3 张表扩到了全部
- *   可能存地址的表，见 {@link UploadReferenceChecker}。
- *
- * 【用到的东西】
- *   · {@link MultipartFile} —— Spring MVC 对 multipart/form-data 里单个文件部分的封装，
- *     通过 {@code @RequestParam("file") MultipartFile file} 拿到。
- *     {@code getSize()} 是字节数，{@code getOriginalFilename()} 是客户端传来的原始文件名
- *     （⚠️ 这个文件名【完全不可信】，见下面 sanitize 的说明）
- *   · {@link MessageDigest} + {@link HexFormat} —— 算内容哈希、转成十六进制文件名
- *     （getInstance 那个受检异常的处理见 {@link #sha256Hex}）
- *
- * 【三个安全要点（每一个都对应一类真实攻击）】
- *   ① 扩展名白名单：黑名单列不全（.jsp / .phtml / .svg 里塞脚本……），
- *      只放行确定安全的几种，其余默认拒绝
- *   ② 文件名不采用用户传的：用户可能传 {@code ../../etc/passwd} 或
- *      {@code shell.jsp;.jpg} 这种名字。这里【只用它取扩展名】，
- *      真正的文件名是内容哈希（不含任何用户输入），从根本上断掉路径穿越与二次解析
- *   ③ 大小限制：前端也能限制，但前端可以绕过（直接调接口）。
- *      服务端这一层才是真正生效的
- * =====================================================================
- */
+/** Validates uploads and assigns content-addressed keys; FileStorage owns persistence. */
 @Slf4j
 @Service
 public class UploadService {
-
-    /**
-     * 哈希分目录用几位（前两位 hex = 256 个目录）。
-     *
-     * 【为什么是 2】一张图一个文件（去重之后不再有副本），
-     *   两位 hex 在几万文件量级下平均每目录一两百个，`ls`、备份、
-     *   对象存储控制台的目录树都还好受。取 1 位只有 16 个目录、
-     *   取 3 位是 4096 个目录（大量空目录）。
-     *   ⚠️ 它【只影响新文件放哪】，与已有文件的路径无关 ——
-     *   老文件（UUID 命名、在 yyyy/MM 下）照样能被读能、能删，
-     *   引用检查也照样认（见 UploadedFileCleaner.toObjectKey）。
-     */
-    private static final int HASH_DIR_LENGTH = 2;
-
-    /**
-     * 算哈希时每次读多少字节。
-     *
-     * 【为什么是 8KB】这是"一次磁盘读"与"堆占用"之间的常规折中：
-     *   太小则系统调用次数多（实测小缓冲会明显拖慢大文件），
-     *   太大则每个并发上传都多占一块堆（100MB 的附件也只是多读几千次）。
-     *   它跟文件大小无关，所以对 10MB 的图和 100MB 的附件是同一份开销。
-     */
-    private static final int HASH_BUFFER_SIZE = 8192;
 
     private final FileStorage fileStorage;
     private final UploadProperties properties;
@@ -106,130 +26,51 @@ public class UploadService {
         this.properties = properties;
     }
 
-    /**
-     * 校验并保存一个上传的文件。
-     *
-     * 【一次上传要过九步，顺序不能乱】
-     *   先解析 type（下面那些步骤的注释没编号它，因为它是"选规则"而不是一道关卡），
-     *   然后 ① 空文件 → ② 大小 → ③ 扩展名白名单 → ④ 算内容哈希
-     *   → ⑤ 拼 key → ⑥ 看是否命中已有文件 → ⑦ 总容量（仅未命中时）
-     *   → ⑧ Content-Type → ⑨ 落盘 / 跳过
-     *   前两步与类型有关（图片 10MB / 音频 20MB / 附件 100MB），第三步完全按类型分流。
-     *
-     * 【为什么"总容量"排在扩展名之后】
-     *   两者的报错完全不同："只允许上传 pdf / zip / … 格式的附件"是一个
-     *   【能自己改】的提示（换个文件就行），而"上传目录满了"需要人去清理旧文件。
-     *   如果把容量判断放在前面，那么用户传一个 .exe 时会收到"容量不足"的提示 ——
-     *   他会去删自己的文件，而真正的问题是他传错了格式。**报错要指向真正的原因**，
-     *   这一条和 UploadType.resolve 里"未知 type 直接报错而不回落"是同一个原则。
-     *
-     * 【为什么"总容量"还排在"命中判断"之后（2026-09 新增的这一条）】
-     *   命中已有文件时不写盘、不占新空间，所以它不该被"空间不足"拦住。
-     *   顺序反过来会出现一个很怪的场景：服务器上早就有的那张图，
-     *   因为磁盘满了而重新上传失败 —— 而这次上传本来一个字节都不需要写。
-     *
-     * @param file 上传的文件
-     * @param type 上传的种类（{@code image} / {@code audio} / {@code attachment}）；
-     *             不传（{@code null} 或空白）时按 {@code image} —— 与这个接口上线以来的行为一致，
-     *             不认识的取值会直接报错（理由见 {@link UploadType#resolve}）
-     * @return 上传结果（可访问地址 + 展示用文件名 + 字节数），见 {@link UploadResult}
-     */
+    /** Validates the file, reuses identical content, and stores new content when needed. */
     public UploadResult upload(MultipartFile file, String type) {
-        // 先解析种类：参数写错要【立刻】报出来，而不是等文件校验完才发现
-        // （顺序错了的话，type 打错时的报错会变成"只允许上传 xxx 格式"，
-        //   指向的是文件，而真正的原因是参数 —— 提示指错地方最难查）
         UploadType uploadType = UploadType.resolve(type);
 
-        // 按种类取出这一套规则。取成三个局部变量而不是每处都写 if：
-        // 下面几个步骤对三种类型是【同一段代码】，只有这几个值不同
-        List<String> allowedExtensions = allowedExtensionsOf(uploadType);
-        DataSize maxSize = maxSizeOf(uploadType);
-        String kindLabel = kindLabelOf(uploadType);
+        UploadRules rules = rulesOf(uploadType);
 
-        // ---- ① 空文件 ----
         if (file == null || file.isEmpty()) {
             throw new BusinessException(ResultCode.PARAM_ERROR, "请选择要上传的文件");
         }
 
-        // ---- ② 大小 ----
-        // 这里【也】要判，因为 multipart 的 max-file-size 是框架层的兜底，
-        // 它的报错信息对用户不友好（是一个框架异常），而且两者的限额未必一致：
-        // 框架层按最大的那一类（附件 100MB）兜底，所以一份 30MB 的"图片"
-        // 能走到这里 —— 必须由业务层按类型拒掉，否则图片的 10MB 上限等于没了
-        if (file.getSize() > maxSize.toBytes()) {
+        if (file.getSize() > rules.maxSize().toBytes()) {
             throw new BusinessException(ResultCode.PARAM_ERROR,
-                    kindLabel + "不能超过 " + maxSize.toMegabytes() + "MB");
+                    rules.label() + "不能超过 " + rules.maxSize().toMegabytes() + "MB");
         }
 
-        // ---- ③ 扩展名白名单 ----
         String extension = extractExtension(file.getOriginalFilename());
-        if (!allowedExtensions.contains(extension)) {
+        if (!rules.allowedExtensions().contains(extension)) {
             throw new BusinessException(ResultCode.PARAM_ERROR,
-                    "只允许上传 " + String.join(" / ", allowedExtensions) + " 格式的" + kindLabel);
+                    "只允许上传 " + String.join(" / ", rules.allowedExtensions()) + " 格式的" + rules.label());
         }
 
-        // ---- ④ 算内容哈希（决定文件叫什么）----
-        // 这是"同一张图只存一份"的全部依据：名字由内容算出来，
-        // 同样的字节必然算出同样的 key，于是第二次上传直接命中已有文件。
-        // 详见 buildObjectKey 与下面"命中"那条分支。
+        // Hash before writing so identical content resolves to the same key.
         String hash = sha256Hex(file);
 
-        // ---- ⑤ 生成对象路径：{类型前缀}/{哈希前两位}/{哈希}.{扩展名} ----
-        String objectKey = buildObjectKey(hash, extension, prefixOf(uploadType));
+        String prefix = StringUtils.hasText(rules.prefix()) ? rules.prefix() : uploadType.getCode();
+        String objectKey = ContentAddressedKeys.objectKey(prefix, hash, extension);
 
-        // ---- ⑥ 命中已有文件就不写了 ----
-        // 【这一步是去重的兑现处】同样的内容之前传过，磁盘上已经有一份完全相同的
-        //   文件 —— 再写一遍只会得到第二个字节相同、名字不同的副本（这正是改造前
-        //   的行为）。这里直接把这个 key 的地址返回去即可。
-        //
-        // 【为什么"命中"要放在总容量检查【之前】】
-        //   命中不写盘、不占新空间，所以它不该被"上传目录满了"拦住 ——
-        //   改造前每次上传都必然新增一个文件，两件事的先后无所谓；
-        //   现在先判容量的话会出现"传一张早就在服务器上的图，却被告知空间不足"。
         boolean alreadyStored = fileStorage.exists(objectKey);
 
-        // ---- ⑦ 上传目录总容量（只在真的要写盘时判）----
+        // Reusing an existing object adds no bytes to storage.
         if (!alreadyStored) {
             checkTotalCapacity(file.getSize());
         }
 
-        // ---- ⑧ Content-Type ----
-        // 优先用客户端声明的；没声明就按扩展名猜一个。
-        // 它对本地存储的意义是"浏览器打开这个文件时是显示/播放还是下载"——
-        // 缺了它（或猜成 application/octet-stream）浏览器会直接把文件当附件下载下来
         String contentType = StringUtils.hasText(file.getContentType())
                 ? file.getContentType()
                 : guessContentType(extension);
 
-        // ---- ⑨ 落盘（或者跳过）----
-        // 【为什么传流、不传 byte[]】
-        //   原来这里是 file.getBytes()，会把整个文件读成一个 byte[] 放进堆。
-        //   本项目附件上限 100MB，而容器内存上限 640m、堆约 384MB
-        //   （见 docker-compose.prod.yaml 的 mem_limit 与那里的 JAVA_TOOL_OPTIONS）
-        //   —— 三四个并发的大附件上传就足以把容器打 OOM，
-        //   症状是"上传到一半服务没了"，而且日志里看不出和上传有关。
-        //
-        //   getInputStream() 拿到的是流：Spring 对超过阈值的 multipart 会先落到
-        //   临时文件，之后整条路径是"磁盘 → 缓冲区 → 磁盘"，堆占用与文件大小无关。
-        //
-        //   流必须在这里关掉（try-with-resources）—— 按 FileStorage.store 的约定，
-        //   实现方不负责关闭它（实现里再关一次就成了二次关闭）。
-        //
-        // ⚠️ 【这个流是【第二次】读同一个 multipart】
-        //   第一次读在 sha256Hex 里（只算哈希、不落盘）。之所以敢读两遍：
-        //   MultipartFile.getInputStream() 的契约没有"只能读一次"这条限制 ——
-        //   对比 transferTo 的注释明确写了"只能调用一次"，而 getInputStream
-        //   每次返回一个新流（StandardMultipartFile 直接委托 part.getInputStream()，
-        //   底层是磁盘临时文件；测试用的 MockMultipartFile 是内存字节数组）。
-        //   两遍都是流式 + 固定缓冲区，堆占用与文件大小无关，见上面那段。
         String url;
         if (alreadyStored) {
-            // 命中：一个字节都不写，直接给地址。
-            // 日志要留痕，否则"为什么这次上传没产生新文件"在事后无从回答
             log.info("上传内容已存在，复用已有文件: key={}, 原始文件名={}",
                     objectKey, file.getOriginalFilename());
             url = fileStorage.urlOf(objectKey);
         } else {
+            // The second stream pass writes the content without loading it into memory.
             try (InputStream content = file.getInputStream()) {
                 url = fileStorage.store(content, objectKey, contentType);
             } catch (IOException e) {
@@ -238,54 +79,21 @@ public class UploadService {
             }
         }
 
-        // 名字单独跑一遍"清洗"再返回：前端要拿它去渲染附件列表，
-        // 而且它会被存进 article_attachment.name（varchar(100)）。
-        // ⚠️ 【命中时也必须返回原始文件名，不能回落成哈希名】：
-        //    前端优先用后端回的 name 展示（见 web 端 useUpload.ts），
-        //    附件清单里显示一串哈希的话，用户根本认不出那是哪个文件。
-        //    sanitizeName 的两个入参里，originalFilename 是用户选的那个名字，
-        //    objectKey 只在"客户端根本没传文件名"时兜底。
         return new UploadResult(url, sanitizeName(file.getOriginalFilename(), objectKey), file.getSize());
     }
 
-    /**
-     * 上传总量护栏：本次文件加上之后，如果超过配置的总上限就拒绝。
-     *
-     * 【为什么必须在上传【之前】判，而不是写完再判】
-     *   写完再判的话文件已经落盘了，只能"再删掉"——那既浪费一次 100MB 的写入，
-     *   又会在"删也失败"时留下一个没登记的垃圾文件。事前判断一次，
-     *   拒绝时磁盘上什么都没有，语义干净。
-     *
-     * 【为什么是"当前占用 + 本次大小 > 上限"而不是">= "】
-     *   上限的语义是"最多能占到这么多"。当前占用恰好等于上限时，
-     *   再传一个 1 字节的文件也该被拒（那才会超）。用 > 表达这条规则。
-     *
-     * 【⚠️ 这条护栏是"尽力而为"的，不是强一致的事务保证】
-     *   两个人同时上传时，他们可能各自看到"还装得下"，于是一起写进去，
-     *   实际占用略微超过上限（超出量不超过"并发数 × 单文件上限"）。
-     *   这是【刻意接受的】取舍：要做到严格不超就得在上传路径上加一把分布式锁，
-     *   而那个锁的代价（等待、超时、Redis 故障时上传全挂）远大于
-     *   "偶尔超出几十 MB"的后果 —— 这道闸的目的是别让磁盘爆掉，
-     *   不是"把每一字节都算准"。真正兜底的是磁盘本身。
-     *
-     * @param incomingSize 本次要写入的字节数
-     * @throws BusinessException 放不下时（PARAM_ERROR —— 这是用户可以自行处理的问题：
-     *                           删掉旧的附件再传）
-     */
+    /** Best-effort capacity guard; concurrent uploads may pass against the same snapshot. */
     private void checkTotalCapacity(long incomingSize) {
         DataSize maxTotal = properties.getMaxTotalSize();
         if (maxTotal == null || maxTotal.toBytes() <= 0) {
-            return;     // 配成 0 或负数视为"不限制"（本地调试可能这样配）
-        }
-
-        // 真的去量一遍目录（理由见 LocalFileStorage.usedBytes 的注释）
-        long used = fileStorage.usedBytes();
-        if (used + incomingSize <= maxTotal.toBytes()) {
             return;
         }
 
-        // 提示里要带上"现在用了多少"，否则用户只知道"传不了"，
-        // 不知道是该去清理旧文件还是该找管理员扩容
+        long used = fileStorage.usedBytes();
+        if (incomingSize <= maxTotal.toBytes() - used) {
+            return;
+        }
+
         throw new BusinessException(ResultCode.PARAM_ERROR,
                 "上传空间不足：已用 " + formatSize(used) + "，上限 " + formatSize(maxTotal.toBytes())
                         + "。请先删除不再需要的旧附件或联系管理员扩容");
@@ -302,38 +110,11 @@ public class UploadService {
         return bytes / 1024 + " KB";
     }
 
-    /**
-     * 把用户传来的原始文件名清洗成"可以直接存、可以安全展示"的名字。
-     *
-     * 【为什么原始文件名不能直接用】
-     *   它是【不可信输入】：来自客户端，用户可以用脚本随便编。三类具体风险：
-     *     · 带路径：{@code C:\Users\me\论文.pdf} 或 {@code ../../etc/passwd} ——
-     *       老 IE 就会把整个路径当文件名传上来。存进库里以后再显示，
-     *       界面上会出现一串与用户无关的本机路径
-     *     · 超长：有的系统允许 255 字节的文件名，而这一列只能放 100 字。
-     *       不截断的话，用户上传成功、保存文章时却收到"附件名过长"的 400 ——
-     *       而这条错跟他做的事看起来毫无关系（他什么都没填，是文件名太长）
-     *     · 空白：只有空格或不可见字符的名字会让前端渲染出一个空白的附件行
-     *
-     * 【为什么截断到 100 而不是别的数字】
-     *   它必须 ≤ article_attachment.name 的列宽（100）与
-     *   ArticleAttachmentForm.name 上的 @Size(max = 100) ——
-     *   三处取同一个数字，"上传成功就一定存得进文章"这条不变量才成立。
-     *
-     * 【⚠️ 这里【不】做 HTML 转义】附件名最终会被前端渲染，转义是前端的事
-     *   （与评论不同：评论是"入库即成品"，而附件名是要回到用户手里再被编辑的
-     *   原始数据，提前转义会让"论文&数据.pdf"变成"论文&amp;数据.pdf"存进库）。
-     *   真正的防线是前端的渲染方式（文本插值而不是 v-html），以及
-     *   下载响应头上写死的 UUID 文件名（见 UploadResponseHeaderFilter）。
-     *
-     * @param originalFilename 客户端传来的原始文件名（可能为空、可能带路径）
-     * @param objectKey        我们自己生成的对象路径（原始名不可用时拿它的文件名兜底）
-     * @return 长度 ≤ 100 的展示名，保证非空
-     */
+    /** Keeps a safe display name within the attachment column limit, preserving its extension. */
     private String sanitizeName(String originalFilename, String objectKey) {
         String name = originalFilename == null ? "" : originalFilename;
 
-        // 统一分隔符后只保留最后一段（与 extractExtension 同一套处理，理由见那里）
+        // Only keep the filename, never a client-supplied path.
         name = name.replace('\\', '/');
         int slash = name.lastIndexOf('/');
         if (slash >= 0) {
@@ -341,8 +122,6 @@ public class UploadService {
         }
         name = name.trim();
 
-        // 名字为空（客户端没传）时用我们生成的文件名兜底，而不是留一个空字符串：
-        // 空名字在前端的附件列表里就是一行留白，用户看不出那是什么
         if (name.isEmpty()) {
             int lastSlash = objectKey.lastIndexOf('/');
             name = lastSlash >= 0 ? objectKey.substring(lastSlash + 1) : objectKey;
@@ -350,9 +129,7 @@ public class UploadService {
 
         int maxNameLength = 100;
         if (name.length() > maxNameLength) {
-            // 截断时【保留扩展名】：前 100 个字符切下去很可能把 ".pdf" 切掉，
-            // 那样用户看到的名字就没有类型提示了。所以规则是
-            // "后缀尽量留、前面的部分让位"
+            // Preserve the extension when shortening a display name.
             String suffix = "";
             int dot = name.lastIndexOf('.');
             if (dot > 0 && name.length() - dot <= 20) {
@@ -363,188 +140,35 @@ public class UploadService {
         return name;
     }
 
-    /** 这一套允许的扩展名（图片五种 / 音频 mp3 / 附件十六种，三个配置项各自独立） */
-    private List<String> allowedExtensionsOf(UploadType type) {
+    private UploadRules rulesOf(UploadType type) {
         return switch (type) {
-            case IMAGE -> properties.getAllowedExtensions();
-            case AUDIO -> properties.getAudioAllowedExtensions();
-            case ATTACHMENT -> properties.getAttachmentAllowedExtensions();
+            case IMAGE -> new UploadRules(properties.getAllowedExtensions(), properties.getMaxSize(),
+                    "图片", properties.getKeyPrefix());
+            case AUDIO -> new UploadRules(properties.getAudioAllowedExtensions(), properties.getAudioMaxSize(),
+                    "音频", properties.getAudioKeyPrefix());
+            case ATTACHMENT -> new UploadRules(properties.getAttachmentAllowedExtensions(),
+                    properties.getAttachmentMaxSize(), "附件", properties.getAttachmentKeyPrefix());
         };
     }
 
-    /** 这一类的大小上限（图片 10MB / 音频 20MB / 附件 100MB，依据见 UploadProperties 的注释） */
-    private DataSize maxSizeOf(UploadType type) {
-        return switch (type) {
-            case IMAGE -> properties.getMaxSize();
-            case AUDIO -> properties.getAudioMaxSize();
-            case ATTACHMENT -> properties.getAttachmentMaxSize();
-        };
+    private record UploadRules(List<String> allowedExtensions, DataSize maxSize, String label, String prefix) {
     }
 
-    /**
-     * 报错文案里的"这一类的名字"（"图片不能超过 10MB" / "音频不能超过 20MB" /
-     * "附件不能超过 100MB"）。
-     *
-     * 【为什么用 switch 而不是像原来那样写成三元表达式】
-     *   两种类型时 {@code type == AUDIO ? a : b} 是清楚的；三种及以上就必须写
-     *   {@code type == AUDIO ? a : type == ATTACHMENT ? b : c} —— 那既难读，
-     *   也把"漏了一种"变成了一个【静默的默认分支】（默认落到图片上，
-     *   报错文案会说"图片不能超过 100MB"）。用 switch 表达式之后，
-     *   以后再加类型时编译器会直接报"switch 未覆盖全部枚举值"，
-     *   不可能漏。下面这几个方法（kindLabelOf / allowedExtensionsOf / maxSizeOf /
-     *   prefixOf）都照这个写法。
-     */
-    private String kindLabelOf(UploadType type) {
-        return switch (type) {
-            case IMAGE -> "图片";
-            case AUDIO -> "音频";
-            case ATTACHMENT -> "附件";
-        };
-    }
-
-    /** 存储目录前缀：图片是 cover（可配置）、音频是 music、附件是 attachment，三者不会撞在一起 */
-    private String prefixOf(UploadType type) {
-        String prefix = switch (type) {
-            case IMAGE -> properties.getKeyPrefix();
-            case AUDIO -> properties.getAudioKeyPrefix();
-            case ATTACHMENT -> properties.getAttachmentKeyPrefix();
-        };
-        return StringUtils.hasText(prefix) ? prefix : type.getCode();
-    }
-
-    /**
-     * 构造存储路径，形如 {@code cover/2f/2f8e…c1.png}（音频则是 {@code music/ab/ab3d….mp3}）。
-     *
-     * ============================================================
-     * 【2026-09 改造：文件名从"随机 UUID"换成"内容哈希"（内容寻址）】
-     * ============================================================
-     *
-     * 【为什么换 —— 它解决的是哪个具体问题】
-     *   改造前每次上传都生成一个新 UUID，于是"同一张图传两次"在磁盘上
-     *   就是两份逐字节相同的文件：换一次封面留一张废图、同一张配图放进
-     *   两篇文章又是两份。磁盘只会越来越大，直到撞上总容量护栏
-     *   （见 checkTotalCapacity），而那时用户看到的是"上传空间不足"，
-     *   完全不知道原因是一堆重复的图。
-     *   改成内容哈希之后，**同样的内容必然算出同样的 key** ——
-     *   第二次上传时 {@code exists} 命中，一个字节都不写（见 upload 的 ⑥⑨）。
-     *
-     * 【哈希用什么】SHA-256，取十六进制小写（64 个字符）。
-     *   · 用 SHA-256 而不是 MD5/CRC32：后两者有已知的构造碰撞方法，
-     *     而这里的碰撞后果是"新文件被误判成已存在，用户拿到别人的文件"——
-     *     也就是内容被张冠李戴。SHA-256 目前没有实用碰撞攻击。
-     *   · 用 hex 而不是 Base64：Base64 会引入 {@code +} {@code /} {@code =}，
-     *     前两个要 URL 编码，第三个在文件名里也难看；而 hex 只有 {@code 0-9a-f}，
-     *     可以安全地放进 URL、也不需要转义。
-     *     ⚠️ 这条还牵着两处别的东西：正文引用正则的字符集
-     *     （{@code UploadedFileCleaner.UPLOADED_FILE_IN_CONTENT}）与
-     *     下载响应头的文件名清洗（{@code UploadResponseHeaderFilter.safeFilename}），
-     *     两者都能安全处理 hex，换成 Base64 则会在那两处出问题。
-     *
-     * 【为什么按"哈希前两位"分一层目录，而不是像原来那样按年月】
-     *   按年月与内容寻址是【互相矛盾】的：同一张图这个月传和下个月传
-     *   会算出同一个哈希，但如果 key 里含年月，两者就落到不同目录、
-     *   去重直接失效。所以时间这一维必须让位。
-     *   分一层的原因仍然是要控制单目录的文件数：一张图一个文件，
-     *   256 个目录（两位 hex）在几千到几十万文件量级都够用
-     *   （一万个文件平均每目录 39 个）。
-     *   代价是**失去了"按上传时间清理旧文件"的能力** —— 那是原来按年月分目录的
-     *   主要好处之一，但它从来没有被真正用过（项目里没有任何按时间清理的任务），
-     *   而换来的"同一份内容只占一份空间"是每天都在生效的。
-     *
-     * 【⚠️ 为什么"不同扩展名的同一份内容"会存两份】
-     *   哈希只算内容，但 key 里还带着扩展名（浏览器靠它猜 MIME）。
-     *   所以同一个文件被改名成 a.png 与 a.jpg 各传一次，会得到两个 key。
-     *   这是**已知且接受**的漏网：真要修就得把扩展名也归一化，
-     *   而"该归一成哪个"没有正确答案（png 归一成 jpg 会丢透明通道）。
-     *   现实中"同一份字节换个扩展名再传"极少见，而扩展名丢失的代价是实打实的。
-     *
-     * 【⚠️ 为什么不同 type 之间的同一份内容也存两份】
-     *   key 的第一段是类型前缀（cover / music / attachment），所以同一段字节
-     *   当图片传、又当附件传，会落在两个前缀下、各存一份。
-     *   这**必须**如此：{@code UploadResponseHeaderFilter} 是按前缀决定
-     *   "浏览器就地打开还是强制下载"的（attachment/ 一律强制下载），
-     *   跨类型共用一份会让"音乐拿到的地址在 attachment/ 下"，
-     *   结果就是播放器播不出来（用例 ArticleAttachmentTest ⑮ 钉着这一点）。
-     *   也因此，去重的范围天然是【同一 type 内】，不是全站。
-     *
-     * 【为什么文件名仍然不能保留用户的原名】与改造前同一条理由：
-     *   · 原名可能重复、可能带路径（../../）、可能带双扩展名（shell.jpg.jsp）
-     *   · 原名可能含中文、空格、特殊字符，进 URL 还要编码，纯属自找麻烦
-     *   现在文件名干脆不含任何用户输入 —— 它是内容的函数。
-     *
-     * @param hash      文件内容的 SHA-256 十六进制串（64 个小写字符）
-     * @param extension 小写扩展名（不含点）
-     * @param prefix    目录前缀（图片 cover / 音频 music / 附件 attachment），由调用方按种类传进来
-     */
-    private String buildObjectKey(String hash, String extension, String prefix) {
-        return prefix + "/" + hash.substring(0, HASH_DIR_LENGTH) + "/" + hash + "." + extension;
-    }
-
-    /**
-     * 算一个上传文件的 SHA-256，返回十六进制小写串（见 buildObjectKey 里"哈希怎么选"）。
-     *
-     * 【为什么是"流式边读边算"而不是 file.getBytes()】
-     *   附件上限 100MB，而容器堆只有约 384MB。getBytes() 会把整个文件读进堆：
-     *   三个并发的大附件上传就能把容器打 OOM。这里用固定大小的缓冲区循环读，
-     *   堆占用与文件大小无关（同一个理由写在 FileStorage.store 的参数说明里）。
-     *
-     * 【⚠️ 这一次读是"白读"——它不落盘，之后还要再读一遍去写盘】
-     *   看起来浪费，但它是内容寻址的必然代价：**文件名取决于内容，
-     *   所以在决定往哪写之前必须先把内容读完**。替代方案都被否掉了：
-     *     · 先写临时文件、边写边算、算完再改名 —— 要在 FileStorage 上再加一个
-     *       move 方法，而且命中时那个临时文件白写一遍（100MB 附件的代价很实在）
-     *     · 边写边算、写完发现命中就删掉 —— 同上，还多一次删除
-     *   读两遍的代价是本地磁盘顺序读（multipart 超过阈值后 Spring 落临时文件，
-     *   所以第二遍读的是本地临时文件，不是网络），比"白写 100MB"划算。
-     *
-     * 【读不出来时抛什么】与写盘失败区分开：这里失败是"读不到用户传的内容"，
-     *   属于可重试的客户端侧问题（网络中断、临时文件被清理），
-     *   所以是 BusinessException(ERROR) + "请重试"，而不是 500 的运行时异常。
-     *
-     * @param file 上传的文件（可重复读取，理由见 upload 方法 ⑨ 处的说明）
-     * @return 64 个小写十六进制字符
-     */
+    /** Hashes the stream without loading the entire upload into memory. */
     private String sha256Hex(MultipartFile file) {
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException e) {
-            // JDK 规范要求每个实现都必须带 SHA-256，正常走不到这里。
-            // 真走到了说明运行环境的 JCA 提供者被改过 —— 那是部署问题，
-            // 不是任何用户能处理的事，所以按 500 抛并留下日志
-            log.error("当前运行环境没有可用的 SHA-256 实现", e);
-            throw new IllegalStateException("服务器无法计算文件指纹", e);
-        }
-
-        byte[] buffer = new byte[HASH_BUFFER_SIZE];
         try (InputStream content = file.getInputStream()) {
-            int read;
-            while ((read = content.read(buffer)) != -1) {
-                digest.update(buffer, 0, read);
-            }
+            return ContentAddressedKeys.sha256Hex(content);
         } catch (IOException e) {
             log.error("读取上传文件失败（计算内容哈希时）", e);
             throw new BusinessException(ResultCode.ERROR, "读取文件失败，请重试");
         }
-
-        return HexFormat.of().formatHex(digest.digest());
     }
 
-    /**
-     * 从原始文件名里取出小写扩展名。
-     *
-     * 【为什么只取扩展名、其余一律丢掉】
-     *   客户端传来的文件名属于【不可信输入】。这里只把它当作"用户想传什么格式"的提示，
-     *   真正的文件名由我们自己生成。这样即使传来 {@code ../../../etc/passwd}
-     *   或者 {@code a.jsp;.jpg}，也不会影响我们拼出来的路径。
-     *
-     * @return 小写扩展名（不含点）；取不到时返回空串，后面会被白名单拒掉
-     */
+    /** Reads only the extension from the untrusted client filename. */
     private String extractExtension(String originalFilename) {
         if (!StringUtils.hasText(originalFilename)) {
             return "";
         }
-        // 有些客户端会把整个路径带过来（老 IE 就是这样），先取最后一段
         String name = originalFilename.replace('\\', '/');
         int slash = name.lastIndexOf('/');
         if (slash >= 0) {
@@ -557,26 +181,13 @@ public class UploadService {
         return name.substring(dot + 1).toLowerCase(Locale.ROOT);
     }
 
-    /**
-     * 按扩展名猜一个 MIME 类型（客户端没提供 Content-Type 时的兜底）。
-     *
-     * 【⚠️ 附件为什么没有列进这个 switch】
-     *   本地存储只把字节写进磁盘、【不保存 Content-Type】（见 LocalFileStorage），
-     *   所以浏览器打开 /uploads/** 时拿到的类型是 Spring 按【文件扩展名】现推的
-     *   （ResourceHttpRequestHandler 的行为），与这里无关。
-     *   而对附件来说，真正决定"下载还是就地打开"的是响应头
-     *   Content-Disposition: attachment（见 UploadResponseHeaderFilter）——
-     *   附件永远走下载，猜不猜得准 MIME 都不影响结果。
-     *   所以这里只保留"猜错了会有可见后果"的那几个（图片会被当裂图、mp3 会不播放）。
-     */
+    /** Fallback MIME type when the client leaves Content-Type empty. */
     private String guessContentType(String extension) {
         return switch (extension) {
             case "png" -> "image/png";
             case "gif" -> "image/gif";
             case "webp" -> "image/webp";
-            // 音频只有一个扩展名（见 UploadProperties.audioAllowedExtensions）。
-            // ⚠️ 必须是 audio/mpeg 而不是 audio/mp3 —— 后者不是注册过的 MIME 类型，
-            // 浏览器拿到它多半会当成未知类型去下载而不是播放
+            // Browsers recognize audio/mpeg, not audio/mp3.
             case "mp3" -> "audio/mpeg";
             default -> "image/jpeg";
         };

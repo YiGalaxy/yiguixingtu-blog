@@ -4,6 +4,7 @@ import com.yigalaxy.yiguixingtu.article.dto.ArticleStatsVO;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
 import com.yigalaxy.yiguixingtu.article.service.ArticleService;
+import com.yigalaxy.yiguixingtu.article.service.ArticleWriteService;
 import com.yigalaxy.yiguixingtu.category.entity.Category;
 import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
 import com.yigalaxy.yiguixingtu.config.RedisConfig;
@@ -50,6 +51,9 @@ class ArticleStatsTest extends AbstractIntegrationTest {
 
     @Autowired
     private ArticleService articleService;
+
+    @Autowired
+    private ArticleWriteService articleWriteService;
 
     @Autowired
     private ArticleMapper articleMapper;
@@ -250,7 +254,7 @@ class ArticleStatsTest extends AbstractIntegrationTest {
         form.setTitle(uniqueMark() + " 走服务新建");
         form.setContent("正文");
         form.setStatus(1);
-        articleService.create(form, 1L);
+        articleWriteService.create(form, 1L);
 
         assertEquals(before + 1, articleService.stats().getArticleCount(),
                 "发文之后首页的统计数字应当立刻更新（版本号让统计缓存一起失效了）");

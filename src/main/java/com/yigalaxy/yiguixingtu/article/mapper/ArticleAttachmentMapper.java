@@ -12,7 +12,7 @@ import org.apache.ibatis.annotations.Select;
  * 【除了 BaseMapper 给的增删改查，这里只有一条手写 SQL】
  *   它回答"这个文件还有没有【别的文章的附件】在用"。
  *   文章删除（或编辑文章移除附件）时要先问清这一点才敢去删物理文件 ——
- *   完整推导见 ArticleServiceImpl.remove 的注释。
+ *   删除流程由 ArticleWriteService.remove 编排。
  *
  * 【⚠️ 为什么"有没有别人在引用"要分成两条 SQL、放在两个 Mapper 里】
  *   引用关系散在两处：① 文章的正文与封面（在 article 表里）、
@@ -82,7 +82,7 @@ public interface ArticleAttachmentMapper extends BaseMapper<ArticleAttachment> {
      *   （删歌时判断"这个文件还有没有别人在用"），那里没有"我自己这篇文章"要排除。
      *
      * 【为什么删歌要去查附件表】
-     *   附件的地址只要求"落在本项目上传目录之内"（见 ArticleServiceImpl.validateAttachments），
+     *   附件的地址只要求"落在本项目上传目录之内"（见 ArticleAttachmentService.validate），
      *   并没有强制必须在 attachment/ 子目录里 —— 所以一条附件行的 url 理论上可以指向
      *   {@code /uploads/music/xxx.mp3}（有人手工构造请求就能提交出这种数据）。
      *   查一遍的成本是小表上的一条 COUNT，换来的是"删歌不会把某篇文章的附件删成 404"。

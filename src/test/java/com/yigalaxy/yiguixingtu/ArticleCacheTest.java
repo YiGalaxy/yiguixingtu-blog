@@ -8,6 +8,7 @@ import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
 import com.yigalaxy.yiguixingtu.article.service.ArticleService;
+import com.yigalaxy.yiguixingtu.article.service.ArticleWriteService;
 import com.yigalaxy.yiguixingtu.config.RedisConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -70,6 +71,9 @@ class ArticleCacheTest extends AbstractIntegrationTest {
 
     @Autowired
     private ArticleService articleService;
+
+    @Autowired
+    private ArticleWriteService articleWriteService;
 
     @Autowired
     private ArticleMapper articleMapper;
@@ -160,7 +164,7 @@ class ArticleCacheTest extends AbstractIntegrationTest {
         assertEquals(0L, articleService.pagePublished(query).getTotal());
 
         // 通过 Service 新增（带 @CacheEvict）
-        articleService.create(formOf(mark + " 新文章", 1), 1L);
+        articleWriteService.create(formOf(mark + " 新文章", 1), 1L);
 
         // 缓存被清了，所以这次会重新查库、看到新文章
         assertEquals(1L, articleService.pagePublished(query).getTotal(),
@@ -173,12 +177,12 @@ class ArticleCacheTest extends AbstractIntegrationTest {
         String mark = uniqueMark();
 
         // 先造一篇草稿（status=0，前台看不到）
-        Long draftId = articleService.create(formOf(mark + " 草稿", 0), 1L);
+        Long draftId = articleWriteService.create(formOf(mark + " 草稿", 0), 1L);
         ArticleQuery query = queryByKeyword(mark);
         assertEquals(0L, articleService.pagePublished(query).getTotal(), "草稿不该出现在前台");
 
         // 发布它
-        articleService.updateStatus(draftId, 1);
+        articleWriteService.updateStatus(draftId, 1);
 
         assertEquals(1L, articleService.pagePublished(query).getTotal(),
                 "发布之后前台应当立刻能看到");
@@ -188,11 +192,11 @@ class ArticleCacheTest extends AbstractIntegrationTest {
     @DisplayName("删除文章 -> 清掉列表缓存，前台立刻消失")
     void remove_shouldEvictListCache() {
         String mark = uniqueMark();
-        Long id = articleService.create(formOf(mark + " 待删除", 1), 1L);
+        Long id = articleWriteService.create(formOf(mark + " 待删除", 1), 1L);
         ArticleQuery query = queryByKeyword(mark);
         assertEquals(1L, articleService.pagePublished(query).getTotal());
 
-        articleService.remove(id);
+        articleWriteService.remove(id);
 
         assertEquals(0L, articleService.pagePublished(query).getTotal(),
                 "删除之后前台应当立刻看不到");
@@ -202,11 +206,11 @@ class ArticleCacheTest extends AbstractIntegrationTest {
     @DisplayName("编辑文章标题 -> 清掉列表缓存，前台立刻是新标题")
     void update_shouldEvictListCache() {
         String mark = uniqueMark();
-        Long id = articleService.create(formOf(mark + " 旧标题", 1), 1L);
+        Long id = articleWriteService.create(formOf(mark + " 旧标题", 1), 1L);
         ArticleQuery query = queryByKeyword(mark);
         assertEquals(mark + " 旧标题", articleService.pagePublished(query).getRecords().get(0).getTitle());
 
-        articleService.update(id, formOf(mark + " 新标题", 1));
+        articleWriteService.update(id, formOf(mark + " 新标题", 1));
 
         assertEquals(mark + " 新标题", articleService.pagePublished(query).getRecords().get(0).getTitle(),
                 "编辑之后缓存应被清除，前台拿到的是新标题");
@@ -293,7 +297,7 @@ class ArticleCacheTest extends AbstractIntegrationTest {
     void write_shouldBumpCacheVersion() {
         String before = cacheVersion.current();
 
-        articleService.create(formOf("版本号自增验证", 1), 1L);
+        articleWriteService.create(formOf("版本号自增验证", 1), 1L);
 
         String after = cacheVersion.current();
         assertNotEquals(before, after,
@@ -304,13 +308,13 @@ class ArticleCacheTest extends AbstractIntegrationTest {
     @DisplayName("版本号推进后，旧 key 不再被使用（而不是被删除）")
     void afterBump_oldKeyShouldNoLongerBeUsed() {
         String mark = uniqueMark();
-        Long id = articleService.create(formOf(mark + " 第一篇", 1), 1L);
+        Long id = articleWriteService.create(formOf(mark + " 第一篇", 1), 1L);
         ArticleQuery query = queryByKeyword(mark);
 
         articleService.pagePublished(query);                 // 用版本 v 缓存了 1 篇
         String keyBefore = awaitCacheKeys(1, 2000).iterator().next();
 
-        articleService.updateStatus(id, 0);                  // 下架 → 版本号 +1
+        articleWriteService.updateStatus(id, 0);                  // 下架 → 版本号 +1
 
         articleService.pagePublished(query);                 // 用版本 v+1 重新缓存
         Set<String> keysAfter = awaitCacheKeys(2, 2000);

@@ -5,6 +5,7 @@ import com.yigalaxy.yiguixingtu.article.dto.ArticleForm;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleQuery;
 import com.yigalaxy.yiguixingtu.article.dto.ArticleVO;
 import com.yigalaxy.yiguixingtu.article.service.ArticleService;
+import com.yigalaxy.yiguixingtu.article.service.ArticleWriteService;
 import com.yigalaxy.yiguixingtu.auth.LoginUser;
 import com.yigalaxy.yiguixingtu.common.Result;
 import com.yigalaxy.yiguixingtu.common.ResultCode;
@@ -39,10 +40,14 @@ public class AdminArticleController {
     private static final String SCOPE_CREATE = "article:create";
 
     private final ArticleService articleService;
+    private final ArticleWriteService articleWriteService;
     private final IdempotencyService idempotency;
 
-    public AdminArticleController(ArticleService articleService, IdempotencyService idempotency) {
+    public AdminArticleController(ArticleService articleService,
+                                  ArticleWriteService articleWriteService,
+                                  IdempotencyService idempotency) {
         this.articleService = articleService;
+        this.articleWriteService = articleWriteService;
         this.idempotency = idempotency;
     }
 
@@ -88,7 +93,7 @@ public class AdminArticleController {
 
         // 没带幂等键：老行为，直接创建
         if (!StringUtils.hasText(idempotencyKey)) {
-            return Result.success(articleService.create(form, getCurrentUserId()));
+            return Result.success(articleWriteService.create(form, getCurrentUserId()));
         }
 
         IdempotencyService.Claim claim = idempotency.claim(SCOPE_CREATE, idempotencyKey);
@@ -104,7 +109,7 @@ public class AdminArticleController {
         }
 
         try {
-            Long id = articleService.create(form, getCurrentUserId());
+            Long id = articleWriteService.create(form, getCurrentUserId());
             // 先创建成功、再记结果。顺序反了的话，
             // 一旦创建失败就会留下一个"处理过了"的假记录，
             // 用户重试时会被当成重复请求直接返回一个并不存在的 id。
@@ -121,21 +126,21 @@ public class AdminArticleController {
     @Operation(summary = "编辑文章")
     @PutMapping("/{id}")
     public Result<Void> update(@PathVariable Long id, @Valid @RequestBody ArticleForm form) {
-        articleService.update(id, form);
+        articleWriteService.update(id, form);
         return Result.success();
     }
 
     @Operation(summary = "发布 / 下架")
     @PutMapping("/{id}/status")
     public Result<Void> updateStatus(@PathVariable Long id, @RequestParam Integer status) {
-        articleService.updateStatus(id, status);
+        articleWriteService.updateStatus(id, status);
         return Result.success();
     }
 
     @Operation(summary = "删除文章")
     @DeleteMapping("/{id}")
     public Result<Void> remove(@PathVariable Long id) {
-        articleService.remove(id);
+        articleWriteService.remove(id);
         return Result.success();
     }
 

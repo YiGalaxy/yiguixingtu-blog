@@ -199,6 +199,18 @@ class CategoryAdminTest extends AbstractIntegrationTest {
     }
 
     @Test
+    @DisplayName("分类描述超过 255 字 -> 400")
+    void createCategory_descriptionTooLong_shouldBeRejected() throws Exception {
+        String description = "x".repeat(256);
+        mockMvc.perform(post("/admin/category")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"分类" + mark + "\",\"description\":\"" + description + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400));
+    }
+
+    @Test
     @DisplayName("④ 编辑分类（改名 + 改描述 + 改排序）-> 落库，且前台列表立刻显示新名字")
     void updateCategory_shouldPersistAndRefreshList() throws Exception {
         Category category = insertCategory("改前" + mark);

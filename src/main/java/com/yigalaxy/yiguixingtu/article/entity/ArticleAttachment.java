@@ -56,7 +56,7 @@ public class ArticleAttachment implements Serializable {
      * article 用的是逻辑删除（删文章只把 deleted 置 1），
      * 外键的 ON DELETE CASCADE 根本不会触发 —— 一个"看着会级联、
      * 实际永远不动手"的外键比没有外键危险。级联逻辑写在
-     * ArticleServiceImpl.remove 里，只有一处。
+     * ArticleWriteService.remove 里。
      */
     @Schema(description = "所属文章ID")
     private Long articleId;
@@ -72,7 +72,7 @@ public class ArticleAttachment implements Serializable {
     /**
      * 附件地址，形如 {@code http://localhost:8082/uploads/attachment/2026/09/{uuid}.pdf}。
      * 保存文章时会校验它必须落在本项目的上传地址前缀之内
-     * （见 ArticleServiceImpl.validateAttachments），防止外部地址被塞进来。
+     * （见 ArticleAttachmentService.validate），防止外部地址被塞进来。
      */
     @Schema(description = "附件地址", example = "http://localhost:8082/uploads/attachment/2026/09/xxx.pdf")
     private String url;

@@ -3,7 +3,7 @@ package com.yigalaxy.yiguixingtu;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.yigalaxy.yiguixingtu.article.entity.Article;
 import com.yigalaxy.yiguixingtu.article.mapper.ArticleMapper;
-import com.yigalaxy.yiguixingtu.article.service.ArticleService;
+import com.yigalaxy.yiguixingtu.article.service.ArticleWriteService;
 import com.yigalaxy.yiguixingtu.auth.util.JwtUtil;
 import com.yigalaxy.yiguixingtu.category.entity.Category;
 import com.yigalaxy.yiguixingtu.category.mapper.CategoryMapper;
@@ -55,7 +55,7 @@ class ArticlePublicTest extends AbstractIntegrationTest {
 
     /** 用例⑦要用它走"真正的下架路径"（进而触发缓存失效） */
     @Autowired
-    private ArticleService articleService;
+    private ArticleWriteService articleWriteService;
 
     @Autowired
     private CategoryMapper categoryMapper;
@@ -205,7 +205,7 @@ class ArticlePublicTest extends AbstractIntegrationTest {
         //   所以直接改库时缓存并不知道数据变了，前台还会返回旧结果。
         //   而"用户点了下架，前台立刻看不到"这条要求，说的是【通过接口下架】。
         //   用 Mapper 去模拟，验的就不是这条要求了，而是下面⑧那条已知边界。
-        articleService.updateStatus(a.getId(), 0);
+        articleWriteService.updateStatus(a.getId(), 0);
 
         // 下架后：列表没了，详情也 404
         mockMvc.perform(get("/article/page").param("keyword", mark))

@@ -4,24 +4,9 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
-// ⚠️ NotBlank 仍然是需要的：content 与 articleId 上还在用它（只有 nickname 挪走了）
 import lombok.Data;
 
-/**
- * 发表评论的提交表单。
- *
- * 【为什么游客也能评论（不要求登录）】
- *   博客的评论区是"读者说话的地方"。要求注册才能留言，等于把 90% 的读者挡在门外 ——
- *   而博客本身并没有"用户体系"要运营（注册用户只有站长自己）。
- *   代价是要自己处理垃圾评论，本项目的对策有三层：
- *     ① 评论默认【待审核】，不通过就不对外可见（最主要的一层）
- *     ② 接口限流（见 application.properties 的 commentRateLimiter）
- *     ③ 内容与昵称的长度上限 + HTML 转义（见 CommentServiceImpl）
- *
- * 【为什么昵称是必填、邮箱是选填】
- *   昵称会展示在评论区，没有它评论就成了匿名攻击；邮箱只用于站长联系/回复，
- *   读者不给也能评论 —— 强制填邮箱会显著降低评论意愿，而它对博客没什么价值。
- */
+/** 发表评论表单。游客填写昵称，登录用户使用账号昵称。 */
 @Data
 @Schema(description = "发表评论表单")
 public class CommentForm {
@@ -30,28 +15,11 @@ public class CommentForm {
     @jakarta.validation.constraints.NotNull(message = "文章ID不能为空")
     private Long articleId;
 
-    /**
-     * 昵称：**游客必填、注册用户会被服务端忽略**（见下）。
-     *
-     * 【为什么这里去掉了 @NotBlank（2026-09）】
-     *   注册用户（含管理员）发评论时，昵称由后端从 token 里取账号昵称，
-     *   **表单里这个值根本不看**。而 {@code @NotBlank} 是在 Controller 入参上生效的
-     *   （早于 Service），留着它就会逼前端"必须传一个反正会被丢掉的值"——
-     *   哪天前端把它去掉了，注册用户就会收到一句莫名其妙的"昵称不能为空"。
-     *   ⇒ "游客必须填昵称"这条规则搬到 Service 里判（那里才知道你是不是游客），
-     *   报错文案与原来保持一字不差，前端与既有用例都不用改。
-     */
+    /** 游客必填；登录用户的昵称由服务端决定。 */
     @Size(max = 50, message = "昵称最长 50 字")
     @Schema(description = "昵称", example = "路过的读者")
     private String nickname;
 
-    /**
-     * 邮箱：选填。
-     * 【为什么用 @Email 而不是自己写正则】校验邮箱的正则极难写对
-     * （合法格式的范围比直觉宽得多），而 Jakarta Validation 提供的实现
-     * 是业界通用的一套规则 —— 自己写一个更严格的反而会拒掉合法邮箱。
-     * 注意：它只在【填了】的时候校验，空值由 @Email 之外的逻辑放行。
-     */
     @Email(message = "邮箱格式不正确")
     @Size(max = 100, message = "邮箱最长 100 字")
     @Schema(description = "邮箱（选填，不对外展示）", example = "reader@example.com")

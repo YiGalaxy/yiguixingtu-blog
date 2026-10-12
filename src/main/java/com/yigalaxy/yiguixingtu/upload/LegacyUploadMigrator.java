@@ -12,10 +12,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -98,14 +95,8 @@ public class LegacyUploadMigrator {
             new TableColumns("favorite", List.of("url"))
     );
 
-    /** 哈希分目录用几位（与 UploadService.HASH_DIR_LENGTH 一致 —— 两处必须是一样的数字） */
-    private static final int HASH_DIR_LENGTH = 2;
-
     /** SHA-256 的十六进制串长度（64）—— 用来把"新命名"与"旧命名（32 位 UUID）"分开 */
     private static final int HASH_HEX_LENGTH = 64;
-
-    /** 读文件算哈希时的缓冲区大小（与 UploadService.HASH_BUFFER_SIZE 同一个理由） */
-    private static final int HASH_BUFFER_SIZE = 8192;
 
     private final FileStorage fileStorage;
     private final UploadProperties properties;
@@ -289,7 +280,7 @@ public class LegacyUploadMigrator {
             return null;
         }
 
-        return prefix + "/" + hash.substring(0, HASH_DIR_LENGTH) + "/" + hash + "." + extension;
+        return ContentAddressedKeys.objectKey(prefix, hash, extension);
     }
 
     /**
@@ -320,21 +311,10 @@ public class LegacyUploadMigrator {
 
     /** 读磁盘上这个文件的内容，算 SHA-256 十六进制串（流式，不把整个文件读进堆） */
     private String sha256Hex(String objectKey) throws IOException {
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("当前运行环境没有可用的 SHA-256 实现", e);
-        }
         Path file = storageRoot().resolve(objectKey);
-        byte[] buffer = new byte[HASH_BUFFER_SIZE];
         try (InputStream in = Files.newInputStream(file)) {
-            int read;
-            while ((read = in.read(buffer)) != -1) {
-                digest.update(buffer, 0, read);
-            }
+            return ContentAddressedKeys.sha256Hex(in);
         }
-        return HexFormat.of().formatHex(digest.digest());
     }
 
     /**

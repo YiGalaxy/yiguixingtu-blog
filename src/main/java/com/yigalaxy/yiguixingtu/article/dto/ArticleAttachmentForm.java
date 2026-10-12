@@ -20,7 +20,7 @@ import lombok.Data;
  *   · 这里（Bean Validation 注解）：非空、长度上限、大小非负 —— 都是
  *     与配置无关的常量规则，由 @Valid 自动触发，失败由 GlobalExceptionHandler
  *     统一转成 400
- *   · ArticleServiceImpl.validateAttachments：数量上限、size 上限、
+ *   · ArticleAttachmentService.validate：数量上限、size 上限、
  *     url 必须落在本项目上传前缀之内 —— 这三条要么是跨字段的、
  *     要么必须读配置（app.upload.attachment-max-size / base-url），
  *     注解是编译期常量，做不到"跟着配置走"
@@ -58,7 +58,7 @@ public class ArticleAttachmentForm {
      *   因为它依赖【配置】（app.upload.base-url），而注解写不了动态值：
      *   线上 base-url 是 https://域名/api、本地是 http://localhost:8082，
      *   写死任何一条都会让另一套环境全挂。所以这里只做长度限制，
-     *   真正的"必须落在本站上传前缀之内"由 ArticleServiceImpl 判断。
+     *   真正的"必须落在本站上传前缀之内"由 ArticleAttachmentService 判断。
      *   ⚠️ 这条校验不是可选项：不校验的话，任何人都能把
      *      https://别人的钓鱼站/xxx.exe 填进 attachments，
      *      它会以"本站文章附件"的名义展示给读者 —— 等于替对方做信任背书。

@@ -57,7 +57,7 @@ public interface ArticleMapper extends BaseMapper<Article> {
      *   独占的文件"。同一个文件完全可能被两篇文章共用（同一张封面图、
      *   同一张正文配图），无脑删会把另一篇文章的图删裂 ——
      *   而文件删除【不可逆】。所以删之前必须先问这一句。
-     *   完整的级联逻辑与时机见 ArticleServiceImpl.remove 的中文注释。
+     *   删除流程由 ArticleWriteService.remove 编排。
      *
      * 【为什么把 cover 和 content 放在同一条 SQL 里】
      *   两者都是"这篇文章在用这个文件"的证据，分开查只是多一次数据库往返。
@@ -90,8 +90,8 @@ public interface ArticleMapper extends BaseMapper<Article> {
      *
      *   【调用频次 —— 更正一处不准确的旧说明】
      *   这里原来写着"它只在删文章时执行"，不准确。实际有两个入口：
-     *     · 删文章（ArticleServiceImpl.remove）
-     *     · 【编辑文章时移除附件】（replaceAttachments）
+     *     · 删文章（ArticleWriteService.remove）
+     *     · 【编辑文章时移除附件】（ArticleAttachmentService.replace）
      *   而每次进入本方法都会连着查另外两张表（article_attachment / music），
      *   所以"一次编辑移除 K 个附件"= 3K 次全表扫描，且全都发生在写事务里。
      *

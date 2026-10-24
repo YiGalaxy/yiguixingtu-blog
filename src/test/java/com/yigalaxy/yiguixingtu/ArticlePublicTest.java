@@ -17,6 +17,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.time.LocalDateTime;
+import java.util.List;
+
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -368,6 +371,31 @@ class ArticlePublicTest extends AbstractIntegrationTest {
                         .param("size", "999"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.size").value(50));
+    }
+
+    @Test
+    @DisplayName("分页参数应通过 MyBatis-Plus 返回指定页的数据与总数")
+    void page_shouldReturnRequestedPage() throws Exception {
+        Article first = insertArticle("分页第1篇", 1);
+        Article second = insertArticle("分页第2篇", 1);
+        Article third = insertArticle("分页第3篇", 1);
+
+        // 固定排序字段，让这个用例专门验证 ID 平局排序与 LIMIT/OFFSET。
+        articleMapper.update(null,
+                new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<Article>()
+                        .in(Article::getId, List.of(first.getId(), second.getId(), third.getId()))
+                        .set(Article::getCreateTime, LocalDateTime.of(2026, 1, 1, 0, 0)));
+
+        mockMvc.perform(get("/article/page")
+                        .param("keyword", mark)
+                        .param("page", "2")
+                        .param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.current").value(2))
+                .andExpect(jsonPath("$.data.size").value(2))
+                .andExpect(jsonPath("$.data.total").value(3))
+                .andExpect(jsonPath("$.data.records.length()").value(1))
+                .andExpect(jsonPath("$.data.records[0].id").value(first.getId().intValue()));
     }
 
     @Test

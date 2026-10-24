@@ -102,6 +102,10 @@ public class ArticleServiceImpl implements ArticleService {
         wrapper.select(Article.class, field -> !"content".equals(field.getColumn()));
 
         applySort(wrapper, query.getSortField(), query.getSortOrder());
+        // 主排序值相同时以唯一 ID 打破平局，保证分页顺序稳定。
+        if (!"id".equals(query.getSortField())) {
+            wrapper.orderByDesc(Article::getId);
+        }
 
         IPage<Article> articlePage = articleMapper.selectPage(page, wrapper);
 

@@ -10,7 +10,6 @@
         <NuxtLink class="nv" to="/"><span class="pixel-ui-icon icon-home" aria-hidden="true" />首页</NuxtLink>
         <NuxtLink class="nv" to="/articles"><span class="pixel-ui-icon icon-article" aria-hidden="true" />文章</NuxtLink>
         <NuxtLink class="nv" to="/projects"><span class="pixel-ui-icon icon-project" aria-hidden="true" />项目</NuxtLink>
-        <NuxtLink class="nv" to="/music"><span class="pixel-ui-icon icon-music" aria-hidden="true" />音乐</NuxtLink>
         <NuxtLink class="nv" to="/links"><span class="pixel-ui-icon icon-links" aria-hidden="true" />友链</NuxtLink>
         <NuxtLink class="nv" to="/favorites"><span class="pixel-ui-icon icon-favorite" aria-hidden="true" />收藏</NuxtLink>
         <NuxtLink class="nv" to="/about"><span class="pixel-ui-icon icon-about" aria-hidden="true" />关于</NuxtLink>

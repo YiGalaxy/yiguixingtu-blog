@@ -68,18 +68,6 @@
       </form>
     </section>
 
-    <section v-else-if="active === 'music'" class="admin-content">
-      <div class="section-heading"><h2>音乐</h2><button type="button" @click="newTrack">新增曲目</button></div>
-      <div class="admin-table"><div v-for="track in tracks" :key="track.id" class="admin-row"><div><strong>{{ track.title }}</strong><p>{{ track.artist || '未知艺术家' }} · {{ track.enabled ? '已启用' : '已隐藏' }}</p></div><div class="row-actions"><button class="quiet-button" type="button" @click="editTrack(track)">编辑</button><button class="quiet-button" type="button" @click="removeTrack(track.id)">删除</button></div></div><p v-if="!tracks.length" class="state">还没有曲目。</p></div>
-      <form v-if="trackEditing" class="editor" @submit.prevent="saveTrack">
-        <label>曲名<input v-model="track.title" maxlength="160" required></label><label>艺术家<input v-model="track.artist" maxlength="120"></label>
-        <label>上传音频<input type="file" accept="audio/mpeg,audio/mp4,audio/ogg,audio/wav" @change="uploadTrackAudio"></label><label>音频 URL<input v-model="track.audioUrl" maxlength="500" required></label>
-        <label>上传封面<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" @change="uploadTrackCover"></label><label>封面 URL<input v-model="track.coverUrl" maxlength="500"></label>
-        <label>歌词<textarea v-model="track.lyrics" rows="8" /></label><label class="inline-choice"><input v-model="track.enabled" type="checkbox">在音乐页显示</label>
-        <div class="editor-actions"><button type="submit">保存曲目</button><button class="quiet-button" type="button" @click="trackEditing = false">取消</button></div>
-      </form>
-    </section>
-
     <section v-else-if="active === 'about'" class="admin-content">
       <h2>关于</h2><form class="editor" @submit.prevent="saveAbout"><label>关于内容（Markdown）<textarea v-model="aboutContent" rows="16" required /></label><button type="submit">保存内容</button></form>
     </section>
@@ -107,7 +95,7 @@ const items = [
   { id: 'articles', label: '文章', group: '内容' }, { id: 'categories', label: '分类', group: '内容' },
   { id: 'tags', label: '标签', group: '内容' }, { id: 'comments', label: '评论', group: '内容' },
   { id: 'projects', label: '项目', group: '展示' }, { id: 'favorites', label: '收藏', group: '展示' },
-  { id: 'links', label: '友链', group: '展示' }, { id: 'music', label: '音乐', group: '展示' },
+  { id: 'links', label: '友链', group: '展示' },
   { id: 'about', label: '关于', group: '站点' }, { id: 'settings', label: '站点设置', group: '站点' }, { id: 'storage', label: '存储', group: '站点' },
   { id: 'overview', label: '概览', group: '概览' },
 ]
@@ -123,15 +111,11 @@ const tags = ref<Option[]>([])
 const taxonomy = ref<Array<Option & { description?: string; sort?: number }>>([])
 const comments = ref<Array<{ id: number; nickname: string; articleTitle: string; content: string }>>([])
 type SiteItem = { id: number; title: string; description?: string; primaryUrl?: string; secondaryUrl?: string; metadata?: string; sort: number }
-type Track = { id: number; title: string; artist?: string; audioUrl: string; coverUrl?: string; lyrics?: string; sort: number; enabled: boolean }
 type MediaFile = { filename: string; url: string; size: number; type: string }
 const siteItems = ref<SiteItem[]>([])
 const siteItemEditing = ref(false)
 const siteItem = reactive({ id: 0, title: '', description: '', primaryUrl: '', secondaryUrl: '', metadata: '', sort: 0 })
-const tracks = ref<Track[]>([])
 const storageFiles = ref<MediaFile[]>([])
-const trackEditing = ref(false)
-const track = reactive({ id: 0, title: '', artist: '', audioUrl: '', coverUrl: '', lyrics: '', sort: 0, enabled: true })
 const aboutContent = ref('')
 const overview = reactive({ articleCount: 0, viewCount: 0, categoryCount: 0 })
 const form = reactive({ id: 0, title: '', summary: '', content: '', cover: '', categoryId: '', status: 0, isTop: false, tagIds: [] as number[] })
@@ -160,7 +144,6 @@ const select = async (id: string) => {
     if (id === 'settings') Object.assign(settings, await call('/site-settings'))
     if (id === 'comments') comments.value = await call('/admin/comments', { query: { status: 0 } })
     if (['projects', 'favorites', 'links'].includes(id)) siteItems.value = await call(`/admin/collections/${id}`)
-    if (id === 'music') tracks.value = await call<Track[]>('/admin/music')
     if (id === 'about') aboutContent.value = (await call<{ content: string }>('/about')).content
     if (id === 'overview') Object.assign(overview, await call('/stats'))
     if (id === 'storage') storageFiles.value = await call<MediaFile[]>('/admin/uploads')
@@ -221,17 +204,6 @@ const removeSiteItem = async (id: number) => {
   if (!confirm('确定删除此项吗？')) return
   try { await call(`/admin/collections/${active.value}/${id}`, { method: 'DELETE' }); await select(active.value) } catch { message.value = '删除失败。' }
 }
-const resetTrack = () => Object.assign(track, { id: 0, title: '', artist: '', audioUrl: '', coverUrl: '', lyrics: '', sort: 0, enabled: true })
-const newTrack = () => { resetTrack(); trackEditing.value = true }
-const editTrack = (item: Track) => { Object.assign(track, item); trackEditing.value = true }
-const saveTrack = async () => {
-  try { await call(track.id ? `/admin/music/${track.id}` : '/admin/music', { method: track.id ? 'PUT' : 'POST', body: track }); trackEditing.value = false; await select('music') }
-  catch { message.value = '保存曲目失败，请检查必填内容。' }
-}
-const removeTrack = async (id: number) => {
-  if (!confirm('确定删除此曲目吗？')) return
-  try { await call(`/admin/music/${id}`, { method: 'DELETE' }); await select('music') } catch { message.value = '删除失败。' }
-}
 const saveAbout = async () => {
   try { await call('/admin/about', { method: 'PUT', body: { content: aboutContent.value } }); message.value = '关于内容已保存。' }
   catch { message.value = '保存失败。' }
@@ -254,8 +226,6 @@ const uploadMedia = async (event: Event) => {
   }
 }
 const uploadCover = async (event: Event) => { const url = await uploadMedia(event); if (url) form.cover = url }
-const uploadTrackAudio = async (event: Event) => { const url = await uploadMedia(event); if (url) track.audioUrl = url }
-const uploadTrackCover = async (event: Event) => { const url = await uploadMedia(event); if (url) track.coverUrl = url }
 const removeMedia = async (filename: string) => {
   if (!confirm('删除文件前会检查文章和站点内容引用。确定继续吗？')) return
   try { await call(`/admin/uploads/${encodeURIComponent(filename)}`, { method: 'DELETE' }); storageFiles.value = await call<MediaFile[]>('/admin/uploads') }

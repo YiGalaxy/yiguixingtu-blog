@@ -15,9 +15,8 @@
         <NuxtLink class="text-link" to="/articles">浏览全部文章 →</NuxtLink>
       </div>
       <aside class="intro-aside">
-        <p class="music-label">BLOG STATUS</p>
+        <p class="site-status-label">BLOG STATUS</p>
         <div class="home-stats" aria-label="文章统计"><div><strong>{{ siteStats.articleCount }}</strong><span>文章</span></div><div><strong>{{ siteStats.viewCount }}</strong><span>浏览</span></div><div><strong>{{ siteStats.categoryCount }}</strong><span>分类</span></div></div>
-        <NuxtLink class="music-shortcut" to="/music">♪ 前往音乐空间 →</NuxtLink>
       </aside>
     </section>
 

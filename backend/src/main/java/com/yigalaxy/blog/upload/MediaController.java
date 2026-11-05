@@ -30,7 +30,8 @@ import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 @RestController
 @RequestMapping("/api/v1")
 public class MediaController {
-    private static final Set<String> ALLOWED_EXTENSIONS = Set.of("jpg", "jpeg", "png", "gif", "webp", "mp3", "m4a", "ogg", "wav");
+    private static final Set<String> IMAGE_EXTENSIONS = Set.of("jpg", "jpeg", "png", "gif", "webp");
+    private static final Set<String> MANAGED_EXTENSIONS = Set.of("jpg", "jpeg", "png", "gif", "webp", "mp3", "m4a", "ogg", "wav");
     private static final long MAX_BYTES = 50L * 1024 * 1024;
 
     private final Path uploadDirectory;
@@ -47,7 +48,7 @@ public class MediaController {
         String original = StringUtils.cleanPath(file.getOriginalFilename() == null ? "upload" : file.getOriginalFilename());
         int dot = original.lastIndexOf('.');
         String extension = dot >= 0 ? original.substring(dot + 1).toLowerCase(Locale.ROOT) : "";
-        if (!ALLOWED_EXTENSIONS.contains(extension)) throw new IllegalArgumentException("仅支持常见图片和音频格式");
+        if (!IMAGE_EXTENSIONS.contains(extension)) throw new IllegalArgumentException("仅支持常见图片格式");
 
         Files.createDirectories(uploadDirectory);
         Path target = uploadDirectory.resolve(UUID.randomUUID() + "." + extension).normalize();
@@ -80,7 +81,7 @@ public class MediaController {
         if (!Files.isDirectory(uploadDirectory)) return List.of();
         try (var files = Files.list(uploadDirectory)) {
             return files.filter(Files::isRegularFile)
-                    .filter(path -> ALLOWED_EXTENSIONS.contains(extension(path.getFileName().toString())))
+                    .filter(path -> MANAGED_EXTENSIONS.contains(extension(path.getFileName().toString())))
                     .map(path -> new UploadedMedia(path.getFileName().toString(), mediaUrl(path.getFileName().toString()), size(path), extension(path.getFileName().toString())))
                     .sorted((left, right) -> left.filename().compareTo(right.filename()))
                     .toList();
@@ -110,13 +111,12 @@ public class MediaController {
         String token = "%" + filename + "%";
         Integer refs = jdbc.queryForObject("SELECT "
                 + "(SELECT COUNT(*) FROM article WHERE deleted = 0 AND (cover LIKE ? OR content LIKE ?)) + "
-                + "(SELECT COUNT(*) FROM music_track WHERE audio_url LIKE ? OR cover_url LIKE ?) + "
                 + "(SELECT COUNT(*) FROM project WHERE primary_url LIKE ? OR secondary_url LIKE ? OR metadata LIKE ?) + "
                 + "(SELECT COUNT(*) FROM favorite WHERE primary_url LIKE ? OR secondary_url LIKE ? OR metadata LIKE ?) + "
                 + "(SELECT COUNT(*) FROM friend_link WHERE primary_url LIKE ? OR secondary_url LIKE ? OR metadata LIKE ?) + "
                 + "(SELECT COUNT(*) FROM about_page WHERE content LIKE ?) + "
                 + "(SELECT COUNT(*) FROM site_setting WHERE announcement LIKE ?)", Integer.class,
-                token, token, token, token, token, token, token, token, token, token, token, token, token, token, token);
+                token, token, token, token, token, token, token, token, token, token, token, token, token);
         return refs != null && refs > 0;
     }
 

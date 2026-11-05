@@ -11,10 +11,12 @@ import java.nio.file.Path;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.crypto.password.PasswordEncoder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -31,10 +33,20 @@ class AdminPublishingContractTest {
     @Autowired
     private JdbcTemplate jdbc;
 
+    @Autowired
+    private PasswordEncoder passwords;
+
     private final ObjectMapper mapper = new ObjectMapper();
 
     private long articleId;
     private String uploadedFilename;
+
+    @BeforeEach
+    void createContractAdministrator() {
+        jdbc.update("DELETE FROM admin_session WHERE username = ?", USERNAME);
+        jdbc.update("DELETE FROM admin_user WHERE username = ?", USERNAME);
+        jdbc.update("INSERT INTO admin_user (username, password_hash) VALUES (?, ?)", USERNAME, passwords.encode("test-only-password"));
+    }
 
     @AfterEach
     void removeFixtures() {

@@ -22,5 +22,7 @@ class OpenApiContractTest {
         org.junit.jupiter.api.Assertions.assertEquals(200, response.statusCode());
         org.junit.jupiter.api.Assertions.assertTrue(response.body().contains("亿轨星途博客 API"));
         org.junit.jupiter.api.Assertions.assertTrue(response.body().contains("/api/v1/articles"));
+        org.junit.jupiter.api.Assertions.assertFalse(response.body().contains("/api/v1/music"));
+        org.junit.jupiter.api.Assertions.assertFalse(response.body().contains("/api/v1/admin/music"));
     }
 }

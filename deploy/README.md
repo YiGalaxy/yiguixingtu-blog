@@ -42,7 +42,7 @@ python3 production.py prepare /srv/yiguixingtu-blog/releases/v3.1.0-20261105
 python3 production.py cutover /srv/yiguixingtu-blog/releases/v3.1.0-20261105
 ```
 
-脚本停止旧后端以冻结写入并释放内存，制作 `backup-cutover` 并恢复验证，启动已构建的新镜像、等待数据库结构就绪、迁移最后快照并校验全文，再经 `nginx -t` 切换 HTTPS 流量。期间 API 会短暂不可用。公网检查失败会恢复原 Nginx 并启动旧容器。成功后停止旧前端，旧容器和旧库继续保留，`cutover-complete` 防止重复导入覆盖生产新内容。
+脚本先停止可能因中断而遗留的新容器，再停止旧后端以冻结写入并释放内存，制作 `backup-cutover` 并恢复验证。随后单独启动已构建的新后端镜像、等待数据库结构就绪、迁移最后快照并校验全文，最后启动新前端，经 `nginx -t` 切换 HTTPS 流量。期间 API 会短暂不可用。公网检查失败会先停新容器，再恢复原 Nginx 并启动旧容器。成功后停止旧前端，旧容器和旧库继续保留，`cutover-complete` 防止重复切换或导入覆盖生产新内容。
 
 生产管理员沿用旧站的 `admin` 账号和原密码；本地预览密码不适用于线上。
 

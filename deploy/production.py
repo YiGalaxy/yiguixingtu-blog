@@ -286,14 +286,20 @@ def main():
     elif args.action == 'verify':
         verify(release)
     else:
+        if (ROOT / 'cutover-complete').exists():
+            raise RuntimeError('Production has already switched; refusing a second cutover')
+        # Also recover safely from an interrupted preparation or host restart.
+        compose('stop')
         # Freeze writes and release the old JVM's memory before starting the new one.
         run(['docker', 'stop', 'yiguixingtu-prod-backend'])
         try:
             snapshot(release / 'backup-cutover')
             # The small host must not run both Java backends during startup.
-            print(compose('up', '-d', '--no-build'), flush=True)
+            print(compose('up', '-d', '--no-build', 'api'), flush=True)
             wait('http://127.0.0.1:8084/api/v1/site-settings')
             migrate(release)
+            print(compose('up', '-d', '--no-build', '--no-deps', 'web'), flush=True)
+            wait('http://127.0.0.1:3002/')
             switch(release)
         except Exception:
             compose('stop')

@@ -112,9 +112,7 @@ def prepare(release):
     (ROOT / '.env').write_text('RELEASE_TAG=' + release.name + '\n')
     (ROOT / 'uploads').mkdir(mode=0o755)
     os.chown(ROOT / 'uploads', 10001, 10001)
-    print(compose('up', '-d', '--no-build'))
-    wait('http://127.0.0.1:8084/api/v1/site-settings')
-    print('Candidate containers started using prebuilt images.', flush=True)
+    print('Backup and production configuration prepared; containers start during cutover.', flush=True)
 
 
 def migrate(release):
@@ -263,6 +261,7 @@ def switch(release):
     except Exception:
         NGINX.write_text(original)
         run(['nginx', '-t'])
+        compose('stop')
         run(['docker', 'start', 'yiguixingtu-prod-backend', 'yiguixingtu-prod-frontend'])
         run(['systemctl', 'reload', 'nginx'])
         raise
@@ -287,16 +286,20 @@ def main():
     elif args.action == 'verify':
         verify(release)
     else:
-        # Stop writes before the final snapshot, then re-run the rehearsed migration.
+        # Freeze writes and release the old JVM's memory before starting the new one.
         run(['docker', 'stop', 'yiguixingtu-prod-backend'])
         try:
             snapshot(release / 'backup-cutover')
+            # The small host must not run both Java backends during startup.
+            print(compose('up', '-d', '--no-build'), flush=True)
+            wait('http://127.0.0.1:8084/api/v1/site-settings')
             migrate(release)
             switch(release)
-            run(['docker', 'stop', 'yiguixingtu-prod-frontend'])
         except Exception:
+            compose('stop')
             run(['docker', 'start', 'yiguixingtu-prod-backend', 'yiguixingtu-prod-frontend'])
             raise
+        run(['docker', 'stop', 'yiguixingtu-prod-frontend'])
 
 
 if __name__ == '__main__':

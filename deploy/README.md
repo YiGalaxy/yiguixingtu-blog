@@ -28,22 +28,21 @@ python deploy/package-images.py
 sha256sum -c SHA256SUMS
 gzip -dc images.tar.gz | docker load
 python3 production.py prepare /srv/yiguixingtu-blog/releases/v3.1.0-20261105
-python3 production.py migrate /srv/yiguixingtu-blog/releases/v3.1.0-20261105
 ```
 
-`prepare` 完整备份旧库、上传目录、Nginx 和运行配置，并在隔离库中真实恢复验证；随后创建独立库 `yiguixingtu_blog_v3`、随机专用数据库密码和候选容器。候选端口为 3002、8084，只绑定本机。旧库和 MySQL/Redis 容器保留。生产配置权限为 600，备份目录为 700，禁止提交 Git。
+`prepare` 完整备份旧库、上传目录、Nginx 和运行配置，并在隔离库中真实恢复验证；随后创建独立库 `yiguixingtu_blog_v3` 和随机专用数据库密码。服务器内存有限，准备阶段不启动新容器，切换时先停旧后端再启动新服务。新端口为 3002、8084，只绑定本机。旧库和 MySQL/Redis 容器保留。生产配置权限为 600，备份目录为 700，禁止提交 Git。
 
 迁移保留文章 ID、全文、发布时间、草稿、删除标记、阅读数及原管理员密码摘要。评论只迁移未删除记录，普通用户和音乐不迁移。媒体转入 `/srv/yiguixingtu-blog/uploads` 持久化目录，旧媒体地址保留兼容读取。访问日志迁移近 90 天仍保留的公开路由，原始日志仍在备份和旧库中保存。
 
 ## 正式切换
 
-验收候选容器的文章、分页、图片、RSS、站点地图与 Swagger 后执行：
+在本地验收生产镜像的页面、接口和分页，备份恢复检查通过后执行：
 
 ```sh
 python3 production.py cutover /srv/yiguixingtu-blog/releases/v3.1.0-20261105
 ```
 
-脚本短暂停止旧后端以冻结写入，制作 `backup-cutover` 并恢复验证，重新迁移最后快照，再经 `nginx -t` 切换 HTTPS 流量。公网检查失败会恢复原 Nginx 并启动旧容器。成功后停止旧前端，旧容器和旧库继续保留，`cutover-complete` 防止重复导入覆盖生产新内容。
+脚本停止旧后端以冻结写入并释放内存，制作 `backup-cutover` 并恢复验证，启动已构建的新镜像、等待数据库结构就绪、迁移最后快照并校验全文，再经 `nginx -t` 切换 HTTPS 流量。期间 API 会短暂不可用。公网检查失败会恢复原 Nginx 并启动旧容器。成功后停止旧前端，旧容器和旧库继续保留，`cutover-complete` 防止重复导入覆盖生产新内容。
 
 生产管理员沿用旧站的 `admin` 账号和原密码；本地预览密码不适用于线上。
 

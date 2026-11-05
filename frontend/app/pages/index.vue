@@ -1,15 +1,20 @@
 <template>
   <main class="page home-page">
     <section class="intro">
-      <p class="eyebrow">PERSONAL JOURNAL</p>
-      <h1>记录探索，也展示作品。</h1>
-      <p class="lead">这里收录技术实践、日常思考与正在完成的项目。</p>
-      <form class="search" role="search" @submit.prevent="searchArticles">
-        <label class="sr-only" for="home-search">搜索文章</label>
-        <input id="home-search" v-model="keyword" type="search" placeholder="搜索文章标题或摘要">
-        <button type="submit">搜索文章</button>
-      </form>
-      <NuxtLink class="text-link" to="/articles">浏览全部文章 →</NuxtLink>
+      <div class="intro-copy">
+        <h1>沿着好奇心，<br><span>继续往前。</span></h1>
+        <p class="lead">亿轨星途的个人记录。写技术、做项目，也留下沿途值得回看的想法。</p>
+        <form class="search" role="search" @submit.prevent="searchArticles">
+          <label class="sr-only" for="home-search">搜索文章</label>
+          <input id="home-search" v-model="keyword" type="search" placeholder="搜索文章标题或摘要">
+          <button type="submit">查找文章</button>
+        </form>
+        <NuxtLink class="text-link" to="/articles">进入文章索引 ↗</NuxtLink>
+      </div>
+      <aside class="intro-aside">
+        <strong>ABOUT THIS JOURNAL</strong>
+        <p>记录正在学习的事，整理已经做过的事。这里的每篇文章，都是一段可以重新出发的线索。</p>
+      </aside>
     </section>
 
     <section v-if="announcement" class="announcement" aria-label="站点公告">

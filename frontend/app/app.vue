@@ -11,7 +11,7 @@
         <NuxtLink to="/favorites">收藏</NuxtLink>
         <NuxtLink to="/about">关于</NuxtLink>
       </nav>
-      <NuxtLink class="admin-link" to="/admin">管理后台</NuxtLink>
+      <NuxtLink class="admin-link" to="/login?redirect=%2Fadmin">站长入口</NuxtLink>
     </header>
     <NuxtPage />
     <footer class="site-footer">© {{ new Date().getFullYear() }} 亿轨星途 <NuxtLink to="/archive">归档</NuxtLink></footer>

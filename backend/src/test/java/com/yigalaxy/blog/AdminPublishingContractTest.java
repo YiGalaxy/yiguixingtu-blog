@@ -78,6 +78,13 @@ class AdminPublishingContractTest {
 
         var unauthorized = send(client, "/api/v1/admin/articles", null, null);
         assertEquals(401, unauthorized.statusCode());
+        assertEquals(401, send(client, "/api/v1/admin/stats/visits", null, null).statusCode());
+        assertEquals(401, send(client, "/api/v1/admin/stats/visits/ips", null, null).statusCode());
+        var analytics = send(client, "/api/v1/admin/stats/visits", null, token);
+        assertEquals(200, analytics.statusCode());
+        assertEquals(30, mapper.readTree(analytics.body()).get("daily").size());
+        assertTrue(!analytics.body().contains("\"ip\""));
+        assertEquals(400, send(client, "/api/v1/visits", "{\"path\":\"/admin\"}", null).statusCode());
 
         String draft = "{\"title\":\"" + TITLE + "\",\"content\":\"# 草稿正文\",\"status\":0,\"isTop\":false}";
         var created = send(client, "/api/v1/admin/articles", draft, token);
@@ -88,6 +95,12 @@ class AdminPublishingContractTest {
         var draftDetail = send(client, "/api/v1/admin/articles/" + articleId, null, token);
         assertEquals(200, draftDetail.statusCode());
         assertEquals(0, mapper.readTree(draftDetail.body()).get("status").asInt());
+        String encodedTitle = java.net.URLEncoder.encode(TITLE, StandardCharsets.UTF_8);
+        var adminFiltered = send(client, "/api/v1/admin/articles?status=0&size=1&keyword=" + encodedTitle, null, token);
+        assertEquals(1, mapper.readTree(adminFiltered.body()).get("total").asInt());
+        assertEquals(articleId, mapper.readTree(adminFiltered.body()).get("records").get(0).get("id").asLong());
+        var adminNext = send(client, "/api/v1/admin/articles?status=0&size=1&page=2&keyword=" + encodedTitle, null, token);
+        assertEquals(0, mapper.readTree(adminNext.body()).get("records").size());
 
         String published = "{\"title\":\"" + TITLE + "\",\"content\":\"# 正文\",\"status\":1,\"isTop\":false}";
         assertEquals(200, send(client, "/api/v1/admin/articles/" + articleId, published, token, "PUT").statusCode());
@@ -96,7 +109,7 @@ class AdminPublishingContractTest {
         assertTrue(publicPage.body().contains(TITLE));
 
         var submittedComment = send(client, "/api/v1/articles/" + articleId + "/comments",
-                "{\"nickname\":\"访客验收\",\"content\":\"待审核留言\"}", null);
+                "{\"nickname\":\"访客验收\",\"email\":\"reader@example.com\",\"content\":\"待审核留言\"}", null);
         assertEquals(201, submittedComment.statusCode());
         long commentId = mapper.readTree(submittedComment.body()).get("id").asLong();
         var hiddenComment = send(client, "/api/v1/articles/" + articleId + "/comments", null, null);
@@ -104,9 +117,11 @@ class AdminPublishingContractTest {
 
         var reviewList = send(client, "/api/v1/admin/comments?status=0", null, token);
         assertTrue(reviewList.body().contains("待审核留言"));
+        assertTrue(reviewList.body().contains("reader@example.com"));
         assertEquals(200, send(client, "/api/v1/admin/comments/" + commentId, "{\"status\":1}", token, "PUT").statusCode());
         var visibleComment = send(client, "/api/v1/articles/" + articleId + "/comments", null, null);
         assertTrue(visibleComment.body().contains("待审核留言"));
+        assertTrue(!visibleComment.body().contains("reader@example.com"));
 
         String boundary = "blog-upload-boundary";
         String multipart = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"cover.png\"\r\n"
@@ -123,6 +138,31 @@ class AdminPublishingContractTest {
         var protectedFile = send(client, "/api/v1/admin/uploads/" + uploadedFilename, null, token, "DELETE");
         assertEquals(409, protectedFile.statusCode());
         jdbc.update("UPDATE article SET content = '' WHERE id = ?", articleId);
+        assertEquals(200, send(client, "/api/v1/admin/uploads/" + uploadedFilename, null, token, "DELETE").statusCode());
+        uploadedFilename = null;
+
+        String document = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"学习说明.txt\"\r\n"
+                + "Content-Type: text/plain\r\n\r\n附件中文内容\r\n--" + boundary + "--\r\n";
+        var documentUpload = sendMultipart(client, "/api/v1/admin/attachments", document, boundary, token);
+        assertEquals(200, documentUpload.statusCode());
+        JsonNode attachment = mapper.readTree(documentUpload.body());
+        uploadedFilename = attachment.get("filename").asText();
+        String documentUrl = attachment.get("url").asText();
+        String withAttachment = "{\"title\":\"" + TITLE + "\",\"content\":\"# 正文\",\"status\":1,\"isTop\":false,"
+                + "\"attachments\":[{\"name\":\"学习说明.txt\",\"url\":\"" + documentUrl + "\",\"size\":18}]}";
+        assertEquals(200, send(client, "/api/v1/admin/articles/" + articleId, withAttachment, token, "PUT").statusCode());
+        var publicDetail = send(client, "/api/v1/articles/" + articleId, null, null);
+        assertEquals("学习说明.txt", mapper.readTree(publicDetail.body()).get("attachments").get(0).get("name").asText());
+        var editDetail = send(client, "/api/v1/admin/articles/" + articleId, null, token);
+        assertEquals(documentUrl, mapper.readTree(editDetail.body()).get("attachments").get(0).get("url").asText());
+        var download = send(client, documentUrl.replace("http://localhost:" + port, ""), null, null);
+        assertEquals(200, download.statusCode());
+        assertTrue(download.headers().firstValue("Content-Disposition").orElse("").startsWith("attachment;"));
+        assertTrue(download.body().contains("附件中文内容"));
+        assertEquals(409, send(client, "/api/v1/admin/uploads/" + uploadedFilename, null, token, "DELETE").statusCode());
+        assertEquals(400, send(client, "/api/v1/admin/articles/" + articleId,
+                withAttachment.replace(documentUrl, "javascript:alert(1)"), token, "PUT").statusCode());
+        assertEquals(200, send(client, "/api/v1/admin/articles/" + articleId, published, token, "PUT").statusCode());
         assertEquals(200, send(client, "/api/v1/admin/uploads/" + uploadedFilename, null, token, "DELETE").statusCode());
         uploadedFilename = null;
 

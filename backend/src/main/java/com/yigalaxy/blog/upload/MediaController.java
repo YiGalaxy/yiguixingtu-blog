@@ -31,7 +31,9 @@ import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 @RequestMapping("/api/v1")
 public class MediaController {
     private static final Set<String> IMAGE_EXTENSIONS = Set.of("jpg", "jpeg", "png", "gif", "webp");
-    private static final Set<String> MANAGED_EXTENSIONS = Set.of("jpg", "jpeg", "png", "gif", "webp", "mp3", "m4a", "ogg", "wav");
+    private static final Set<String> ATTACHMENT_EXTENSIONS = Set.of("pdf", "txt", "md", "zip", "7z", "rar", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv");
+    private static final Set<String> MANAGED_EXTENSIONS = java.util.stream.Stream.of(IMAGE_EXTENSIONS, ATTACHMENT_EXTENSIONS,
+            Set.of("mp3", "m4a", "ogg", "wav")).flatMap(Set::stream).collect(java.util.stream.Collectors.toUnmodifiableSet());
     private static final long MAX_BYTES = 50L * 1024 * 1024;
 
     private final Path uploadDirectory;
@@ -44,11 +46,20 @@ public class MediaController {
 
     @PostMapping("/admin/uploads")
     public UploadedMedia upload(@RequestParam("file") MultipartFile file) throws IOException {
+        return store(file, IMAGE_EXTENSIONS);
+    }
+
+    @PostMapping("/admin/attachments")
+    public UploadedMedia uploadAttachment(@RequestParam("file") MultipartFile file) throws IOException {
+        return store(file, ATTACHMENT_EXTENSIONS);
+    }
+
+    private UploadedMedia store(MultipartFile file, Set<String> extensions) throws IOException {
         if (file.isEmpty() || file.getSize() > MAX_BYTES) throw new IllegalArgumentException("文件为空或超过 50 MB");
         String original = StringUtils.cleanPath(file.getOriginalFilename() == null ? "upload" : file.getOriginalFilename());
         int dot = original.lastIndexOf('.');
         String extension = dot >= 0 ? original.substring(dot + 1).toLowerCase(Locale.ROOT) : "";
-        if (!IMAGE_EXTENSIONS.contains(extension)) throw new IllegalArgumentException("仅支持常见图片格式");
+        if (!extensions.contains(extension)) throw new IllegalArgumentException("不支持此文件格式");
 
         Files.createDirectories(uploadDirectory);
         Path target = uploadDirectory.resolve(UUID.randomUUID() + "." + extension).normalize();
@@ -80,7 +91,8 @@ public class MediaController {
                 .contentType(MediaType.parseMediaType(contentType))
                 .cacheControl(CacheControl.noCache())
                 .header("X-Content-Type-Options", "nosniff")
-                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.inline().filename(file.getFileName().toString()).build().toString())
+                .header(HttpHeaders.CONTENT_DISPOSITION, (ATTACHMENT_EXTENSIONS.contains(extension(filename))
+                        ? ContentDisposition.attachment() : ContentDisposition.inline()).filename(file.getFileName().toString()).build().toString())
                 .body(new FileSystemResource(file));
     }
 
@@ -119,12 +131,13 @@ public class MediaController {
         String token = "%" + filename + "%";
         Integer refs = jdbc.queryForObject("SELECT "
                 + "(SELECT COUNT(*) FROM article WHERE deleted = 0 AND (cover LIKE ? OR content LIKE ?)) + "
-                + "(SELECT COUNT(*) FROM project WHERE primary_url LIKE ? OR secondary_url LIKE ? OR metadata LIKE ?) + "
+                + "(SELECT COUNT(*) FROM project WHERE primary_url LIKE ? OR secondary_url LIKE ? OR metadata LIKE ? OR cover LIKE ?) + "
                 + "(SELECT COUNT(*) FROM favorite WHERE primary_url LIKE ? OR secondary_url LIKE ? OR metadata LIKE ?) + "
                 + "(SELECT COUNT(*) FROM friend_link WHERE primary_url LIKE ? OR secondary_url LIKE ? OR metadata LIKE ?) + "
-                + "(SELECT COUNT(*) FROM about_page WHERE content LIKE ?) + "
+                + "(SELECT COUNT(*) FROM about_page WHERE content LIKE ? OR avatar LIKE ?) + "
+                + "(SELECT COUNT(*) FROM article_attachment aa JOIN article a ON a.id = aa.article_id WHERE a.deleted = 0 AND aa.url LIKE ?) + "
                 + "(SELECT COUNT(*) FROM site_setting WHERE announcement LIKE ?)", Integer.class,
-                token, token, token, token, token, token, token, token, token, token, token, token, token);
+                token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token);
         return refs != null && refs > 0;
     }
 

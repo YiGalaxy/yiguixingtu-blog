@@ -50,9 +50,17 @@ public class CommentController {
         Boolean enabled = jdbc.queryForObject("SELECT comment_enabled FROM site_setting WHERE id = 1", Boolean.class);
         if (!Boolean.TRUE.equals(enabled)) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "评论功能已关闭");
         if (!limiter.allow(request.getRemoteAddr() + ":" + articleId)) throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "评论提交过于频繁，请稍后再试");
-        jdbc.update("INSERT INTO comment (article_id, nickname, content, status) VALUES (?, ?, ?, 0)",
-                articleId, form.nickname().trim(), form.content().trim());
+        jdbc.update("INSERT INTO comment (article_id, nickname, content, email, status) VALUES (?, ?, ?, ?, 0)",
+                articleId, form.nickname().trim(), form.content().trim(), form.email() == null ? null : form.email().trim());
         return new CommentReceipt(jdbc.queryForObject("SELECT LAST_INSERT_ID()", Long.class), "pending");
+    }
+
+    @GetMapping("/page")
+    public CommentPage page(@PathVariable long articleId, @RequestParam(defaultValue = "1") int page,
+                            @RequestParam(defaultValue = "10") int size) {
+        List<PublicComment> records = list(articleId, page, size);
+        Long total = jdbc.queryForObject("SELECT COUNT(*) FROM comment WHERE article_id = ? AND status = 1", Long.class, articleId);
+        return new CommentPage(records, total == null ? 0 : total);
     }
 
     private void requirePublishedArticle(long id) {
@@ -60,7 +68,9 @@ public class CommentController {
         if (count == null || count == 0) throw new ArticleNotFoundException(id);
     }
 
-    public record CommentForm(@NotBlank @Size(max = 50) String nickname, @NotBlank @Size(max = 1000) String content) { }
+    public record CommentForm(@NotBlank @Size(max = 50) String nickname, @NotBlank @Size(max = 1000) String content,
+                              @jakarta.validation.constraints.Email @Size(max = 200) String email) { }
+    public record CommentPage(List<PublicComment> records, long total) { }
     public record PublicComment(long id, String nickname, String content, String createTime) { }
     public record CommentReceipt(long id, String status) { }
 }

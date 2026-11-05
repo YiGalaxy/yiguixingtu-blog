@@ -26,10 +26,10 @@ public class AdminCommentController {
 
     @GetMapping
     public List<AdminComment> list(@RequestParam(defaultValue = "0") int status) {
-        return jdbc.query("SELECT c.id, c.article_id, a.title AS article_title, c.nickname, c.content, c.status, c.created_at "
+        return jdbc.query("SELECT c.id, c.article_id, a.title AS article_title, c.nickname, c.email, c.content, c.status, c.created_at "
                         + "FROM comment c JOIN article a ON a.id = c.article_id WHERE c.status = ? ORDER BY c.created_at ASC, c.id ASC LIMIT 200",
                 (rs, row) -> new AdminComment(rs.getLong("id"), rs.getLong("article_id"), rs.getString("article_title"),
-                        rs.getString("nickname"), rs.getString("content"), rs.getInt("status"), rs.getString("created_at")), status);
+                        rs.getString("nickname"), rs.getString("email"), rs.getString("content"), rs.getInt("status"), rs.getString("created_at")), status);
     }
 
     @PutMapping("/{id}")
@@ -44,7 +44,7 @@ public class AdminCommentController {
     }
 
     public record ReviewForm(@Min(1) @Max(2) int status) { }
-    public record AdminComment(long id, long articleId, String articleTitle, String nickname,
+    public record AdminComment(long id, long articleId, String articleTitle, String nickname, String email,
                               String content, int status, String createTime) { }
     public record CommentStatus(long id, int status) { }
 }

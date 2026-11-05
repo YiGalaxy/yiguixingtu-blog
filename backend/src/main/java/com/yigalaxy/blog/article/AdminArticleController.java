@@ -8,7 +8,9 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import com.yigalaxy.blog.article.ArticleAttachments.Attachment;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
@@ -27,23 +29,31 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/v1/admin/articles")
 public class AdminArticleController {
     private final JdbcTemplate jdbc;
+    private final ArticleAttachments attachments;
 
-    public AdminArticleController(JdbcTemplate jdbc) {
+    public AdminArticleController(JdbcTemplate jdbc, ArticleAttachments attachments) {
         this.jdbc = jdbc;
+        this.attachments = attachments;
     }
 
     @GetMapping
     public AdminArticlePage list(@RequestParam(defaultValue = "1") int page,
                                  @RequestParam(defaultValue = "20") int size,
-                                 @RequestParam(required = false) Integer status) {
+                                 @RequestParam(required = false) Integer status,
+                                 @RequestParam(required = false) String keyword,
+                                 @RequestParam(required = false) Long categoryId) {
         int currentPage = Math.max(1, page);
         int pageSize = Math.max(1, Math.min(size, 100));
-        String where = status == null ? "a.deleted = 0" : "a.deleted = 0 AND a.status = ?";
-        Object[] countArgs = status == null ? new Object[]{} : new Object[]{status};
-        Long total = jdbc.queryForObject("SELECT COUNT(*) FROM article a WHERE " + where, Long.class, countArgs);
-        Object[] pageArgs = status == null
-                ? new Object[]{(currentPage - 1) * pageSize, pageSize}
-                : new Object[]{status, (currentPage - 1) * pageSize, pageSize};
+        StringBuilder where = new StringBuilder("a.deleted = 0");
+        var args = new java.util.ArrayList<Object>();
+        if (status != null) { where.append(" AND a.status = ?"); args.add(status); }
+        if (categoryId != null) { where.append(" AND a.category_id = ?"); args.add(categoryId); }
+        if (keyword != null && !keyword.isBlank()) {
+            where.append(" AND (a.title LIKE ? OR a.summary LIKE ?)");
+            args.add("%" + keyword.trim() + "%"); args.add("%" + keyword.trim() + "%");
+        }
+        Long total = jdbc.queryForObject("SELECT COUNT(*) FROM article a WHERE " + where, Long.class, args.toArray());
+        args.add((currentPage - 1) * pageSize); args.add(pageSize);
         List<AdminArticle> records = jdbc.query(
                 "SELECT a.id, a.title, a.summary, a.category_id, c.name AS category_name, a.status, a.is_top, "
                         + "a.view_count, a.created_at, a.updated_at FROM article a "
@@ -52,7 +62,7 @@ public class AdminArticleController {
                 (rs, row) -> new AdminArticle(rs.getLong("id"), rs.getString("title"), rs.getString("summary"),
                         (Long) rs.getObject("category_id"), rs.getString("category_name"), rs.getInt("status"),
                         rs.getBoolean("is_top"), rs.getLong("view_count"), rs.getString("created_at"), rs.getString("updated_at")),
-                pageArgs);
+                args.toArray());
         return new AdminArticlePage(records, total == null ? 0 : total, currentPage, pageSize);
     }
 
@@ -62,7 +72,7 @@ public class AdminArticleController {
                 (rs, row) -> new ArticleEditForm(rs.getLong("id"), rs.getString("title"), rs.getString("summary"),
                         rs.getString("content"), rs.getString("cover"), (Long) rs.getObject("category_id"),
                         rs.getInt("status"), rs.getBoolean("is_top"), jdbc.query(
-                        "SELECT tag_id FROM article_tag WHERE article_id = ? ORDER BY tag_id", (tagRs, tagRow) -> tagRs.getLong(1), id)), id);
+                        "SELECT tag_id FROM article_tag WHERE article_id = ? ORDER BY tag_id", (tagRs, tagRow) -> tagRs.getLong(1), id), attachments.list(id)), id);
         return found.stream().findFirst().orElseThrow(() -> new ArticleNotFoundException(id));
     }
 
@@ -88,6 +98,7 @@ public class AdminArticleController {
         }, key);
         long articleId = Objects.requireNonNull(key.getKey()).longValue();
         replaceTags(articleId, form.tagIds());
+        attachments.replace(articleId, form.attachments());
         return new ArticleId(articleId);
     }
 
@@ -101,6 +112,7 @@ public class AdminArticleController {
                 form.categoryId(), form.status(), form.isTop(), id);
         if (updated == 0) throw new ArticleNotFoundException(id);
         replaceTags(id, form.tagIds());
+        attachments.replace(id, form.attachments());
         return new ArticleId(id);
     }
 
@@ -137,10 +149,12 @@ public class AdminArticleController {
 
     public record ArticleForm(@NotBlank @Size(max = 200) String title, @Size(max = 500) String summary,
                               @NotBlank String content, @Size(max = 255) String cover, Long categoryId,
-                              @Min(0) @Max(1) int status, boolean isTop, List<Long> tagIds) { }
+                              @Min(0) @Max(1) int status, boolean isTop, List<Long> tagIds,
+                              @Size(max = 20) List<@NotNull @Valid Attachment> attachments) { }
     public record ArticleId(long id) { }
     public record ArticleEditForm(long id, String title, String summary, String content, String cover,
-                                  Long categoryId, int status, boolean isTop, List<Long> tagIds) { }
+                                  Long categoryId, int status, boolean isTop, List<Long> tagIds,
+                                  List<ArticleAttachments.Attachment> attachments) { }
     public record AdminArticle(long id, String title, String summary, Long categoryId, String categoryName,
                                int status, boolean isTop, long viewCount, String createTime, String updateTime) { }
     public record AdminArticlePage(List<AdminArticle> records, long total, int page, int size) { }

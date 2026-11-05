@@ -1,0 +1,13 @@
+**/node_modules
+!frontend/.output/server/node_modules
+!frontend/.output/server/node_modules/**
+frontend/.nuxt
+backend/local-data
+backend/uploads
+.git
+output
+!output/release
+!output/release/web-runtime
+!output/release/web-runtime/**
+**/.env*
+**/production.env

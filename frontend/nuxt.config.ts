@@ -4,6 +4,7 @@ export default defineNuxtConfig({
   css: ['~/assets/css/main.css', '~/assets/css/public.css'],
   runtimeConfig: {
     siteUrl: 'http://localhost:3000',
+    apiBaseServer: '',
     public: {
       apiBase: 'http://localhost:8082/api/v1',
     },

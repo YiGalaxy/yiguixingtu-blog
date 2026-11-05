@@ -1,0 +1,39 @@
+name: yiguixingtu-blog
+services:
+  api:
+    image: yiguixingtu-blog-api:${RELEASE_TAG:?RELEASE_TAG is required}
+    container_name: yiguixingtu-blog-api
+    restart: unless-stopped
+    mem_limit: 640m
+    env_file: production.env
+    ports:
+      - 127.0.0.1:8084:8082
+    volumes:
+      - ./uploads:/app/uploads
+    networks:
+      - production
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: '3' }
+  web:
+    image: yiguixingtu-blog-web:${RELEASE_TAG:?RELEASE_TAG is required}
+    container_name: yiguixingtu-blog-web
+    restart: unless-stopped
+    mem_limit: 192m
+    environment:
+      NUXT_PUBLIC_API_BASE: /api/v1
+      NUXT_API_BASE_SERVER: http://api:8082/api/v1
+      NUXT_SITE_URL: https://www.yigalaxy.xin
+    ports:
+      - 127.0.0.1:3002:3000
+    networks:
+      - production
+    depends_on:
+      - api
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: '3' }
+networks:
+  production:
+    external: true
+    name: yiguixingtu-prod_default

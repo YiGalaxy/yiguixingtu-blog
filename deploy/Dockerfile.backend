@@ -1,0 +1,10 @@
+FROM eclipse-temurin:17-jre
+ARG REVISION
+LABEL org.opencontainers.image.revision=$REVISION
+WORKDIR /app
+RUN groupadd --gid 10001 blog && useradd --uid 10001 --gid blog --no-create-home blog
+COPY --chown=blog:blog backend/target/blog-api.jar /app/blog-api.jar
+ENV SERVER_PORT=8082 BLOG_UPLOAD_DIR=/app/uploads JAVA_TOOL_OPTIONS="-Xms64m -Xmx320m -XX:MaxMetaspaceSize=160m -XX:+ExitOnOutOfMemoryError -Duser.timezone=UTC"
+USER blog
+EXPOSE 8082
+ENTRYPOINT ["java", "-jar", "/app/blog-api.jar"]

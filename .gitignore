@@ -28,3 +28,5 @@ Thumbs.db
 *.log
 .playwright-cli/
 output/
+__pycache__/
+deploy/production.env

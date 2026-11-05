@@ -27,7 +27,7 @@ public class AdminBootstrapRunner implements ApplicationRunner {
     @Override
     public void run(ApplicationArguments args) {
         if (!StringUtils.hasText(password)) return;
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM admin_user", Integer.class);
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM admin_user WHERE username = ?", Integer.class, username);
         if (count == null || count == 0) {
             jdbc.update("INSERT INTO admin_user (username, password_hash) VALUES (?, ?)", username, passwords.encode(password));
         }

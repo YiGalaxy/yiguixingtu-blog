@@ -54,18 +54,9 @@ public class SiteController {
                 (rs, row) -> new SiteStats(rs.getLong("article_count"), rs.getLong("view_count"), rs.getLong("category_count")));
     }
 
-    @GetMapping("/archive")
-    public List<ArchiveMonth> archive() {
-        return jdbc.query("SELECT YEAR(created_at) AS year, MONTH(created_at) AS month, COUNT(*) AS count "
-                        + "FROM article WHERE status = 1 AND deleted = 0 GROUP BY YEAR(created_at), MONTH(created_at) "
-                        + "ORDER BY year DESC, month DESC",
-                (rs, row) -> new ArchiveMonth(rs.getInt("year"), rs.getInt("month"), rs.getLong("count")));
-    }
-
     public record Health(String status) { }
     public record Option(long id, String name) { }
     public record SiteSettings(String siteName, String announcement, boolean commentEnabled, int pageSize) { }
     public record AboutContent(String content, String updatedAt) { }
     public record SiteStats(long articleCount, long viewCount, long categoryCount) { }
-    public record ArchiveMonth(int year, int month, long count) { }
 }

@@ -28,7 +28,11 @@
         <label>封面地址<input v-model="form.cover" maxlength="255"></label>
         <label>分类<select v-model="form.categoryId"><option value="">未分类</option><option v-for="category in categories" :key="category.id" :value="String(category.id)">{{ category.name }}</option></select></label>
         <label>标签<select v-model="form.tagIds" multiple><option v-for="tag in tags" :key="tag.id" :value="tag.id">{{ tag.name }}</option></select></label>
-        <label>正文（Markdown）<textarea v-model="form.content" rows="14" required /></label>
+        <label>正文（Markdown）<textarea ref="articleContent" v-model="form.content" rows="14" required /></label>
+        <div class="editor-toolbar">
+          <button type="button" :disabled="imageUploading" @click="chooseArticleImage">{{ imageUploading ? '正在上传…' : '插入图片' }}</button>
+          <input ref="imageInput" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,image/gif" @change="uploadArticleImage">
+        </div>
         <div class="editor-actions"><label class="inline-choice"><input v-model="form.isTop" type="checkbox">置顶</label><button type="submit">{{ form.status ? '保存并发布' : '保存草稿' }}</button><button class="quiet-button" type="button" @click="form.status = form.status ? 0 : 1">切换为{{ form.status ? '草稿' : '发布' }}</button><button class="quiet-button" type="button" @click="editing = false">取消</button></div>
       </form>
     </section>
@@ -86,6 +90,8 @@
 </template>
 
 <script setup lang="ts">
+import { insertMarkdownImage } from '~/utils/articleEditor'
+
 type Option = { id: number; name: string }
 type ArticleRow = { id: number; title: string; categoryName?: string; status: number }
 const config = useRuntimeConfig()
@@ -120,6 +126,10 @@ const aboutContent = ref('')
 const overview = reactive({ articleCount: 0, viewCount: 0, categoryCount: 0 })
 const form = reactive({ id: 0, title: '', summary: '', content: '', cover: '', categoryId: '', status: 0, isTop: false, tagIds: [] as number[] })
 const settings = reactive({ siteName: '亿轨星途', announcement: '', pageSize: 12, commentEnabled: true })
+const articleContent = ref<HTMLTextAreaElement | null>(null)
+const imageInput = ref<HTMLInputElement | null>(null)
+const imageUploading = ref(false)
+const imageSelection = ref({ start: 0, end: 0 })
 
 const call = <T>(path: string, options: Record<string, unknown> = {}) => $fetch<T>(path, {
   baseURL: config.public.apiBase,
@@ -226,6 +236,29 @@ const uploadMedia = async (event: Event) => {
   }
 }
 const uploadCover = async (event: Event) => { const url = await uploadMedia(event); if (url) form.cover = url }
+const chooseArticleImage = () => {
+  const textarea = articleContent.value
+  imageSelection.value = textarea
+    ? { start: textarea.selectionStart, end: textarea.selectionEnd }
+    : { start: form.content.length, end: form.content.length }
+  imageInput.value?.click()
+}
+const uploadArticleImage = async (event: Event) => {
+  imageUploading.value = true
+  try {
+    const url = await uploadMedia(event)
+    if (!url) return
+    const markdown = `![图片](${url})`
+    const result = insertMarkdownImage(form.content, markdown, imageSelection.value.start, imageSelection.value.end)
+    form.content = result.content
+    message.value = '图片已插入正文。'
+    await nextTick()
+    articleContent.value?.focus()
+    articleContent.value?.setSelectionRange(result.cursor, result.cursor)
+  } finally {
+    imageUploading.value = false
+  }
+}
 const removeMedia = async (filename: string) => {
   if (!confirm('删除文件前会检查文章和站点内容引用。确定继续吗？')) return
   try { await call(`/admin/uploads/${encodeURIComponent(filename)}`, { method: 'DELETE' }); storageFiles.value = await call<MediaFile[]>('/admin/uploads') }

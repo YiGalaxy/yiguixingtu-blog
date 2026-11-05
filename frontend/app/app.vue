@@ -20,7 +20,7 @@
       </div>
     </header>
     <NuxtPage />
-    <footer class="site-footer">© {{ new Date().getFullYear() }} 亿轨星途 <NuxtLink to="/archive">归档</NuxtLink></footer>
+    <footer class="site-footer">© {{ new Date().getFullYear() }} 亿轨星途</footer>
   </div>
 </template>
 

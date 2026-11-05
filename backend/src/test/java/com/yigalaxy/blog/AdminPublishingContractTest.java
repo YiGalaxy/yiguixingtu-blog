@@ -46,6 +46,8 @@ class AdminPublishingContractTest {
         jdbc.update("DELETE FROM admin_session WHERE username = ?", USERNAME);
         jdbc.update("DELETE FROM admin_user WHERE username = ?", USERNAME);
         jdbc.update("INSERT INTO admin_user (username, password_hash) VALUES (?, ?)", USERNAME, passwords.encode("test-only-password"));
+        jdbc.update("DELETE FROM admin_user WHERE username = ?", "extra-admin");
+        jdbc.update("INSERT INTO admin_user (username, password_hash) VALUES (?, ?)", "extra-admin", passwords.encode("extra-password"));
     }
 
     @AfterEach
@@ -60,6 +62,8 @@ class AdminPublishingContractTest {
         }
         jdbc.update("DELETE FROM admin_session WHERE username = ?", USERNAME);
         jdbc.update("DELETE FROM admin_user WHERE username = ?", USERNAME);
+        jdbc.update("DELETE FROM admin_session WHERE username = ?", "extra-admin");
+        jdbc.update("DELETE FROM admin_user WHERE username = ?", "extra-admin");
     }
 
     @Test
@@ -69,6 +73,8 @@ class AdminPublishingContractTest {
                 "{\"username\":\"" + USERNAME + "\",\"password\":\"test-only-password\"}", null);
         assertEquals(200, login.statusCode());
         String token = mapper.readTree(login.body()).get("token").asText();
+        assertEquals(401, send(client, "/api/v1/auth/login",
+                "{\"username\":\"extra-admin\",\"password\":\"extra-password\"}", null).statusCode());
 
         var unauthorized = send(client, "/api/v1/admin/articles", null, null);
         assertEquals(401, unauthorized.statusCode());

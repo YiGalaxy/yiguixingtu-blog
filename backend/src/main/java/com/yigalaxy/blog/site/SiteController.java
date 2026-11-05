@@ -23,27 +23,24 @@ public class SiteController {
 
     @GetMapping("/categories")
     public List<Option> categories() {
-        return jdbc.query("SELECT id, name FROM category ORDER BY sort, name",
+        return jdbc.query("SELECT id, name FROM category ORDER BY sort, id",
                 (rs, row) -> new Option(rs.getLong("id"), rs.getString("name")));
     }
 
     @GetMapping("/tags")
     public List<Option> tags() {
-        return jdbc.query("SELECT id, name FROM tag ORDER BY sort, name",
+        return jdbc.query("SELECT id, name FROM tag ORDER BY sort, id",
                 (rs, row) -> new Option(rs.getLong("id"), rs.getString("name")));
     }
 
     @GetMapping("/site-settings")
     public SiteSettings settings() {
-        return jdbc.queryForObject("SELECT site_name, announcement, comment_enabled, page_size FROM site_setting WHERE id = 1",
-                (rs, row) -> new SiteSettings(rs.getString("site_name"), rs.getString("announcement"),
-                        rs.getBoolean("comment_enabled"), rs.getInt("page_size")));
+        return jdbc.queryForObject("SELECT * FROM site_setting WHERE id = 1", SiteController::mapSettings);
     }
 
     @GetMapping("/about")
     public AboutContent about() {
-        return jdbc.queryForObject("SELECT content, updated_at FROM about_page WHERE id = 1",
-                (rs, row) -> new AboutContent(rs.getString("content"), rs.getString("updated_at")));
+        return jdbc.queryForObject("SELECT * FROM about_page WHERE id = 1", SiteController::mapAbout);
     }
 
     @GetMapping("/stats")
@@ -56,7 +53,18 @@ public class SiteController {
 
     public record Health(String status) { }
     public record Option(long id, String name) { }
-    public record SiteSettings(String siteName, String announcement, boolean commentEnabled, int pageSize) { }
-    public record AboutContent(String content, String updatedAt) { }
+    static SiteSettings mapSettings(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
+        return new SiteSettings(rs.getString("site_name"), rs.getString("announcement"),
+                rs.getBoolean("comment_enabled"), rs.getInt("page_size"), rs.getString("notice_text"),
+                rs.getString("copyright"), rs.getString("icp_number"), rs.getString("police_number"));
+    }
+    static AboutContent mapAbout(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
+        return new AboutContent(rs.getString("content"), rs.getString("updated_at"), rs.getString("nickname"),
+                rs.getString("avatar"), rs.getString("email"), rs.getString("github"), rs.getString("wechat"), rs.getString("qq"));
+    }
+    public record SiteSettings(String siteName, String announcement, boolean commentEnabled, int pageSize,
+                               String noticeText, String copyright, String icpNumber, String policeNumber) { }
+    public record AboutContent(String content, String updatedAt, String nickname, String avatar,
+                               String email, String github, String wechat, String qq) { }
     public record SiteStats(long articleCount, long viewCount, long categoryCount) { }
 }

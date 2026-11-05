@@ -31,9 +31,9 @@ public class SiteCollectionController {
     @GetMapping("/{kind:projects|favorites|links}")
     public List<SiteItem> list(@PathVariable String kind) {
         String table = table(kind);
-        return jdbc.query("SELECT id, title, description, primary_url, secondary_url, metadata, sort FROM " + table + " ORDER BY sort, id",
+        return jdbc.query("SELECT id, title, description, primary_url, secondary_url, metadata, sort, " + (table.equals("project") ? "cover" : "NULL AS cover") + " FROM " + table + " ORDER BY sort, id",
                 (rs, row) -> new SiteItem(rs.getLong("id"), rs.getString("title"), rs.getString("description"),
-                        rs.getString("primary_url"), rs.getString("secondary_url"), rs.getString("metadata"), rs.getInt("sort")));
+                        rs.getString("primary_url"), rs.getString("secondary_url"), rs.getString("metadata"), rs.getInt("sort"), rs.getString("cover")));
     }
 
     @GetMapping("/admin/collections/{kind:projects|favorites|links}")
@@ -42,21 +42,24 @@ public class SiteCollectionController {
     @PostMapping("/admin/collections/{kind:projects|favorites|links}")
     @Transactional
     public SiteItem create(@PathVariable String kind, @Valid @RequestBody SiteItemForm form) {
-        validateUrls(form);
+        validateUrls(kind, form);
         String table = table(kind);
         jdbc.update("INSERT INTO " + table + " (title, description, primary_url, secondary_url, metadata, sort) VALUES (?, ?, ?, ?, ?, ?)",
                 form.title().trim(), clean(form.description()), clean(form.primaryUrl()), clean(form.secondaryUrl()), clean(form.metadata()), form.sort());
+        if (kind.equals("projects")) jdbc.update("UPDATE project SET cover = ? WHERE id = LAST_INSERT_ID()", clean(form.cover()));
         Long id = jdbc.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
         return find(table, id);
     }
 
     @PutMapping("/admin/collections/{kind:projects|favorites|links}/{id}")
+    @Transactional
     public SiteItem update(@PathVariable String kind, @PathVariable long id, @Valid @RequestBody SiteItemForm form) {
-        validateUrls(form);
+        validateUrls(kind, form);
         String table = table(kind);
         if (jdbc.update("UPDATE " + table + " SET title = ?, description = ?, primary_url = ?, secondary_url = ?, metadata = ?, sort = ? WHERE id = ?",
                 form.title().trim(), clean(form.description()), clean(form.primaryUrl()), clean(form.secondaryUrl()), clean(form.metadata()), form.sort(), id) == 0)
             throw new SiteItemNotFoundException(id);
+        if (kind.equals("projects")) jdbc.update("UPDATE project SET cover = ? WHERE id = ?", clean(form.cover()), id);
         return find(table, id);
     }
 
@@ -66,9 +69,9 @@ public class SiteCollectionController {
     }
 
     private SiteItem find(String table, long id) {
-        return jdbc.queryForObject("SELECT id, title, description, primary_url, secondary_url, metadata, sort FROM " + table + " WHERE id = ?",
+        return jdbc.queryForObject("SELECT id, title, description, primary_url, secondary_url, metadata, sort, " + (table.equals("project") ? "cover" : "NULL AS cover") + " FROM " + table + " WHERE id = ?",
                 (rs, row) -> new SiteItem(rs.getLong("id"), rs.getString("title"), rs.getString("description"),
-                        rs.getString("primary_url"), rs.getString("secondary_url"), rs.getString("metadata"), rs.getInt("sort")), id);
+                        rs.getString("primary_url"), rs.getString("secondary_url"), rs.getString("metadata"), rs.getInt("sort"), rs.getString("cover")), id);
     }
 
     private static String table(String kind) {
@@ -77,9 +80,10 @@ public class SiteCollectionController {
         return table;
     }
 
-    private static void validateUrls(SiteItemForm form) {
+    private static void validateUrls(String kind, SiteItemForm form) {
         validateUrl(form.primaryUrl());
-        validateUrl(form.secondaryUrl());
+        if (!kind.equals("favorites")) validateUrl(form.secondaryUrl());
+        validateUrl(form.cover());
     }
 
     private static void validateUrl(String value) {
@@ -91,8 +95,8 @@ public class SiteCollectionController {
     private static String clean(String value) { return value == null || value.isBlank() ? null : value.trim(); }
 
     public record SiteItem(long id, String title, String description, String primaryUrl,
-                           String secondaryUrl, String metadata, int sort) { }
+                           String secondaryUrl, String metadata, int sort, String cover) { }
     public record SiteItemForm(@NotBlank @Size(max = 120) String title, @Size(max = 1000) String description,
                                @Size(max = 500) String primaryUrl, @Size(max = 500) String secondaryUrl,
-                               @Size(max = 1000) String metadata, int sort) { }
+                               @Size(max = 1000) String metadata, int sort, @Size(max = 500) String cover) { }
 }

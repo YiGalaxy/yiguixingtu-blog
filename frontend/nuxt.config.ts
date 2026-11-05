@@ -1,7 +1,7 @@
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: false },
-  css: ['~/assets/css/main.css'],
+  css: ['~/assets/css/main.css', '~/assets/css/public.css'],
   runtimeConfig: {
     siteUrl: 'http://localhost:3000',
     public: {

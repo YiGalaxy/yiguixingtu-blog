@@ -22,11 +22,11 @@ public class AdminSettingsController {
 
     @PutMapping
     public SiteController.SiteSettings update(@Valid @RequestBody SettingsForm form) {
-        jdbc.update("UPDATE site_setting SET site_name = ?, announcement = ?, comment_enabled = ?, page_size = ? WHERE id = 1",
-                form.siteName().trim(), clean(form.announcement()), form.commentEnabled(), form.pageSize());
-        return jdbc.queryForObject("SELECT site_name, announcement, comment_enabled, page_size FROM site_setting WHERE id = 1",
-                (rs, row) -> new SiteController.SiteSettings(rs.getString("site_name"), rs.getString("announcement"),
-                        rs.getBoolean("comment_enabled"), rs.getInt("page_size")));
+        jdbc.update("UPDATE site_setting SET site_name = ?, announcement = ?, comment_enabled = ?, page_size = ?, "
+                        + "notice_text = ?, copyright = ?, icp_number = ?, police_number = ? WHERE id = 1",
+                form.siteName().trim(), clean(form.announcement()), form.commentEnabled(), form.pageSize(),
+                clean(form.noticeText()), clean(form.copyright()), clean(form.icpNumber()), clean(form.policeNumber()));
+        return jdbc.queryForObject("SELECT * FROM site_setting WHERE id = 1", SiteController::mapSettings);
     }
 
     private static String clean(String value) {
@@ -36,5 +36,7 @@ public class AdminSettingsController {
     public record SettingsForm(@NotBlank @Size(max = 100) String siteName,
                                @Size(max = 500) String announcement,
                                boolean commentEnabled,
-                               @Min(1) @Max(50) int pageSize) { }
+                               @Min(1) @Max(50) int pageSize,
+                               @Size(max = 500) String noticeText, @Size(max = 200) String copyright,
+                               @Size(max = 100) String icpNumber, @Size(max = 100) String policeNumber) { }
 }

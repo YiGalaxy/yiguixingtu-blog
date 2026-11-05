@@ -309,6 +309,9 @@ def main():
             run(['docker', 'start', 'yiguixingtu-prod-backend', 'yiguixingtu-prod-frontend'])
             raise
         run(['docker', 'stop', 'yiguixingtu-prod-frontend'])
+        # Compose may reuse containers whose restart policy was changed during recovery.
+        run(['docker', 'update', '--restart=unless-stopped', 'yiguixingtu-blog-api', 'yiguixingtu-blog-web'])
+        run(['docker', 'update', '--restart=no', 'yiguixingtu-prod-backend', 'yiguixingtu-prod-frontend'])
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 {
   "name": "@yiguixingtu/blog-web",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,11 +11,15 @@
     "postinstall": "nuxt prepare"
   },
   "dependencies": {
+    "markdown-it": "^15.0.3",
     "nuxt": "^4.5.2",
+    "sanitize-html": "^2.18.1",
     "vue": "^3.5.42"
   },
   "devDependencies": {
     "@nuxt/test-utils": "^4.3.2",
+    "@types/markdown-it": "^14.2.0",
+    "@types/sanitize-html": "^2.16.2",
     "@vue/test-utils": "^2.5.0",
     "happy-dom": "^20.14.3",
     "vitest": "^5.0.0"

@@ -32,6 +32,7 @@
         </NuxtLink>
       </div>
     </section>
+    <section class="home-stats" aria-label="文章统计"><span>文章 {{ siteStats.articleCount }}</span><span>浏览 {{ siteStats.viewCount }}</span><span>分类 {{ siteStats.categoryCount }}</span></section>
   </main>
 </template>
 
@@ -53,6 +54,8 @@ const { data, pending } = await useFetch<{ records: ArticleSummary[] }>(`${confi
 const articles = computed(() => data.value?.records ?? [])
 const { data: siteSettings } = await useFetch<{ announcement?: string }>(`${config.public.apiBase}/site-settings`)
 const announcement = computed(() => siteSettings.value?.announcement?.trim() ?? '')
+const { data: stats } = await useFetch<{ articleCount: number; viewCount: number; categoryCount: number }>(`${config.public.apiBase}/stats`)
+const siteStats = computed(() => stats.value ?? { articleCount: 0, viewCount: 0, categoryCount: 0 })
 
 type ArticleSummary = { id: number; title: string; categoryName?: string; createTime?: string }
 const searchArticles = () => router.push({ path: '/articles', query: normalizeArticleQuery({ keyword: keyword.value }) })

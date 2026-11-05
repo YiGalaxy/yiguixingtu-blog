@@ -32,6 +32,11 @@
         <time>{{ formatDate(article.createTime) }}</time>
       </NuxtLink>
     </div>
+    <nav v-if="total > size" class="pagination" aria-label="文章分页">
+      <button class="quiet-button" type="button" :disabled="page <= 1" @click="changePage(page - 1)">上一页</button>
+      <span>{{ page }} / {{ pageCount }} · 共 {{ total }} 篇</span>
+      <button class="quiet-button" type="button" :disabled="page >= pageCount" @click="changePage(page + 1)">下一页</button>
+    </nav>
   </main>
 </template>
 
@@ -44,20 +49,38 @@ const config = useRuntimeConfig()
 const keyword = ref(typeof route.query.keyword === 'string' ? route.query.keyword : '')
 const categoryId = ref(typeof route.query.categoryId === 'string' ? route.query.categoryId : '')
 const tagId = ref(typeof route.query.tagId === 'string' ? route.query.tagId : '')
-const filters = computed(() => ({ keyword: keyword.value.trim() || undefined, categoryId: categoryId.value || undefined, tagId: tagId.value || undefined }))
+const year = ref(typeof route.query.year === 'string' ? route.query.year : '')
+const month = ref(typeof route.query.month === 'string' ? route.query.month : '')
+const page = ref(Math.max(1, Number(route.query.page) || 1))
+const size = ref(12)
+const filters = computed(() => ({ keyword: keyword.value.trim() || undefined, categoryId: categoryId.value || undefined, tagId: tagId.value || undefined, year: year.value || undefined, month: month.value || undefined }))
 const isFiltered = computed(() => Object.values(filters.value).some(Boolean))
-const { data, pending, refresh } = await useFetch<{ records: Article[] }>(`${config.public.apiBase}/articles`, { query: filters })
+const { data: siteSettings } = await useFetch<{ pageSize: number }>(`${config.public.apiBase}/site-settings`)
+size.value = Math.min(50, Math.max(1, siteSettings.value?.pageSize ?? 12))
+const { data, pending, refresh } = await useFetch<{ records: Article[]; total: number }>(`${config.public.apiBase}/articles`, { query: computed(() => ({ ...filters.value, page: page.value, size: size.value })) })
 const articles = computed(() => data.value?.records ?? [])
+const total = computed(() => data.value?.total ?? 0)
+const pageCount = computed(() => Math.max(1, Math.ceil(total.value / size.value)))
 const { data: categoriesData } = await useFetch<Option[]>(`${config.public.apiBase}/categories`)
 const { data: tagsData } = await useFetch<Option[]>(`${config.public.apiBase}/tags`)
 const categories = computed(() => categoriesData.value ?? [])
 const tags = computed(() => tagsData.value ?? [])
+watch(() => route.query, (query) => {
+  keyword.value = typeof query.keyword === 'string' ? query.keyword : ''
+  categoryId.value = typeof query.categoryId === 'string' ? query.categoryId : ''
+  tagId.value = typeof query.tagId === 'string' ? query.tagId : ''
+  year.value = typeof query.year === 'string' ? query.year : ''
+  month.value = typeof query.month === 'string' ? query.month : ''
+  page.value = Math.max(1, Number(query.page) || 1)
+}, { deep: true })
 
 const syncFilters = async () => {
-  await router.replace({ path: '/articles', query: Object.fromEntries(Object.entries(filters.value).filter(([, value]) => value)) })
+  const query = Object.fromEntries(Object.entries({ ...filters.value, ...(page.value > 1 ? { page: String(page.value) } : {}) }).filter(([, value]) => value))
+  await router.replace({ path: '/articles', query })
   await refresh()
 }
-const applySearch = () => syncFilters()
-const clearFilters = () => { keyword.value = ''; categoryId.value = ''; tagId.value = ''; return syncFilters() }
+const applySearch = () => { page.value = 1; return syncFilters() }
+const clearFilters = () => { keyword.value = ''; categoryId.value = ''; tagId.value = ''; year.value = ''; month.value = ''; page.value = 1; return syncFilters() }
+const changePage = (value: number) => { page.value = value; return syncFilters() }
 const formatDate = (value?: string) => value ? new Intl.DateTimeFormat('zh-CN').format(new Date(value)) : ''
 </script>

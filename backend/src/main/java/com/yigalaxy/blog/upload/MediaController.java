@@ -65,9 +65,17 @@ public class MediaController {
     public ResponseEntity<FileSystemResource> read(@PathVariable String filename) throws IOException {
         Path file = resolve(filename);
         if (!Files.isRegularFile(file)) return ResponseEntity.notFound().build();
-        String contentType = Files.probeContentType(file);
-        if (contentType == null) contentType = filename.toLowerCase(Locale.ROOT).matches(".*\\.(mp3|m4a|ogg|wav)$")
-                ? "audio/mpeg" : "application/octet-stream";
+        String contentType = switch (extension(filename)) {
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "png" -> "image/png";
+            case "gif" -> "image/gif";
+            case "webp" -> "image/webp";
+            case "mp3" -> "audio/mpeg";
+            case "m4a" -> "audio/mp4";
+            case "ogg" -> "audio/ogg";
+            case "wav" -> "audio/wav";
+            default -> "application/octet-stream";
+        };
         return ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType(contentType))
                 .cacheControl(CacheControl.noCache())

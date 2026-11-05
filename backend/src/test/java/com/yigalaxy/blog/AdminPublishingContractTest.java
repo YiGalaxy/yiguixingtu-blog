@@ -118,6 +118,7 @@ class AdminPublishingContractTest {
         String mediaUrl = media.get("url").asText();
         var mediaResponse = send(client, mediaUrl.replace("http://localhost:" + port, ""), null, null);
         assertEquals(200, mediaResponse.statusCode());
+        assertEquals("image/png", mediaResponse.headers().firstValue("Content-Type").orElse(""));
         jdbc.update("UPDATE article SET content = ? WHERE id = ?", mediaUrl, articleId);
         var protectedFile = send(client, "/api/v1/admin/uploads/" + uploadedFilename, null, token, "DELETE");
         assertEquals(409, protectedFile.statusCode());

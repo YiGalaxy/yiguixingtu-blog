@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.yigalaxy.blog</groupId>
     <artifactId>blog-api</artifactId>
-    <version>3.0.0</version>
+    <version>3.0.1</version>
     <name>亿轨星途博客 API</name>
     <description>亿轨星途个人博客 API 服务</description>
     <properties>

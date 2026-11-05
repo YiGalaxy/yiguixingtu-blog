@@ -36,6 +36,7 @@ class ArticleQueryContractTest {
     @AfterEach
     void cleanFixtures() {
         if (articleId > 0) jdbc.update("DELETE FROM article_tag WHERE article_id = ?", articleId);
+        if (articleId > 0) jdbc.update("DELETE FROM comment WHERE article_id = ?", articleId);
         if (articleId > 0) jdbc.update("DELETE FROM article WHERE id = ?", articleId);
         if (draftArticleId > 0) jdbc.update("DELETE FROM article WHERE id = ?", draftArticleId);
         if (tagId > 0) jdbc.update("DELETE FROM tag WHERE id = ?", tagId);
@@ -49,6 +50,7 @@ class ArticleQueryContractTest {
         articleId = insertId("INSERT INTO article (title, summary, content, category_id, status) VALUES (?, ?, ?, ?, 1)",
                 "Nuxt 搜索验收", "公开摘要", "正文", categoryId);
         jdbc.update("INSERT INTO article_tag (article_id, tag_id) VALUES (?, ?)", articleId, tagId);
+        jdbc.update("UPDATE article SET cover = ?, view_count = 17, is_top = 1 WHERE id = ?", "https://example.com/cover.png", articleId);
         draftArticleId = insertId("INSERT INTO article (title, content, status) VALUES (?, ?, 0)", "Nuxt 草稿", "隐藏正文");
 
         String query = "keyword=" + URLEncoder.encode("Nuxt", StandardCharsets.UTF_8)
@@ -64,6 +66,21 @@ class ArticleQueryContractTest {
         assertTrue(response.body().contains("集成测试分类"));
         assertTrue(!response.body().contains("Nuxt 草稿"));
         assertTrue(response.body().contains("\"total\":1"));
+        assertTrue(response.body().contains("https://example.com/cover.png"));
+        assertTrue(response.body().contains("\"viewCount\":17"));
+        assertTrue(response.body().contains("集成测试标签"));
+        var detail = HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/v1/articles/" + articleId)).GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertTrue(detail.body().contains("\"content\":\"正文\""));
+        assertTrue(detail.body().contains("\"isTop\":1"));
+        assertTrue(detail.body().contains("集成测试标签"));
+        for (int i = 0; i < 11; i++) jdbc.update("INSERT INTO comment (article_id, nickname, content, email, status) VALUES (?, ?, ?, ?, 1)", articleId, "读者", "留言" + i, "private@example.com");
+        jdbc.update("INSERT INTO comment (article_id, nickname, content, status) VALUES (?, ?, ?, 0)", articleId, "待审核", "不能公开");
+        var comments = HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/v1/articles/" + articleId + "/comments/page?page=2&size=10")).GET().build(), HttpResponse.BodyHandlers.ofString());
+        var body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(comments.body());
+        assertEquals(11, body.get("total").asInt());
+        assertEquals(1, body.get("records").size());
+        assertTrue(!comments.body().contains("private@example.com"));
+        assertTrue(!comments.body().contains("不能公开"));
     }
 
     private long insertId(String sql, Object... values) {

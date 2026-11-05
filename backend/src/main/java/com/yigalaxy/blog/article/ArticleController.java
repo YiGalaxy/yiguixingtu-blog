@@ -57,9 +57,12 @@ public class ArticleController {
             Integer year,
             Integer month) { }
 
-    public record ArticleSummary(long id, String title, String summary, String categoryName, String createTime) { }
+    public record ArticleTag(long id, String name) { }
+    public record ArticleSummary(long id, String title, String summary, String categoryName, String createTime,
+                                 String cover, long viewCount, List<ArticleTag> tags) { }
     public record ArticleDetail(long id, String title, String summary, String content, String cover,
                                 Long categoryId, String categoryName, long viewCount,
-                                String createTime, String updateTime) { }
+                                String createTime, String updateTime, List<ArticleTag> tags, int isTop,
+                                List<ArticleAttachments.Attachment> attachments) { }
     public record ViewReceipt(boolean recorded) { }
 }

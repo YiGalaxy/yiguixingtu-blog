@@ -2,18 +2,22 @@
   <main class="page home-page">
     <section class="intro">
       <div class="intro-copy">
-        <h1>沿着好奇心，<br><span>继续往前。</span></h1>
-        <p class="lead">亿轨星途的个人记录。写技术、做项目，也留下沿途值得回看的想法。</p>
+        <div class="profile-heading">
+          <img class="profile-avatar" src="/assets/avatar-catgirl-pixel.png" alt="像素风站长头像">
+          <div><p class="eyebrow">PERSONAL BLOG</p><h1>亿轨星途</h1><p class="lead">在代码与星轨之间，慢慢画自己的图。</p></div>
+        </div>
         <form class="search" role="search" @submit.prevent="searchArticles">
           <label class="sr-only" for="home-search">搜索文章</label>
-          <input id="home-search" v-model="keyword" type="search" placeholder="搜索文章标题或摘要">
-          <button type="submit">查找文章</button>
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input id="home-search" v-model="keyword" type="search" placeholder="输入关键词搜索标题 / 摘要">
+          <button type="submit">搜索</button>
         </form>
-        <NuxtLink class="text-link" to="/articles">进入文章索引 ↗</NuxtLink>
+        <NuxtLink class="text-link" to="/articles">浏览全部文章 →</NuxtLink>
       </div>
       <aside class="intro-aside">
-        <strong>ABOUT THIS JOURNAL</strong>
-        <p>记录正在学习的事，整理已经做过的事。这里的每篇文章，都是一段可以重新出发的线索。</p>
+        <p class="music-label">BLOG STATUS</p>
+        <div class="home-stats" aria-label="文章统计"><div><strong>{{ siteStats.articleCount }}</strong><span>文章</span></div><div><strong>{{ siteStats.viewCount }}</strong><span>浏览</span></div><div><strong>{{ siteStats.categoryCount }}</strong><span>分类</span></div></div>
+        <NuxtLink class="music-shortcut" to="/music">♪ 前往音乐空间 →</NuxtLink>
       </aside>
     </section>
 
@@ -37,7 +41,6 @@
         </NuxtLink>
       </div>
     </section>
-    <section class="home-stats" aria-label="文章统计"><span>文章 {{ siteStats.articleCount }}</span><span>浏览 {{ siteStats.viewCount }}</span><span>分类 {{ siteStats.categoryCount }}</span></section>
   </main>
 </template>
 

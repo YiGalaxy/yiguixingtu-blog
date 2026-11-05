@@ -15,6 +15,7 @@ frontend/coverage/
 backend/target/
 backend/logs/
 backend/uploads/
+backend/local-data/
 
 # IDE and OS
 .idea/

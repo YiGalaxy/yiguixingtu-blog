@@ -142,7 +142,7 @@ def migrate(release):
     statements += [
         f'INSERT INTO category (id,name,description,sort,created_at,updated_at) SELECT id,name,description,sort,create_time,update_time FROM {src}.category WHERE deleted=0',
         f'INSERT INTO tag (id,name,sort,created_at) SELECT id,name,sort,create_time FROM {src}.tag',
-        f'INSERT INTO article (id,title,summary,content,cover,category_id,status,view_count,is_top,created_at,updated_at,deleted) SELECT id,title,summary,content,cover,category_id,status,view_count,is_top,create_time,update_time,deleted FROM {src}.article',
+        f"INSERT INTO article (id,title,summary,content,cover,category_id,status,view_count,is_top,created_at,updated_at,deleted) SELECT id,title,summary,COALESCE(content,''),cover,category_id,status,view_count,is_top,create_time,update_time,deleted FROM {src}.article",
         f'INSERT INTO article_tag (article_id,tag_id) SELECT article_id,tag_id FROM {src}.article_tag',
         f'INSERT INTO article_attachment (id,article_id,name,url,size,sort) SELECT id,article_id,name,url,size,0 FROM {src}.article_attachment',
         f"INSERT INTO comment (id,article_id,nickname,email,content,status,created_at) SELECT c.id,c.article_id,COALESCE(NULLIF(c.nickname,''),NULLIF(u.nickname,''),u.username,'游客'),c.email,c.content,c.status,c.create_time FROM {src}.comment c LEFT JOIN {src}.user u ON u.id=c.user_id WHERE c.deleted=0",
@@ -197,7 +197,7 @@ def verify(release):
     media_map_file = release / 'media-map.json'
     mapping = json.loads(media_map_file.read_text()) if media_map_file.exists() else {}
     for row in rows(f"SELECT JSON_OBJECT('id',n.id,'content',n.content,'original',o.content,'cover',n.cover,'deleted',n.deleted) FROM `{TARGET_DB}`.article n JOIN `{SOURCE_DB}`.article o ON o.id=n.id;"):
-        expected = row['original']
+        expected = row['original'] or ''
         for relative, target in mapping.items():
             for prefix in [PUBLIC + '/api/uploads/', 'http://www.yigalaxy.xin/api/uploads/', 'https://yigalaxy.xin/api/uploads/', '/api/uploads/', PUBLIC + '/uploads/', '/uploads/']:
                 expected = expected.replace(prefix + relative, target)
@@ -293,7 +293,10 @@ def main():
         # Freeze writes and release the old JVM's memory before starting the new one.
         run(['docker', 'stop', 'yiguixingtu-prod-backend'])
         try:
-            snapshot(release / 'backup-cutover')
+            backup = release / 'backup-cutover'
+            if backup.exists():
+                backup = release / ('backup-cutover-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()))
+            snapshot(backup)
             # The small host must not run both Java backends during startup.
             print(compose('up', '-d', '--no-build', 'api'), flush=True)
             wait('http://127.0.0.1:8084/api/v1/site-settings')

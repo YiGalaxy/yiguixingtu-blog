@@ -48,7 +48,7 @@ python3 production.py cutover /srv/yiguixingtu-blog/releases/v3.1.0-20261105
 
 ## 回滚与后续备份
 
-切换前备份路径为发布目录下的 `backup-initial` 和 `backup-cutover`；`database.sql.gz`、`uploads.tar.gz` 以及 `sha256.json` 可用于恢复。将备份下载到本地受保护目录，禁止提交 Git。
+切换前备份路径为发布目录下的 `backup-initial` 和 `backup-cutover`；重试时追加 UTC 时间创建新的切换备份，保留已有备份。`database.sql.gz`、`uploads.tar.gz` 以及 `sha256.json` 可用于恢复。将备份下载到本地受保护目录，禁止提交 Git。旧库中的 NULL 正文按空字符串导入，并按同一规则校验全文。
 
 立即回滚可先停止新 API、备份新库和新上传目录，再启动 `yiguixingtu-prod-backend`、`yiguixingtu-prod-frontend`，将 `backup-cutover/nginx.conf` 恢复至 `/etc/nginx/sites-available/yiguixingtu.conf`，执行 `nginx -t` 和 `systemctl reload nginx`。旧库不包含切换后的新编辑，回滚前应保存并核对这些记录。新旧数据库禁止相互覆盖。
 

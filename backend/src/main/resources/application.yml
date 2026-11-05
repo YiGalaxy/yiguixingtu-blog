@@ -7,6 +7,8 @@ blog:
     password: ${BLOG_ADMIN_PASSWORD:}
     session-hours: ${BLOG_ADMIN_SESSION_HOURS:12}
   upload-dir: ${BLOG_UPLOAD_DIR:./uploads}
+  cors:
+    allowed-origins: "${BLOG_CORS_ALLOWED_ORIGINS:http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001}"
 
 spring:
   application:

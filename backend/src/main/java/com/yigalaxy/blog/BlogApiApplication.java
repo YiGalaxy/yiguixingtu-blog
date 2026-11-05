@@ -1,7 +1,10 @@
 package com.yigalaxy.blog;
 
+import java.util.List;
+
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.info.Info;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
@@ -30,13 +33,14 @@ public class BlogApiApplication {
     }
 
     @Bean
-    WebMvcConfigurer localFrontendCors() {
+    WebMvcConfigurer localFrontendCors(@Value("${blog.cors.allowed-origins}") List<String> allowedOrigins) {
         return new WebMvcConfigurer() {
             @Override
             public void addCorsMappings(CorsRegistry registry) {
                 registry.addMapping("/api/**")
-                        .allowedOrigins("http://localhost:3000", "http://127.0.0.1:3000")
-                        .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS");
+                        .allowedOrigins(allowedOrigins.toArray(String[]::new))
+                        .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+                        .allowedHeaders("Authorization", "Content-Type");
             }
         };
     }

@@ -24,6 +24,7 @@ class ArticleQueryContractTest {
 
     private final JdbcTemplate jdbc;
     private long articleId;
+    private long draftArticleId;
     private long tagId;
     private long categoryId;
 
@@ -36,6 +37,7 @@ class ArticleQueryContractTest {
     void cleanFixtures() {
         if (articleId > 0) jdbc.update("DELETE FROM article_tag WHERE article_id = ?", articleId);
         if (articleId > 0) jdbc.update("DELETE FROM article WHERE id = ?", articleId);
+        if (draftArticleId > 0) jdbc.update("DELETE FROM article WHERE id = ?", draftArticleId);
         if (tagId > 0) jdbc.update("DELETE FROM tag WHERE id = ?", tagId);
         if (categoryId > 0) jdbc.update("DELETE FROM category WHERE id = ?", categoryId);
     }
@@ -47,14 +49,17 @@ class ArticleQueryContractTest {
         articleId = insertId("INSERT INTO article (title, summary, content, category_id, status) VALUES (?, ?, ?, ?, 1)",
                 "Nuxt 搜索验收", "公开摘要", "正文", categoryId);
         jdbc.update("INSERT INTO article_tag (article_id, tag_id) VALUES (?, ?)", articleId, tagId);
-        jdbc.update("INSERT INTO article (title, content, status) VALUES (?, ?, 0)", "Nuxt 草稿", "隐藏正文");
+        draftArticleId = insertId("INSERT INTO article (title, content, status) VALUES (?, ?, 0)", "Nuxt 草稿", "隐藏正文");
 
         String query = "keyword=" + URLEncoder.encode("Nuxt", StandardCharsets.UTF_8)
                 + "&categoryId=" + categoryId + "&tagId=" + tagId;
-        var request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/v1/articles?" + query)).GET().build();
+        var request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/v1/articles?" + query))
+                .header("Origin", "http://localhost:3001")
+                .GET().build();
         var response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
 
         assertEquals(200, response.statusCode());
+        assertEquals("http://localhost:3001", response.headers().firstValue("Access-Control-Allow-Origin").orElse(""));
         assertTrue(response.body().contains("Nuxt 搜索验收"));
         assertTrue(response.body().contains("集成测试分类"));
         assertTrue(!response.body().contains("Nuxt 草稿"));

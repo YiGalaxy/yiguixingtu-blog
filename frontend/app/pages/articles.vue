@@ -57,7 +57,7 @@ const filters = computed(() => ({ keyword: keyword.value.trim() || undefined, ca
 const isFiltered = computed(() => Object.values(filters.value).some(Boolean))
 const { data: siteSettings } = await useFetch<{ pageSize: number }>(`${config.public.apiBase}/site-settings`)
 size.value = Math.min(50, Math.max(1, siteSettings.value?.pageSize ?? 12))
-const { data, pending, refresh } = await useFetch<{ records: Article[]; total: number }>(`${config.public.apiBase}/articles`, { query: computed(() => ({ ...filters.value, page: page.value, size: size.value })) })
+const { data, pending } = await useFetch<{ records: Article[]; total: number }>(`${config.public.apiBase}/articles`, { query: computed(() => ({ ...filters.value, page: page.value, size: size.value })) })
 const articles = computed(() => data.value?.records ?? [])
 const total = computed(() => data.value?.total ?? 0)
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / size.value)))
@@ -77,7 +77,6 @@ watch(() => route.query, (query) => {
 const syncFilters = async () => {
   const query = Object.fromEntries(Object.entries({ ...filters.value, ...(page.value > 1 ? { page: String(page.value) } : {}) }).filter(([, value]) => value))
   await router.replace({ path: '/articles', query })
-  await refresh()
 }
 const applySearch = () => { page.value = 1; return syncFilters() }
 const clearFilters = () => { keyword.value = ''; categoryId.value = ''; tagId.value = ''; year.value = ''; month.value = ''; page.value = 1; return syncFilters() }

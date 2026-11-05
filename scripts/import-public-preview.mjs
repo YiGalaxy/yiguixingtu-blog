@@ -149,7 +149,7 @@ async function main() {
   statements.push(`UPDATE site_setting SET site_name = ${sql(settings.siteName || '亿轨星途')}, announcement = ${sql(announcement)}, comment_enabled = ${sql(settings.commentEnabled)}, page_size = ${sql(settings.pageSize || 12)} WHERE id = 1`)
   statements.push('COMMIT')
 
-  run('docker', ['exec', '-i', dbContainer, 'mysql', '-ublog', '-pblog-local-password', dbName], { input: `${statements.join(';\n')};\n` })
+  run('docker', ['exec', '-i', dbContainer, 'mysql', '--default-character-set=utf8mb4', '-ublog', '-pblog-local-password', dbName], { input: `${statements.join(';\n')};\n` })
   console.log(JSON.stringify({ articles: published.length, categories: categories.length, tags: tags.length, projects: listOf(projects).length, favorites: listOf(favorites).length, links: listOf(links).length, images: imageUrls.size, databaseBackup: backupPath }, null, 2))
 }
 

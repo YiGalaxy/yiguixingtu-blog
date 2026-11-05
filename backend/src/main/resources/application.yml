@@ -2,11 +2,29 @@ server:
   port: ${SERVER_PORT:8082}
 
 blog:
-  announcement: ${BLOG_ANNOUNCEMENT:}
+  admin:
+    username: ${BLOG_ADMIN_USERNAME:admin}
+    password: ${BLOG_ADMIN_PASSWORD:}
+    session-hours: ${BLOG_ADMIN_SESSION_HOURS:12}
+  upload-dir: ${BLOG_UPLOAD_DIR:./uploads}
 
 spring:
   application:
     name: yiguixingtu-blog-api
+  datasource:
+    url: ${DATABASE_URL:jdbc:mysql://localhost:3311/yiguixingtu_blog?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${DATABASE_USERNAME:blog}
+    password: ${DATABASE_PASSWORD:blog-local-password}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
 
 springdoc:
   swagger-ui:
